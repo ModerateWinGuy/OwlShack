@@ -33,6 +33,9 @@ type groupRequest struct {
 	timestamp             uint32
 }
 
+// A busy channel must not grow the map without bound; past this the reply goes out without waiting.
+const maxPendingReplies = 256
+
 type pendingReply struct {
 	pattern    *regexp.Regexp
 	deadline   time.Time
@@ -70,12 +73,15 @@ func (t *ChannelTrigger) Start(ctx context.Context, callback Callback) error {
 	t.ctx = ctx
 	t.callback = callback
 	t.pending = make(map[groupRequest]*pendingReply)
+	if t.stopContext != nil {
+		t.stopContext()
+	}
 	t.stopContext = context.AfterFunc(ctx, func() { t.Stop() })
 	t.mu.Unlock()
 	return nil
 }
 
-// Stop cancels pending replies and waits for any committed callback to finish.
+// Stop cancels pending replies; a reply already handed to the callback is not recalled.
 func (t *ChannelTrigger) Stop() error {
 	t.mu.Lock()
 	t.callback = nil
@@ -111,10 +117,19 @@ func (t *ChannelTrigger) HandleGroupText(pkt *meshcore.Packet) {
 }
 
 func (t *ChannelTrigger) handleGroupText(msg *meshcore.GroupTextPayload, ch *meshcore.ChannelEntry, pkt *meshcore.Packet) {
+	if cb, evt, send := t.armReply(msg, ch, pkt); send {
+		cb(evt)
+	}
+}
+
+// armReply records suppressions and decides whether this message is answered now, later or never.
+// The callback is returned rather than called so the node's dispatch goroutine never waits on this
+// lock while another goroutine is inside a send.
+func (t *ChannelTrigger) armReply(msg *meshcore.GroupTextPayload, ch *meshcore.ChannelEntry, pkt *meshcore.Packet) (Callback, Event, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.callback == nil || t.ctx.Err() != nil {
-		return
+		return nil, Event{}, false
 	}
 
 	t.log.Log(context.Background(), logging.LevelTrace, "group message received",
@@ -125,13 +140,13 @@ func (t *ChannelTrigger) handleGroupText(msg *meshcore.GroupTextPayload, ch *mes
 	if msg.Sender == t.botName {
 		t.log.Log(context.Background(), logging.LevelTrace, "own message, skipping trigger",
 			"channel", ch.Name)
-		return
+		return nil, Event{}, false
 	}
 
 	if t.channels != nil && !t.channels[ch.Name] {
 		t.log.Log(context.Background(), logging.LevelTrace, "channel not matched, skipping",
 			"received", ch.Name, "listening", t.channelNames())
-		return
+		return nil, Event{}, false
 	}
 
 	now := time.Now()
@@ -146,7 +161,7 @@ func (t *ChannelTrigger) handleGroupText(msg *meshcore.GroupTextPayload, ch *mes
 	if captures == nil {
 		t.log.Log(context.Background(), logging.LevelTrace, "no pattern matched",
 			"channel", ch.Name, "text", msg.Text, "patterns", t.patternStrings())
-		return
+		return nil, Event{}, false
 	}
 
 	t.log.Log(context.Background(), logging.LevelTrace, "trigger matched", "captures", captures)
@@ -169,39 +184,47 @@ func (t *ChannelTrigger) handleGroupText(msg *meshcore.GroupTextPayload, ch *mes
 		},
 	}
 	if t.cfg.FailoverPattern == "" {
-		t.callback(evt)
-		return
+		return t.callback, evt, true
 	}
 	key := groupRequest{ch.Name, msg.Sender, msg.Text, msg.Timestamp}
 	if _, exists := t.pending[key]; exists {
-		return
+		return nil, Event{}, false
 	}
-	if len(t.pending) >= 256 {
-		t.log.Warn("failover pending limit reached", "channel", ch.Name)
-		return
+	// Failover is an optimisation, not a gate: waiting must never be the reason a bot says nothing.
+	if len(t.pending) >= maxPendingReplies {
+		t.log.Warn("failover pending limit reached, replying now", "channel", ch.Name, "limit", maxPendingReplies)
+		return t.callback, evt, true
 	}
 	pattern, err := t.cfg.FailoverRegexp(msg.Sender)
 	if err != nil {
-		t.log.Error("failover pattern error", "error", err)
-		return
+		t.log.Error("failover pattern error, replying now", "sender", msg.Sender, "error", err)
+		return t.callback, evt, true
 	}
 	wait := time.Duration(t.cfg.FailoverTimeout) * time.Second
 	pending := &pendingReply{pattern: pattern, deadline: now.Add(wait)}
 	t.pending[key] = pending
 	pending.timer = time.AfterFunc(time.Until(pending.deadline), func() {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		if t.pending[key] != pending {
-			return
+		if cb := t.expireReply(key, pending); cb != nil {
+			cb(evt)
 		}
-		delete(t.pending, key)
-		if pending.suppressed || t.callback == nil || t.ctx.Err() != nil {
-			return
-		}
-		t.log.Debug("failover deadline expired, replying", "channel", key.channel, "sender", key.sender)
-		t.callback(evt)
 	})
 	t.log.Debug("waiting for failover response", "channel", ch.Name, "sender", msg.Sender, "wait", wait)
+	return nil, Event{}, false
+}
+
+// expireReply retires a pending request at its deadline, returning the callback when nobody answered.
+func (t *ChannelTrigger) expireReply(key groupRequest, pending *pendingReply) Callback {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.pending[key] != pending {
+		return nil
+	}
+	delete(t.pending, key)
+	if pending.suppressed || t.ctx.Err() != nil {
+		return nil
+	}
+	t.log.Debug("failover deadline expired, replying", "channel", key.channel, "sender", key.sender)
+	return t.callback
 }
 
 func (t *ChannelTrigger) matchesAny(text string) map[string]string {

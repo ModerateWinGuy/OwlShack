@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -16,6 +17,11 @@ const responsePattern = `^@\[{{.Sender | reQuote}}\].+`
 
 func testChannelTrigger(t *testing.T, ctx context.Context, pattern string, fired chan Event) *ChannelTrigger {
 	t.Helper()
+	return startChannelTrigger(t, ctx, pattern, func(e Event) { fired <- e })
+}
+
+func startChannelTrigger(t *testing.T, ctx context.Context, pattern string, cb Callback) *ChannelTrigger {
+	t.Helper()
 	patterns := []string{`(?i)^wlg$`}
 	tr, err := NewChannelTrigger("backup", config.TriggerConfig{
 		Match: &patterns, FailoverPattern: pattern, FailoverTimeout: 10,
@@ -23,10 +29,41 @@ func testChannelTrigger(t *testing.T, ctx context.Context, pattern string, fired
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tr.Start(ctx, func(e Event) { fired <- e }); err != nil {
+	if err := tr.Start(ctx, cb); err != nil {
 		t.Fatal(err)
 	}
 	return tr
+}
+
+// The callback must run with the trigger lock released. Holding it across a send would park the
+// node's single dispatch goroutine in handleGroupText, stalling every other packet the companion
+// is handling — not just this bot's.
+func TestChannelCallbackRunsUnlocked(t *testing.T) {
+	for _, pattern := range []string{"", responsePattern} {
+		synctest.Test(t, func(t *testing.T) {
+			held := make(chan bool, 4)
+			var tr *ChannelTrigger
+			tr = startChannelTrigger(t, context.Background(), pattern, func(Event) {
+				if free := tr.mu.TryLock(); free {
+					tr.mu.Unlock()
+				} else {
+					held <- true
+					return
+				}
+				held <- false
+			})
+			defer tr.Stop()
+			receiveGroup(tr, "testing", "Alice", "wlg")
+			time.Sleep(11 * time.Second)
+			synctest.Wait()
+			if len(held) != 1 {
+				t.Fatalf("callbacks = %d, want 1", len(held))
+			}
+			if <-held {
+				t.Fatal("callback ran with the trigger lock held")
+			}
+		})
+	}
 }
 
 func receiveGroup(tr *ChannelTrigger, channel, sender, text string) {
@@ -151,6 +188,8 @@ func TestChannelFailoverLifecycle(t *testing.T) {
 	}
 }
 
+// Waiting is an optimisation, so a sender whose name breaks the rendered pattern still gets an
+// answer — and gets it now, not at a deadline no timer was ever armed for.
 func TestChannelImmediateReplyAndRuntimePatternError(t *testing.T) {
 	for _, pattern := range []string{"", `{{.Sender}}`} {
 		synctest.Test(t, func(t *testing.T) {
@@ -158,18 +197,36 @@ func TestChannelImmediateReplyAndRuntimePatternError(t *testing.T) {
 			tr := testChannelTrigger(t, context.Background(), pattern, fired)
 			defer tr.Stop()
 			receiveGroup(tr, "testing", "[", "wlg")
-			want := 0
-			if pattern == "" {
-				want = 1
-			}
-			if len(fired) != want {
-				t.Fatalf("immediate replies = %d, want %d", len(fired), want)
+			if len(fired) != 1 {
+				t.Fatalf("immediate replies = %d, want 1", len(fired))
 			}
 			time.Sleep(10 * time.Second)
 			synctest.Wait()
-			if len(fired) != want {
-				t.Fatal("invalid pattern caused fallback reply")
+			if len(fired) != 1 {
+				t.Fatalf("replies after the wait = %d, want the one already sent", len(fired))
 			}
 		})
 	}
+}
+
+// A full pending map must not mute the bot: the request that cannot be tracked is answered at once.
+func TestChannelFailoverPendingLimitRepliesNow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fired := make(chan Event, 2*maxPendingReplies)
+		tr := testChannelTrigger(t, context.Background(), responsePattern, fired)
+		defer tr.Stop()
+		for i := range maxPendingReplies {
+			receiveGroup(tr, "testing", fmt.Sprintf("sender%d", i), "wlg")
+		}
+		if len(fired) != 0 {
+			t.Fatalf("%d replies before any deadline", len(fired))
+		}
+		receiveGroup(tr, "testing", "overflow", "wlg")
+		if len(fired) != 1 {
+			t.Fatalf("replies past the pending limit = %d, want 1", len(fired))
+		}
+		if e := <-fired; e.Data["Sender"] != "overflow" {
+			t.Fatalf("wrong request answered: %+v", e.Data)
+		}
+	})
 }

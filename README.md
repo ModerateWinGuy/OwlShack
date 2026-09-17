@@ -376,7 +376,7 @@ pattern is a Go template with the original request's `.Sender`; `reQuote`
 escapes regex characters in that name. Brackets around the mention must be
 escaped separately, as above. Invalid patterns are rejected when saving;
 a pattern that becomes invalid for a particular sender is logged and that
-request is skipped.
+request is answered immediately.
 
 Only an accepted response heard on the same channel during the wait cancels
 the reply; messages from this companion or the original requester do not.
@@ -384,7 +384,8 @@ The response need not match the request pattern. Expiry uses local elapsed
 time and the reply retains the original request's template data. Retry settings
 apply after sending. Duplicate requests keep the original deadline; pending
 replies are cleared on bot edits, restart or shutdown. Each trigger holds at
-most 256 pending requests and logs when additional requests are skipped.
+most 256 pending requests; past that a request is logged and answered
+immediately rather than dropped.
 
 Any other sender matching the pattern can suppress a reply, and a broad pattern
 can suppress multiple pending requests from the same name. Use staggered waits

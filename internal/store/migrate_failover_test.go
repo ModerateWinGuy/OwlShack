@@ -54,6 +54,7 @@ func TestStore_UpgradeFailoverAndOpenHop(t *testing.T) {
 				if err := st.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 					t.Fatal(err)
 				}
+				// Bump alongside TestStore_MigrateUserVersion whenever a migration is appended.
 				if version != 16 {
 					t.Fatalf("schema version = %d, want 16", version)
 				}
