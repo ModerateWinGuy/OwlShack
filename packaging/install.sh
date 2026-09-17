@@ -53,5 +53,7 @@ case "$ADDR" in
   *)  echo ">> Installed, but the service has not logged a listen address yet." ;;
 esac
 echo "   systemctl status owlshack        service state"
-echo "   journalctl -u owlshack -f        logs"
+# sudo, not bare: reading the journal needs root or membership of adm/systemd-journal, and an
+# unprivileged systemctl status drops the log lines from its output without saying so.
+echo "   sudo journalctl -u owlshack -f   logs"
 echo "   /etc/default/owlshack            PORT, HOST, TZ, extra flags"
