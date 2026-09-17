@@ -5,6 +5,87 @@ top until tagged.
 
 ## Unreleased
 
+## v1.4.0 — 2026-09-18
+
+Six candidates' worth of work since v1.3.1, which is the version most people are upgrading from.
+The headline is transports and bots: a third radio backend — **openHop Modem firmware**, over the
+network or USB — alongside MeshCore KISS and a bare SX126x on SPI; **RSS/Atom and CAP feed
+triggers**; **DM triggers** with a policy deciding who may talk to a companion; **failover replies**
+so a backup bot does not talk over the primary; **Debian packages** with a systemd unit for people
+who do not want Docker; and **`GET /api/health`** for external monitoring. Underneath: repeater
+admin that recovers from a stale route instead of going unreachable for good, ack waits computed
+from airtime rather than one flat timeout, and two MQTT status fields corrected to carry what the
+firmware says they carry.
+
+The two gaps named in every candidate since rc.2 are now one. A feed trigger has transmitted from
+real hardware: on an openHop modem over USB, with an SX1262 on SPI listening, the first poll primed
+against an existing backlog without firing, a new item went out and was heard by the other node,
+and a burst of eight was clamped to five with the other three never reaching the air — the two
+behaviours that are invisible when they work. **The room keep-alive fix from rc.1 has still never
+run against a live room server**, so that one behaviour ships unverified on air.
+
+On packaging, rc.5's "no ARM build has executed anywhere" no longer holds: the arm64 binary has run
+here, on a Pi 4, for the radio work above. **The armhf package is still the untested one** — it is
+built for ARMv6 and the guard that proves it now reads the recorded `GOARM`, but no ARMv6 machine
+has executed it. Treat the first Pi Zero install as the test.
+
+Baseline `v1.3.1` · schema `user_version` 11 → 16 · `meshcore-go` v1.5.0 · Go 1.26+
+
+### Upgrading
+
+- **Coming from v1.3.0 or earlier? You are also taking v1.3.1, which is a security fix.** A
+  repeater created through OwlShack had no admin password, and a blank one compared equal to the
+  blank a login carries, so any node in radio range could log in as admin — change settings, lock
+  the operator out, read the access list, run CLI commands. The migration sets a blank password to
+  `password`, the firmware's own default, which closes the hole without inventing a secret you
+  could not guess: **change it** on the Repeater page or with `password <new>`. Creating a repeater
+  now requires an admin password, so `POST /api/config/repeater` rejects a blank one. Your schema
+  range is `user_version` 10 → 16, not 11 → 16. Full detail under v1.3.1 below.
+- **The database migrates itself** on first start, 11 through 16 from v1.3.1 (10 through 16 from
+  v1.3.0). No manual SQL, and no step needs a downgrade path because none rewrites existing rows
+  except the repeater-password one above.
+- **`recv_errors` changes meaning on MQTT and `packet_parse_errors` is new.** A dashboard keyed on
+  `recv_errors` will see OwlShack nodes drop, usually a long way, because a radio-driver failure is
+  far rarer than a malformed packet. Nothing errors and no key disappears; read `client_version` to
+  tell the versions apart. Full detail under rc.1.
+- **Companion URLs are now `/companions/<id>-<slug>`.** Old bookmarks pointing at a bare name will
+  not resolve. The change is what stops a URL breaking when a companion is renamed.
+- **A web listen address that cannot be bound is now fatal.** A node whose port was already taken
+  used to keep running with a live radio and no web UI, reporting `active` the whole time. It now
+  exits, which is louder and is the point — but a host that got away with a clashing port will now
+  fail to start.
+- **The Debian package listens on 8860**, not 8080. The binary and the Docker image are unchanged;
+  this applies only to installs from the `.deb`.
+
+### Added
+
+Rolled up; each candidate's section below carries the detail.
+
+- **openHop Modem as a third radio backend** (rc.6, plus serial verified here) — `openhop://host:port`
+  or `openhop:///dev/tty…`. The firmware owns the radio and does its own channel-activity detection.
+  Its access token is a `modemToken` setting treated as a password, never returned by a config read.
+- **Failover replies for group bots** (new since rc.6, contributed by @Darkfish in #52) — a bot waits
+  a configurable 1–3600 seconds and stays quiet if another sender answers the request first.
+- **RSS/Atom and CAP feed triggers** (rc.2) — poll a feed and broadcast new items to channels, to
+  contacts, or both. First poll primes rather than replaying a backlog; one poll sends at most five.
+- **DM triggers and `dmPolicy`** (rc.1) — bots that answer direct messages, and a per-companion
+  policy for who is allowed to send them.
+- **Debian packages and a one-line installer** (rc.5) — amd64, arm64, armhf and i386, with a systemd
+  unit, a dedicated user and `/etc/default/owlshack`.
+- **`GET /api/health`** (rc.2) — a monitoring endpoint for Uptime Kuma and similar.
+
+### Fixed
+
+- **The installer told you to read the journal without `sudo`.** `journalctl -u owlshack` prints
+  only a permissions notice for a user outside `adm`/`systemd-journal`, and an unprivileged
+  `systemctl status` drops the recent log lines from its output without saying so, which reads as a
+  service that is running and quiet. The hint now says `sudo journalctl -u owlshack -f`.
+
+Everything else fixed since v1.3.1 is itemised under the candidates below: MQTT counter semantics
+and the KISS firmware counters that were never polled (rc.1), repeater admin against stale routes
+and airtime-based ack waits (rc.1), a dozen console defects (rc.2–rc.4), and the three the openHop
+work surfaced in code that was already wrong (rc.6).
+
 ## v1.4.0-rc.6 — 2026-09-17
 
 rc.5 plus a third radio backend: **openHop Modem firmware**, over the network or USB, alongside
@@ -36,7 +117,9 @@ Baseline `v1.3.1` · schema `user_version` 15
   through the full backoff schedule with re-authentication. Listen-before-talk was exercised by
   lowering the modem's CAD threshold until a quiet channel reads busy — both the host retry loop and
   the modem's own `ERR_CHANNEL_BUSY` refusal behave. **openHop over serial is untested**: no such
-  hardware here.
+  hardware here. **Correction (v1.4.0):** serial has since been verified on a Seeed XIAO Wio SX1262 —
+  handshake, radio configuration, receive with SNR and RSSI, and transmit. Serial clients are not
+  asked for a token, so `modemToken` stays a network-only concern.
 - **`modemToken` setting.** The openHop access token, stored in its own column and treated as a
   password: reads return `modemTokenSet` and never the value, a write omits it to keep the stored
   one, and the UI field is masked and write-only. It is deliberately not part of the connection
