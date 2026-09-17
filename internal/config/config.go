@@ -76,7 +76,8 @@ func (cl *ChannelList) UnmarshalYAML(value *yaml.Node) error {
 type Config struct {
 	LogLevel *string `json:"logLevel" yaml:"logLevel" toml:"logLevel"`
 
-	// ConnectionType is "kiss" (firmware over serial/TCP) or "spi" (bare SX12xx); empty means kiss.
+	// ConnectionType labels the backend for the UI: "kiss", "openhop" or "spi". It is derived from
+	// Connection on every write, never read to choose a driver.
 	ConnectionType *string `json:"connectionType,omitempty" yaml:"connectionType,omitempty" toml:"connectionType,omitempty"`
 
 	// SPIBoard names the hat when Connection is spi://, selected from modem.Boards() rather than by pin.
@@ -99,6 +100,10 @@ type Config struct {
 	ListenAddr *string `json:"listenAddr" yaml:"listenAddr" toml:"listenAddr"`
 	// https://carto.com/basemaps/apikey/
 	MapTileKey *string `json:"mapTileKey" yaml:"mapTileKey" toml:"mapTileKey"`
+
+	// ModemToken authenticates this host to an openHop modem over the network. A password: it is
+	// stored on its own rather than inside Connection, which config reads return in full.
+	ModemToken *string `json:"modemToken,omitempty" yaml:"modemToken,omitempty" toml:"modemToken,omitempty"`
 
 	// PERCENTAGE, as the firmware's `set dutycycle` takes it; the library's inverted airtime factor is derived in AirtimeFactorOr. nil = 50%.
 	DutyCycle *float64 `json:"dutyCycle,omitempty" yaml:"dutyCycle,omitempty" toml:"dutyCycle,omitempty"`

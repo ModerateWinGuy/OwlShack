@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { useParams } from "react-router-dom";
+import { useCompanionRef } from "@/hooks/useCompanions";
 import { Hash, Plus, Radio } from "lucide-react";
 import { toast } from "sonner";
 import { BackLink } from "@/components/BackLink";
@@ -13,8 +14,8 @@ import { AddChannelDialog, type Channel } from "@/components/AddChannelDialog";
 import { postChannel } from "@/lib/channelsApi";
 
 export function ChannelsPage() {
-  const { name } = useParams();
-  const companion = decodeURIComponent(name ?? "");
+  const { ref } = useParams();
+  const { ref: companion, name: companionName } = useCompanionRef(ref);
 
   const {
     items: channels,
@@ -74,7 +75,7 @@ export function ChannelsPage() {
       <div className="flex flex-col gap-3">
         <BackLink
           to={`/companions/${encodeURIComponent(companion)}`}
-          label={companion || "companion"}
+          label={companionName || "companion"}
         />
 
         <PageHeader

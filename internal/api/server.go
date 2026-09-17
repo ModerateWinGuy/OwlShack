@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/meshcore-go/OwlShack/internal/store"
 )
@@ -19,6 +20,7 @@ func init() {
 }
 
 type CompanionInfo struct {
+	ID        int64         `json:"id"`
 	Name      string        `json:"name"`
 	PubKey    string        `json:"pubkey"`
 	PeerCount int           `json:"peerCount"`
@@ -73,17 +75,20 @@ type Server struct {
 	poller    NodePoller
 	sigTester SignalTester
 
+	startedAt time.Time
+
 	mu      sync.RWMutex
 	backend Backend
 }
 
 func NewServer(st *store.Store, assets fs.FS, log *slog.Logger) *Server {
 	s := &Server{
-		store:  st,
-		hub:    NewHub(),
-		mux:    http.NewServeMux(),
-		log:    log,
-		assets: assets,
+		store:     st,
+		hub:       NewHub(),
+		mux:       http.NewServeMux(),
+		log:       log,
+		assets:    assets,
+		startedAt: time.Now(),
 	}
 	s.routes()
 	return s
@@ -112,6 +117,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/spi/boards", s.handleSPIBoards)
 	s.mux.HandleFunc("GET /api/serial/ports", s.handleSerialPorts)
 	s.mux.HandleFunc("GET /api/radio/status", s.handleRadioStatus)
+	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/radio/reset", s.handleRadioReset)
 
 	s.mux.HandleFunc("POST /api/backup", s.handleBackupExport)
@@ -217,7 +223,7 @@ func (s *Server) routes() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.mux.ServeHTTP(w, s.resolveCompanionRef(r))
 }
 
 func (s *Server) Hub() *Hub {

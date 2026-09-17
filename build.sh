@@ -35,7 +35,8 @@ popd >/dev/null
 sed -i "s/__BUILD_VERSION__/${VERSION}/" web/frontend/dist/sw.js
 
 # No spaces: the linker splits -ldflags on whitespace.
-BUILD_DATE="$(date -u +%Y-%m-%d)"
+# Mirrors the firmware's own build.sh, local clock included, so a ver reply reads the same beside a real node.
+BUILD_DATE="$(date '+%d-%b-%Y')"
 echo ">> Building backend -> ${OUTPUT} (version ${VERSION}, built ${BUILD_DATE})"
 go mod download
 CGO_ENABLED=0 go build \

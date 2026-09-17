@@ -43,7 +43,8 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 	if sess == nil || sess.sharedSecret == nil {
 		return fmt.Errorf("not logged in to this room")
 	}
-	routeType, pathLen := routeForPeer(peer)
+	outPath, hashSize := rm.learnedRoute(peerIdentity.PublicKey(), peer)
+	routeType, _ := routeForPeer(outPath, hashSize)
 	if routeType != meshcore.RouteTypeDirect {
 		return fmt.Errorf("no direct route to the room yet — it ignores flooded keep-alives; log in (flood) to learn one")
 	}
@@ -70,12 +71,8 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 	if err != nil {
 		return fmt.Errorf("encoding keep-alive: %w", err)
 	}
-	return rm.node.SendPacket(&meshcore.Packet{
-		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeReq, 0),
-		PathLength: pathLen,
-		Path:       peer.OutPath,
-		Payload:    reqBytes,
-	})
+	pkt, _, _ := rm.routedPacket(peerPub, peer, meshcore.PayloadTypeReq, reqBytes)
+	return rm.node.SendPacket(pkt)
 }
 
 // SendRoomStatusReq is SendStatusReq for a room server, whose ServerStats trailer differs.
@@ -290,25 +287,19 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 		return "", fmt.Errorf("encoding text message: %w", err)
 	}
 
-	routeType, pathLen := routeForPeer(peer)
-
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeTxtMsg, 0),
-		PathLength: pathLen,
-		Path:       peer.OutPath,
-		Payload:    msgBytes,
-	}
+	pkt, outPath, hashSize := rm.routedPacket(peerIdentity.PublicKey(), peer, meshcore.PayloadTypeTxtMsg, msgBytes)
 
 	if err := rm.node.SendPacket(pkt); err != nil {
 		return "", fmt.Errorf("sending CLI: %w", err)
 	}
 
-	rm.log.Debug("CLI sent", "peer", pubkeyHex[:12], "prefix", prefix, "command", command)
+	wait := rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout)
+	rm.log.Debug("CLI sent", "peer", pubkeyHex[:12], "prefix", prefix, "command", command, "wait", wait)
 
 	select {
 	case response := <-resultCh:
 		return response, nil
-	case <-time.After(timeout):
-		return "", fmt.Errorf("CLI command timed out")
+	case <-time.After(wait):
+		return "", fmt.Errorf("CLI command timed out after %s", wait)
 	}
 }

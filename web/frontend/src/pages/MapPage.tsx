@@ -5,6 +5,7 @@ import { ChevronDown, MapPin, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useApiList } from "@/hooks/useApiList";
+import { useResume } from "@/lib/resume";
 import { useCompanions } from "@/hooks/useCompanions";
 import { usePeerDetailSheet } from "@/hooks/usePeerDetailSheet";
 import { isPeerDelete } from "@/lib/peerWs";
@@ -95,7 +96,9 @@ export function MapPage() {
     loading,
     error,
     reload,
+    refresh,
   } = useApiList<Peer>("/api/peers", "Failed to load peers");
+  useResume(refresh);
   const peers = items ?? NO_PEERS;
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const companions = useCompanions();

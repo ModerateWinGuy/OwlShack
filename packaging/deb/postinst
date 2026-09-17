@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    if ! getent passwd owlshack >/dev/null; then
+      adduser --system --group --quiet --home /var/lib/owlshack --no-create-home owlshack
+    fi
+    # Radio access: serial is dialout, an SPI hat needs spi/gpio. Skip groups this host doesn't have.
+    for grp in dialout spi gpio; do
+      if getent group "$grp" >/dev/null; then
+        adduser --quiet owlshack "$grp" || true
+      fi
+    done
+    mkdir -p /var/lib/owlshack
+    # Recursive: a database restored from backup, or left by an earlier install, can
+    # carry a uid this account does not have.
+    chown -R owlshack:owlshack /var/lib/owlshack
+    chmod 0750 /var/lib/owlshack
+
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload
+      systemctl enable owlshack.service >/dev/null 2>&1 || true
+      systemctl restart owlshack.service || true
+    fi
+    ;;
+esac

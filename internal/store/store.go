@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -41,6 +42,8 @@ type Store struct {
 	closing    chan struct{}
 	closeOnce  sync.Once
 	dropped    atomic.Uint64
+	// lastDrop is when the most recent write was dropped, in unix nanos; 0 means never.
+	lastDrop atomic.Int64
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -93,6 +96,14 @@ func Open(ctx context.Context, path string) (*Store, error) {
 }
 
 // WriteAsync queues fn on the writer goroutine and never blocks; false means the queue was full and fn was dropped.
+// WriterStats reports the write queue and its drops; lastDrop is zero when none, which the ever-rising count alone cannot say.
+func (s *Store) WriterStats() (queued, capacity int, dropped uint64, lastDrop time.Time) {
+	if nanos := s.lastDrop.Load(); nanos != 0 {
+		lastDrop = time.Unix(0, nanos)
+	}
+	return len(s.writerCh), cap(s.writerCh), s.dropped.Load(), lastDrop
+}
+
 func (s *Store) WriteAsync(fn func()) bool {
 	if s.closed() {
 		return false
@@ -101,6 +112,7 @@ func (s *Store) WriteAsync(fn func()) bool {
 	case s.writerCh <- fn:
 		return true
 	default:
+		s.lastDrop.Store(time.Now().UnixNano())
 		dropped := s.dropped.Add(1)
 		if dropped == 1 || dropped%100 == 0 {
 			slog.Warn("store writer queue full, dropping write", "dropped", dropped)
@@ -203,6 +215,11 @@ var migrations = []func(context.Context, dbExecer) error{
 	migrateV7,   // 9 — settings.duty_cycle_pct (TX airtime budget)
 	migrateV8,   // 10 — settings.spi_board (SPI radio hat wiring)
 	migrateV9,   // 11 — repeater.admin_password backfilled off blank (blank granted admin)
+	migrateV10,  // 12 — companions.dm_policy + dm_allow (who may DM this companion)
+	migrateV11,  // 13 — triggers.url (the feed an rss/cap trigger polls)
+	migrateV12,  // 14 — clamp triggers.path_hash_size to the 3-byte maximum the rest of the app uses
+	migrateV13,  // 15 — settings.modem_token (the openHop modem's access token)
+	migrateV14,  // 16 — optional group bot failover
 }
 
 // dbExecer is the subset of *sql.DB / *sql.Tx a migration needs.
@@ -617,6 +634,40 @@ func migrateV9(ctx context.Context, db dbExecer) error {
 	return err
 }
 
+// migrateV10 adds the DM acceptance policy; 'contacts' is what every install did before it, when a DM only decrypted against companion_contacts.
+func migrateV10(ctx context.Context, db dbExecer) error {
+	for _, q := range []string{
+		`ALTER TABLE companions ADD COLUMN dm_policy TEXT NOT NULL DEFAULT 'contacts'`,
+		`ALTER TABLE companions ADD COLUMN dm_allow TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV12 clamps trigger path hash sizes to the 3-byte maximum every other config already used.
+// The bot form alone offered 4, and Config.Validate now rejects it — which would wall off every
+// later config save, since a save validates the whole assembled config, not just what changed.
+func migrateV12(ctx context.Context, db dbExecer) error {
+	_, err := db.ExecContext(ctx, `UPDATE triggers SET path_hash_size = 3 WHERE path_hash_size > 3`)
+	return err
+}
+
+// migrateV13 adds the openHop modem's access token. It is a password, so it lives in its own column
+// rather than inside the connection string, which the config REST reads hand out in full.
+func migrateV13(ctx context.Context, db dbExecer) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE settings ADD COLUMN modem_token TEXT`)
+	return err
+}
+
+// migrateV11 adds the feed URL an rss or cap trigger polls; empty for every trigger type that has none.
+func migrateV11(ctx context.Context, db dbExecer) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE triggers ADD COLUMN url TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
 // migrateV8 adds settings.spi_board; NULL for a KISS modem, which is every pre-existing install.
 func migrateV8(ctx context.Context, db dbExecer) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE settings ADD COLUMN spi_board TEXT`)
@@ -660,6 +711,19 @@ func migrateV6(ctx context.Context, db dbExecer) error {
 		`ALTER TABLE repeater ADD COLUMN direct_tx_delay_factor REAL`,
 		`ALTER TABLE repeater ADD COLUMN rx_delay_base REAL`,
 		`ALTER TABLE repeater ADD COLUMN multi_acks INTEGER`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV14 adds optional group bot failover.
+func migrateV14(ctx context.Context, db dbExecer) error {
+	for _, q := range []string{
+		`ALTER TABLE triggers ADD COLUMN failover_pattern TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE triggers ADD COLUMN failover_timeout INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			return err

@@ -17,6 +17,7 @@ type probeStub struct {
 	polls  int
 }
 
+func (p *probeStub) CachedStats() DeviceStats         { return DeviceStats{} }
 func (p *probeStub) Transport() string                { return "kiss" }
 func (p *probeStub) RadioConfig() RadioInfo           { return RadioInfo{} }
 func (p *probeStub) LinkStats() LinkStats             { return LinkStats{} }

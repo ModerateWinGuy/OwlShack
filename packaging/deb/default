@@ -1,0 +1,20 @@
+# OwlShack service environment. Run `systemctl restart owlshack` after editing.
+
+# The address a fresh install starts on: 8860, not 8080, which http-alt shares with
+# half the homelab. It is written to the database on first run and the Settings page
+# owns it from then on, so changing this later does nothing.
+LISTEN_DEFAULT=:8860
+
+# These two are different: they pin the address on every start, and Settings cannot
+# move it while either is set. For a reverse proxy or a fixed interface.
+#HOST=127.0.0.1
+#PORT=9090
+
+# Without this the service logs in UTC.
+#TZ=Pacific/Auckland
+
+# Extra flags, e.g. -vv for trace, or -c /path/config.toml to import a config once.
+#OWLSHACK_ARGS=-v
+
+# Binding a port below 1024 also needs, in a systemctl edit owlshack drop-in:
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE

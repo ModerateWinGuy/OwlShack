@@ -201,6 +201,9 @@ func (r *Repeater) authLogin(clientPub [32]byte, password string, ts uint32) (in
 	case cfg.GuestPassword:
 		perms = permGuest
 	default:
+		// The firmware answers a bad password with silence, so the client can only time out.
+		// Log it, or the two silent rejections here are indistinguishable from a lost reply.
+		r.log.Debug("login rejected: password did not match", "client", hex.EncodeToString(clientPub[:6]))
 		return 0, false
 	}
 
@@ -209,6 +212,8 @@ func (r *Repeater) authLogin(clientPub [32]byte, password string, ts uint32) (in
 		existing = &store.RepeaterACLEntry{PubKey: pubHex}
 	}
 	if ts <= existing.LastTimestamp {
+		r.log.Debug("login rejected: replay guard",
+			"client", hex.EncodeToString(clientPub[:6]), "ts", ts, "lastTs", existing.LastTimestamp)
 		return 0, false
 	}
 

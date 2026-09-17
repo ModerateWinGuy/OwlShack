@@ -21,6 +21,11 @@ import (
 	"github.com/meshcore-go/OwlShack/internal/trigger"
 )
 
+// airtimeEstimator is the one method a send needs off the modem, so the timeout logic can be tested without a radio.
+type airtimeEstimator interface {
+	EstAirtimeMs(packetLen int) uint32
+}
+
 type triggerEntry struct {
 	trigger  trigger.Trigger
 	config   config.TriggerConfig
@@ -30,6 +35,11 @@ type triggerEntry struct {
 // groupTextHandler is implemented by triggers that react to group-text packets; non-implementers (e.g. cron) are skipped.
 type groupTextHandler interface {
 	HandleGroupText(*meshcore.Packet)
+}
+
+// dmTextHandler is implemented by triggers that react to accepted plain DMs.
+type dmTextHandler interface {
+	HandleDirectMessage(trigger.DirectMessage, *meshcore.Packet)
 }
 
 type Companion struct {
@@ -46,6 +56,8 @@ type Companion struct {
 
 	echoTracker *echo.Tracker
 	repeaters   *repeater.Client
+	// stats is narrowed to what a send needs: modem.StatsProvider satisfies it.
+	stats airtimeEstimator
 
 	pendingOutbound struct {
 		sync.Mutex
@@ -54,6 +66,9 @@ type Companion struct {
 	}
 
 	traceWaiters traceWaiters
+
+	// dmSeen collapses a sender's retransmissions of one message; see recentDM.
+	dmSeen dmSeen
 
 	triggers []triggerEntry
 
@@ -66,7 +81,7 @@ type Companion struct {
 	runCtx context.Context
 }
 
-func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Store, hub *api.Hub, echoTracker *echo.Tracker, stats modem.StatsProvider, recvErrors *atomic.Uint64, nodeOpts ...node.Option) (*Companion, error) {
+func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Store, hub *api.Hub, echoTracker *echo.Tracker, stats modem.StatsProvider, parseErrors *atomic.Uint64, nodeOpts ...node.Option) (*Companion, error) {
 	name := strings.TrimSpace(cfg.Name)
 	if name == "" {
 		return nil, fmt.Errorf("companion name is required")
@@ -101,7 +116,8 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 		store:       st,
 		hub:         hub,
 		echoTracker: echoTracker,
-		repeaters:   repeater.NewClient(n, st, cfg.ID, log),
+		stats:       stats,
+		repeaters:   repeater.NewClient(n, st, cfg.ID, log, stats),
 	}
 
 	// The companion's channels are the only ones this node listens on; triggers reference them by name and register none of their own.
@@ -123,7 +139,7 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 	if companion.cfg.Mqtt != nil {
 		mqttCfg := *companion.cfg.Mqtt
 
-		obs, err := mqtt.NewObserver(mqttCfg, name, mux, companion.node.Identity(), stats, recvErrors)
+		obs, err := mqtt.NewObserver(mqttCfg, name, mux, companion.node.Identity(), stats, parseErrors)
 		if err != nil {
 			return nil, fmt.Errorf("creating mqtt observer: %w", err)
 		}

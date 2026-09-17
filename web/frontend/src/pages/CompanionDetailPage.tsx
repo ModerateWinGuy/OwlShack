@@ -21,6 +21,7 @@ import {
   Ban,
   CheckCheck,
   ChevronLeft,
+  ArrowDown,
   ChevronRight,
   Copy,
   CornerUpLeft,
@@ -48,6 +49,8 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useCompanionRef } from "@/hooks/useCompanions";
+import { useResume } from "@/lib/resume";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { PageHeader } from "@/components/PageHeader";
 import { ConnectionPill, PeerTypePill } from "@/components/StatusIndicator";
@@ -158,7 +161,8 @@ interface PathHop {
 }
 
 interface PathInfo {
-  hops: number;
+  // Absent when the hop count could not be measured (a direct-routed packet consumes its path).
+  hops?: number | null;
   pathHashSize: number;
   sender: string;
   path: PathHop[];
@@ -178,15 +182,18 @@ interface EchoEntry {
 interface Hearing {
   key: string;
   receivedAt: string;
-  hops: number;
+  // Undefined means the hop count could not be measured, not that there were none.
+  hops?: number | null;
   path: PathHop[];
   snr?: number | null;
   isOriginal: boolean;
 }
 
-// The final repeater in the path is the one closest to us; no hops means we heard it off the air.
-function hearingVia(path: PathHop[]): string {
-  if (path.length === 0) return "Direct";
+// The final repeater in the path is the one closest to us. An empty path means we heard it off the
+// air, EXCEPT on a direct-routed packet: each hop consumes its entry, so the count is absent rather
+// than zero. Naming the routing mode says what happened without inventing a hop count.
+function hearingVia(path: PathHop[], hops?: number | null): string {
+  if (path.length === 0) return hops == null ? "Direct route · hops unknown" : "Direct";
   const last = path[path.length - 1];
   return last.peerNames?.[0] || `#${last.hash}`;
 }
@@ -276,6 +283,9 @@ function splitTrailingPunct(url: string): { url: string; trailing: string } {
   if (!m) return { url, trailing: "" };
   return { url: url.slice(0, m.index), trailing: url.slice(m.index) };
 }
+// How close to the end still counts as following the thread.
+const BOTTOM_SLACK_PX = 80;
+
 const SORT_KEY = "companion-sort";
 
 const HEADER_ACTION_CLASS =
@@ -445,11 +455,12 @@ function CompanionActions({ companion }: { companion: string }) {
 }
 
 export function CompanionDetailPage() {
-  const { name } = useParams<{ name: string }>();
-  const decodedName = useMemo(
-    () => (name ? decodeURIComponent(name) : ""),
-    [name],
-  );
+  const { ref } = useParams<{ ref: string }>();
+  const {
+    ref: companionRef,
+    id: companionId,
+    name: companionName,
+  } = useCompanionRef(ref);
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeChannel = searchParams.get("channel");
@@ -494,7 +505,6 @@ export function CompanionDetailPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messageCacheRef = useRef<Map<string, Message[]>>(new Map());
-  const wasConnectedRef = useRef(false);
   // Channels whose full history has been paged back to the start — stop fetching.
   const reachedStartRef = useRef<Set<string>>(new Set());
   // Set while a scroll-up prepend is in flight, so auto-scroll-to-bottom skips.
@@ -502,6 +512,12 @@ export function CompanionDetailPage() {
     null,
   );
   const skipAutoScrollRef = useRef(false);
+  // The pane's height as of the last scroll decision. Comparing the reader's position against the
+  // height *before* this render is what says whether they were at the end of the thread — asking
+  // afterwards counts the arriving message itself as distance, and a flag kept from scroll events
+  // is only ever as good as the last event observed.
+  const lastPaneHeightRef = useRef(0);
+  const [unreadBelow, setUnreadBelow] = useState(0);
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.channel === activeChannel) ?? null,
@@ -522,7 +538,7 @@ export function CompanionDetailPage() {
     ? 151
     : isContact
       ? 155
-      : Math.max(0, 153 - decodedName.length);
+      : Math.max(0, 153 - companionName.length);
 
   const roomPubkey = isRoom ? (activeConversation?.pubkey ?? null) : null;
   const [roomSession, setRoomSession] = useState<RoomSession | null>(null);
@@ -530,11 +546,11 @@ export function CompanionDetailPage() {
 
   useEffect(() => {
     setRoomSession(null);
-    if (!roomPubkey || !decodedName) return;
+    if (!roomPubkey || !companionRef) return;
     let cancelled = false;
     setRoomSessionLoading(true);
     fetch(
-      `/api/companions/${encodeURIComponent(decodedName)}/rooms/${roomPubkey}/session`,
+      `/api/companions/${encodeURIComponent(companionRef)}/rooms/${roomPubkey}/session`,
     )
       .then((r) => (r.ok ? r.json() : null))
       .then((s: RoomSession | null) => {
@@ -547,7 +563,7 @@ export function CompanionDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [decodedName, roomPubkey]);
+  }, [companionRef, roomPubkey]);
 
   // /participants is the historical rx-sender list; loaded messages add anyone posting mid-session.
   const mentionEnabled = !!activeConversation && (!isContact || isRoom);
@@ -556,10 +572,10 @@ export function CompanionDetailPage() {
 
   useEffect(() => {
     setFetchedParticipants([]);
-    if (!mentionEnabled || !convoId || !decodedName) return;
+    if (!mentionEnabled || !convoId || !companionRef) return;
     let cancelled = false;
     fetch(
-      `/api/companions/${encodeURIComponent(decodedName)}/conversations/${encodeURIComponent(convoId)}/participants`,
+      `/api/companions/${encodeURIComponent(companionRef)}/conversations/${encodeURIComponent(convoId)}/participants`,
     )
       .then((r) => (r.ok ? r.json() : []))
       .then((d: string[]) => {
@@ -569,17 +585,17 @@ export function CompanionDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [mentionEnabled, convoId, decodedName]);
+  }, [mentionEnabled, convoId, companionRef]);
 
   const mentionNames = useMemo(() => {
     if (!mentionEnabled) return [];
     const set = new Set(fetchedParticipants);
     for (const m of messages) {
-      if (m.direction === "rx" && m.sender && m.sender !== decodedName)
+      if (m.direction === "rx" && m.sender && m.sender !== companionName)
         set.add(m.sender);
     }
     return [...set].sort((a, b) => a.localeCompare(b));
-  }, [mentionEnabled, fetchedParticipants, messages, decodedName]);
+  }, [mentionEnabled, fetchedParticipants, messages, companionName]);
 
   const roomLoggedIn =
     !!roomSession && roomSession.loggedIn !== false && !!roomSession.pubkeyHex;
@@ -599,25 +615,32 @@ export function CompanionDetailPage() {
     }
   }, [sort]);
 
-  const loadConversations = useCallback(async (): Promise<Conversation[]> => {
-    if (!decodedName) return [];
-    setLoadingList(true);
-    setListError(null);
-    try {
-      const r = await fetch(
-        `/api/companions/${encodeURIComponent(decodedName)}/conversations`,
-      );
-      if (!r.ok) throw new Error("conversations");
-      const data: Conversation[] = (await r.json()) || [];
-      setConversations(data);
-      return data;
-    } catch {
-      setListError("Failed to load conversations");
-      return [];
-    } finally {
-      setLoadingList(false);
-    }
-  }, [decodedName]);
+  // silent skips the skeleton, so a refresh behind the user's back never blanks the thread list.
+  const loadConversations = useCallback(
+    async (silent = false): Promise<Conversation[]> => {
+      if (!companionRef) return [];
+      if (!silent) {
+        setLoadingList(true);
+        setListError(null);
+      }
+      try {
+        const r = await fetch(
+          `/api/companions/${encodeURIComponent(companionRef)}/conversations`,
+        );
+        if (!r.ok) throw new Error("conversations");
+        const data: Conversation[] = (await r.json()) || [];
+        setConversations(data);
+        setListError(null);
+        return data;
+      } catch {
+        if (!silent) setListError("Failed to load conversations");
+        return [];
+      } finally {
+        if (!silent) setLoadingList(false);
+      }
+    },
+    [companionRef],
+  );
 
   useEffect(() => {
     loadConversations();
@@ -625,14 +648,22 @@ export function CompanionDetailPage() {
 
   // Own public key, to flag self-add attempts on shared-contact cards.
   useEffect(() => {
-    if (!decodedName) return;
+    if (!companionRef) return;
     let cancelled = false;
     fetch("/api/companions")
       .then((r) => (r.ok ? r.json() : []))
       .then(
-        (list: { name: string; pubkey?: string; lat?: number; lon?: number }[]) => {
+        (
+          list: {
+            id: number;
+            name: string;
+            pubkey?: string;
+            lat?: number;
+            lon?: number;
+          }[],
+        ) => {
           if (cancelled) return;
-          const me = (list || []).find((c) => c.name === decodedName);
+          const me = (list || []).find((c) => c.id === companionId);
           setOwnPubkey(me?.pubkey ?? null);
           setOwnPos(
             me && me.lat != null && me.lon != null
@@ -645,7 +676,7 @@ export function CompanionDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [decodedName]);
+  }, [companionRef, companionId]);
 
   const onAddContact = useCallback((prefill: ContactPrefill) => {
     setAddContactPrefill(prefill);
@@ -655,7 +686,7 @@ export function CompanionDetailPage() {
   const addChannel = useCallback(
     async (channelName: string, privateKey?: string) => {
       try {
-        await postChannel(decodedName, channelName, privateKey);
+        await postChannel(companionRef, channelName, privateKey);
       } catch (e) {
         toast.error(
           `Failed to add channel: ${e instanceof Error ? e.message : "failed"}`,
@@ -673,7 +704,7 @@ export function CompanionDetailPage() {
       );
       setSearchParams({ channel: target ? target.channel : channelName });
     },
-    [decodedName, loadConversations, setSearchParams],
+    [companionRef, loadConversations, setSearchParams],
   );
 
   // The roster already includes every configured channel, seeded server-side.
@@ -720,11 +751,11 @@ export function CompanionDetailPage() {
 
   const initialLoadMessages = useCallback(
     async (channel: string) => {
-      if (!decodedName) return;
+      if (!companionRef) return;
       setLoadingMsgs(true);
       try {
         const r = await fetch(
-          `/api/companions/${encodeURIComponent(decodedName)}/messages?channel=${encodeURIComponent(channel)}&limit=100`,
+          `/api/companions/${encodeURIComponent(companionRef)}/messages?channel=${encodeURIComponent(channel)}&limit=100`,
         );
         if (!r.ok) throw new Error("messages");
         const data: Message[] = await r.json();
@@ -737,12 +768,12 @@ export function CompanionDetailPage() {
         setLoadingMsgs(false);
       }
     },
-    [decodedName],
+    [companionRef],
   );
 
   const backfillMessages = useCallback(
     async (channel: string) => {
-      if (!decodedName) return;
+      if (!companionRef) return;
       const existing = messageCacheRef.current.get(channel) || [];
       const afterId = lastIdOf(existing);
       if (afterId <= 0) {
@@ -751,7 +782,7 @@ export function CompanionDetailPage() {
       }
       try {
         const r = await fetch(
-          `/api/companions/${encodeURIComponent(decodedName)}/messages?channel=${encodeURIComponent(channel)}&afterId=${afterId}&limit=500`,
+          `/api/companions/${encodeURIComponent(companionRef)}/messages?channel=${encodeURIComponent(channel)}&afterId=${afterId}&limit=500`,
         );
         if (!r.ok) return;
         const delta: Message[] = await r.json();
@@ -763,13 +794,13 @@ export function CompanionDetailPage() {
         // backfill is best-effort
       }
     },
-    [decodedName, lastIdOf, initialLoadMessages, activeChannel],
+    [companionRef, lastIdOf, initialLoadMessages, activeChannel],
   );
 
   // Scroll-up paging; pendingPrependRef carries the metrics that preserve the viewport.
   const loadOlderMessages = useCallback(
     async (channel: string) => {
-      if (!decodedName) return;
+      if (!companionRef) return;
       if (reachedStartRef.current.has(channel)) return;
       const existing = messageCacheRef.current.get(channel) || [];
       // existing is ascending (oldest first) — find the smallest real id.
@@ -788,7 +819,7 @@ export function CompanionDetailPage() {
       setLoadingOlder(true);
       try {
         const r = await fetch(
-          `/api/companions/${encodeURIComponent(decodedName)}/messages?channel=${encodeURIComponent(channel)}&beforeId=${oldest}&limit=100`,
+          `/api/companions/${encodeURIComponent(companionRef)}/messages?channel=${encodeURIComponent(channel)}&beforeId=${oldest}&limit=100`,
         );
         if (!r.ok) return;
         const older: Message[] = await r.json();
@@ -813,12 +844,15 @@ export function CompanionDetailPage() {
         setLoadingOlder(false);
       }
     },
-    [decodedName, activeChannel],
+    [companionRef, activeChannel],
   );
 
   const handleMessagesScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el || !activeChannel) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK_PX) {
+      setUnreadBelow(0);
+    }
     if (
       el.scrollTop <= 80 &&
       !loadingOlder &&
@@ -844,34 +878,59 @@ export function CompanionDetailPage() {
     }
   }, [activeChannel, initialLoadMessages, backfillMessages]);
 
+  // The highest id reported read per conversation, so watching a thread keeps marking it read
+  // without re-posting the same id on every render.
+  const reportedReadRef = useRef<Map<string, number>>(new Map());
+
   useEffect(() => {
     if (!activeChannel || !activeConversation) return;
-    if (activeConversation.unreadCount === 0) return;
-    const last = messages[messages.length - 1];
-    if (!last?.id) return;
+    // Deliberately not gated on unreadCount. That is zeroed locally as soon as the thread opens, so
+    // gating on it stopped every message that arrived while the thread was on screen from ever
+    // advancing last_read_id — they were read, the server never heard, and they came back unread on
+    // the next visit. Track the high-water mark instead.
+    const highest = messages.reduce((max, m) => (m.id && m.id > max ? m.id : max), 0);
+    if (highest === 0) return;
+    if ((reportedReadRef.current.get(activeConversation.id) ?? 0) >= highest) return;
+    reportedReadRef.current.set(activeConversation.id, highest);
+
     fetch(
-      `/api/companions/${encodeURIComponent(decodedName)}/conversations/${encodeURIComponent(activeConversation.id)}/read`,
+      `/api/companions/${encodeURIComponent(companionRef)}/conversations/${encodeURIComponent(activeConversation.id)}/read`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lastReadId: last.id }),
+        body: JSON.stringify({ lastReadId: highest }),
       },
-    ).catch(() => {});
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === activeConversation.id ? { ...c, unreadCount: 0 } : c,
-      ),
-    );
-  }, [activeChannel, activeConversation, messages, decodedName]);
+    ).catch(() => {
+      // Let a later render retry rather than stranding the high-water mark on a failed request.
+      reportedReadRef.current.delete(activeConversation.id);
+    });
+
+    if (activeConversation.unreadCount !== 0) {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversation.id ? { ...c, unreadCount: 0 } : c,
+        ),
+      );
+    }
+  }, [activeChannel, activeConversation, messages, companionRef]);
 
   const handleWsMessage = useCallback(
     (topic: string, data: unknown) => {
       if (topic !== "messages" || !data || typeof data !== "object") return;
       const payload = data as Message & {
         companion?: string;
+        companionId?: number;
         action?: string;
       };
-      if (payload.companion !== decodedName) return;
+      // Match on the id where both sides have one: it is in the URL, so it is known on the first
+      // render, and a rename cannot change it. Falling back to the name rather than dropping keeps
+      // a payload that predates companionId visible instead of silently stalling the thread.
+      const mine =
+        payload.companionId != null && companionId != null
+          ? payload.companionId === companionId
+          : payload.companion === companionName ||
+            payload.companion === companionRef;
+      if (!mine) return;
 
       if (payload.action === "repeatCount" && payload.id != null) {
         const updateRepeat = (m: Message): Message =>
@@ -881,10 +940,12 @@ export function CompanionDetailPage() {
         if (payload.channel) {
           const cached = messageCacheRef.current.get(payload.channel);
           if (cached) {
-            messageCacheRef.current.set(payload.channel, cached.map(updateRepeat));
+            messageCacheRef.current.set(payload.channel, mapChanged(cached, updateRepeat));
           }
         }
-        setMessages((prev) => prev.map(updateRepeat));
+        if (payload.channel === activeChannel) {
+          setMessages((prev) => mapChanged(prev, updateRepeat));
+        }
         return;
       }
 
@@ -896,10 +957,12 @@ export function CompanionDetailPage() {
         if (payload.channel) {
           const cached = messageCacheRef.current.get(payload.channel);
           if (cached) {
-            messageCacheRef.current.set(payload.channel, cached.map(updateStatus));
+            messageCacheRef.current.set(payload.channel, mapChanged(cached, updateStatus));
           }
         }
-        setMessages((prev) => prev.map(updateStatus));
+        if (payload.channel === activeChannel) {
+          setMessages((prev) => mapChanged(prev, updateStatus));
+        }
         return;
       }
 
@@ -932,7 +995,7 @@ export function CompanionDetailPage() {
       }
 
       if (!knownChannelsRef.current.has(incoming.channel)) {
-        loadConversations();
+        loadConversations(true);
         return;
       }
 
@@ -959,22 +1022,33 @@ export function CompanionDetailPage() {
         return updated;
       });
     },
-    [decodedName, activeChannel, loadConversations],
+    [
+      companionRef,
+      companionId,
+      companionName,
+      activeChannel,
+      loadConversations,
+    ],
   );
 
   const { connected } = useWebSocket(["messages"], handleWsMessage);
 
-  useEffect(() => {
-    if (connected && !wasConnectedRef.current) {
-      // Backfill what we missed; other channels refresh on re-open.
+  // A gap in the stream leaves this thread and the roster short of whatever arrived during it.
+  // Other channels catch up on re-open, via the same backfill.
+  useResume(
+    useCallback(() => {
       if (activeChannel) backfillMessages(activeChannel);
-    }
-    wasConnectedRef.current = connected;
-  }, [connected, activeChannel, backfillMessages]);
+      loadConversations(true);
+    }, [activeChannel, backfillMessages, loadConversations]),
+  );
 
   const initialScrollDoneRef = useRef(false);
+  const lastAutoScrollIdRef = useRef(0);
   useEffect(() => {
     initialScrollDoneRef.current = false;
+    lastAutoScrollIdRef.current = 0;
+    lastPaneHeightRef.current = 0;
+    setUnreadBelow(0);
     setMsgSearch("");
     setMsgSearchOpen(false);
   }, [activeChannel]);
@@ -990,19 +1064,52 @@ export function CompanionDetailPage() {
   }, [messages]);
 
   useEffect(() => {
+    const pane = scrollContainerRef.current;
     if (loadingMsgs || messages.length === 0) return;
+    const wasAtEnd =
+      !pane ||
+      lastPaneHeightRef.current === 0 ||
+      lastPaneHeightRef.current - pane.scrollTop - pane.clientHeight <=
+        BOTTOM_SLACK_PX;
+    if (pane) lastPaneHeightRef.current = pane.scrollHeight;
     if (skipAutoScrollRef.current) {
       // this messages change was a scroll-up prepend — don't yank to the bottom.
       skipAutoScrollRef.current = false;
       return;
     }
+    // Only something arriving at the bottom moves the view. A status or repeat-count update, or a
+    // re-delivered duplicate, changes the array while adding nothing to read — and yanking the
+    // reader to the bottom for one is indistinguishable from a message they never got.
+    const newest = lastIdOf(messages);
+    if (newest !== 0 && newest <= lastAutoScrollIdRef.current) return;
+    const previous = lastAutoScrollIdRef.current;
+    lastAutoScrollIdRef.current = newest;
+
     if (!initialScrollDoneRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: "instant" as ScrollBehavior });
       initialScrollDoneRef.current = true;
-    } else {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setUnreadBelow(0);
+      return;
     }
-  }, [messages, loadingMsgs]);
+    // Follow the thread only for a reader already at the end of it, or one who just posted. A
+    // reader scrolled back through history keeps their place and is told what arrived instead.
+    const ownSend = messages[messages.length - 1]?.direction === "tx";
+    if (wasAtEnd || ownSend) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setUnreadBelow(0);
+      return;
+    }
+    setUnreadBelow(
+      (n) =>
+        n +
+        messages.filter((m) => typeof m.id === "number" && m.id > previous).length,
+    );
+  }, [messages, loadingMsgs, lastIdOf]);
+
+  const jumpToLatest = useCallback(() => {
+    setUnreadBelow(0);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
 
   useEffect(() => {
     if (!contextMsg) return;
@@ -1084,12 +1191,12 @@ export function CompanionDetailPage() {
   const openConversation = useCallback(
     (c: Conversation) => {
       if (c.isRepeater && c.pubkey) {
-        navigate(contactDetailPath(decodedName, c.pubkey, true));
+        navigate(contactDetailPath(companionRef, c.pubkey, true));
         return;
       }
       setSearchParams({ channel: c.channel });
     },
-    [decodedName, navigate, setSearchParams],
+    [companionRef, navigate, setSearchParams],
   );
 
   const closeChat = useCallback(() => {
@@ -1118,7 +1225,7 @@ export function CompanionDetailPage() {
     setSending(true);
     try {
       const r = await fetch(
-        `/api/companions/${encodeURIComponent(decodedName)}/messages`,
+        `/api/companions/${encodeURIComponent(companionRef)}/messages`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1136,7 +1243,7 @@ export function CompanionDetailPage() {
     } finally {
       setSending(false);
     }
-  }, [activeConversation, composer, sending, charLimit, decodedName]);
+  }, [activeConversation, composer, sending, charLimit, companionRef]);
 
   const onComposerKey = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1187,7 +1294,7 @@ export function CompanionDetailPage() {
 
   const handleReply = useCallback(
     (m: Message) => {
-      const isOwn = m.direction === "tx" || m.sender === decodedName;
+      const isOwn = m.direction === "tx" || m.sender === companionName;
       const next = isOwn
         ? `${m.text
             .split("\n")
@@ -1203,7 +1310,7 @@ export function CompanionDetailPage() {
         el.setSelectionRange(end, end);
       });
     },
-    [decodedName],
+    [companionName],
   );
 
   const handleDelete = useCallback(
@@ -1233,7 +1340,7 @@ export function CompanionDetailPage() {
       if (!m.id) return;
       try {
         const r = await fetch(
-          `/api/companions/${encodeURIComponent(decodedName)}/messages/${m.id}/retry`,
+          `/api/companions/${encodeURIComponent(companionRef)}/messages/${m.id}/retry`,
           { method: "POST" },
         );
         if (!r.ok) throw new Error("retry");
@@ -1249,7 +1356,7 @@ export function CompanionDetailPage() {
         toast.error("Retry failed");
       }
     },
-    [decodedName],
+    [companionRef],
   );
 
   const handleBlock = useCallback(
@@ -1257,7 +1364,7 @@ export function CompanionDetailPage() {
       if (!activeConversation) return;
       try {
         const r = await fetch(
-          `/api/companions/${encodeURIComponent(decodedName)}/conversations/${encodeURIComponent(activeConversation.id)}/block`,
+          `/api/companions/${encodeURIComponent(companionRef)}/conversations/${encodeURIComponent(activeConversation.id)}/block`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1270,7 +1377,7 @@ export function CompanionDetailPage() {
         toast.error("Block failed");
       }
     },
-    [activeConversation, decodedName],
+    [activeConversation, companionRef],
   );
 
   const openModal = useCallback(
@@ -1286,7 +1393,7 @@ export function CompanionDetailPage() {
       try {
         if (kind === "path") {
           const r = await fetch(
-            `/api/companions/${encodeURIComponent(decodedName)}/messages/${m.id}/path?channel=${encodeURIComponent(m.channel)}`,
+            `/api/companions/${encodeURIComponent(companionRef)}/messages/${m.id}/path?channel=${encodeURIComponent(m.channel)}`,
           );
           if (!r.ok) throw new Error("path");
           setModalPath(await r.json());
@@ -1297,7 +1404,7 @@ export function CompanionDetailPage() {
         } else if (kind === "rxPaths") {
           const [pr, er] = await Promise.all([
             fetch(
-              `/api/companions/${encodeURIComponent(decodedName)}/messages/${m.id}/path?channel=${encodeURIComponent(m.channel)}`,
+              `/api/companions/${encodeURIComponent(companionRef)}/messages/${m.id}/path?channel=${encodeURIComponent(m.channel)}`,
             ),
             fetch(`/api/messages/${m.id}/echoes`),
           ]);
@@ -1310,7 +1417,7 @@ export function CompanionDetailPage() {
         setModalLoading(false);
       }
     },
-    [decodedName],
+    [companionRef],
   );
 
   const closeModal = useCallback(() => {
@@ -1340,7 +1447,7 @@ export function CompanionDetailPage() {
             </span>
           }
           trailing={<ConnectionPill connected={connected} />}
-          actions={<CompanionActions companion={decodedName} />}
+          actions={<CompanionActions companion={companionRef} />}
         />
       </div>
 
@@ -1355,7 +1462,7 @@ export function CompanionDetailPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={loadConversations}
+                onClick={() => loadConversations()}
                 className="ml-2 h-7 text-xs uppercase tracking-widest"
               >
                 retry
@@ -1487,7 +1594,7 @@ export function CompanionDetailPage() {
                   </div>
                 </div>
                 <ChatHeaderMenu
-                  companion={decodedName}
+                  companion={companionRef}
                   conversation={activeConversation}
                   onSearchToggle={() => {
                     setMsgSearchOpen((v) => !v);
@@ -1526,46 +1633,60 @@ export function CompanionDetailPage() {
                 </div>
               )}
 
-              <div
-                ref={scrollContainerRef}
-                onScroll={handleMessagesScroll}
-                className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-background/30"
-              >
-                {!loadingMsgs && loadingOlder && (
-                  <div className="flex items-center justify-center py-2 text-muted-foreground/60">
-                    <Loader2 className="size-4 animate-spin" />
-                  </div>
+              <div className="relative flex-1 min-h-0 flex flex-col">
+                <div
+                  ref={scrollContainerRef}
+                  onScroll={handleMessagesScroll}
+                  className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-background/30"
+                >
+                  {!loadingMsgs && loadingOlder && (
+                    <div className="flex items-center justify-center py-2 text-muted-foreground/60">
+                      <Loader2 className="size-4 animate-spin" />
+                    </div>
+                  )}
+                  {loadingMsgs ? (
+                    <MessagesSkeleton />
+                  ) : groupedMessages.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground/50 gap-3">
+                      <MessageSquare className="size-8" strokeWidth={1.2} />
+                      <span className="font-mono text-xs uppercase tracking-[0.12em]">
+                        No transmissions on record
+                      </span>
+                    </div>
+                  ) : (
+                    groupedMessages.map((group, gi) => (
+                      <MessageGroup
+                        key={`${group.sender}-${gi}-${group.messages[0].timestamp}`}
+                        group={group}
+                        ownName={companionName}
+                        ownPubkey={ownPubkey}
+                        onContext={onMessageContext}
+                        onReply={handleReply}
+                        onRetry={handleRetry}
+                        onAddContact={onAddContact}
+                        channelCtx={channelCtx}
+                      />
+                    ))
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {unreadBelow > 0 && (
+                  <button
+                    type="button"
+                    onClick={jumpToLatest}
+                    className="absolute inset-x-0 bottom-3 mx-auto flex w-fit items-center gap-1.5 rounded-sm border border-primary/40 bg-card px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-primary transition-colors hover:bg-primary/10"
+                  >
+                    <ArrowDown className="size-3" />
+                    <span className="tabular-nums">{unreadBelow}</span>
+                    {unreadBelow === 1 ? "new message" : "new messages"}
+                  </button>
                 )}
-                {loadingMsgs ? (
-                  <MessagesSkeleton />
-                ) : groupedMessages.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground/50 gap-3">
-                    <MessageSquare className="size-8" strokeWidth={1.2} />
-                    <span className="font-mono text-xs uppercase tracking-[0.12em]">
-                      No transmissions on record
-                    </span>
-                  </div>
-                ) : (
-                  groupedMessages.map((group, gi) => (
-                    <MessageGroup
-                      key={`${group.sender}-${gi}-${group.messages[0].timestamp}`}
-                      group={group}
-                      ownName={decodedName}
-                      ownPubkey={ownPubkey}
-                      onContext={onMessageContext}
-                      onReply={handleReply}
-                      onRetry={handleRetry}
-                      onAddContact={onAddContact}
-                      channelCtx={channelCtx}
-                    />
-                  ))
-                )}
-                <div ref={messagesEndRef} />
               </div>
 
               {isRoom && !roomLoggedIn ? (
                 <RoomJoinBar
-                  companion={decodedName}
+                  companion={companionRef}
                   pubkey={roomPubkey ?? ""}
                   checking={roomSessionLoading}
                   onJoined={setRoomSession}
@@ -1576,9 +1697,9 @@ export function CompanionDetailPage() {
                 {mentionAC.dropdown}
                 <div className="px-3 py-2 flex items-end gap-2">
                   <ComposerAttachMenu
-                    companion={decodedName}
+                    companion={companionRef}
                     ownPubkey={ownPubkey}
-                    ownName={decodedName}
+                    ownName={companionName}
                     ownLat={ownPos?.lat}
                     ownLon={ownPos?.lon}
                     onInsert={insertAtCursor}
@@ -1679,7 +1800,7 @@ export function CompanionDetailPage() {
         <ContextMenu
           msg={contextMsg}
           pos={contextPos}
-          ownName={decodedName}
+          ownName={companionName}
           onCopy={() => {
             handleCopy(contextMsg);
             setContextMsg(null);
@@ -1708,7 +1829,8 @@ export function CompanionDetailPage() {
       )}
 
       <AddContactDialog
-        companion={decodedName}
+        companion={companionRef}
+        companionName={companionName}
         open={addContactOpen}
         onOpenChange={setAddContactOpen}
         initial={addContactPrefill ?? undefined}
@@ -1792,6 +1914,19 @@ function convRecency(a: Conversation, b: Conversation): number {
 function tsValue(iso?: string): number {
   if (!iso) return 0;
   return new Date(iso).getTime() || 0;
+}
+
+// Like map, but hands back the original array when nothing changed. A new array identity is what
+// the auto-scroll reads as "new traffic", so an update for a message that is not loaded must not
+// manufacture one.
+function mapChanged(arr: Message[], fn: (m: Message) => Message): Message[] {
+  let changed = false;
+  const next = arr.map((m) => {
+    const updated = fn(m);
+    if (updated !== m) changed = true;
+    return updated;
+  });
+  return changed ? next : arr;
 }
 
 function mergeMessages(existing: Message[], incoming: Message[]): Message[] {
@@ -2228,8 +2363,13 @@ function MessageBubble({
               <span className={snrTextClass(msg.snr)}>{msg.snr.toFixed(1)}dB</span>
             )}
             {msg.hops != null && msg.hops > 0 && (
-              <span className="text-muted-foreground/60">
+              // Hash size only means something alongside a path, so it rides the hops span.
+              <span
+                className="text-muted-foreground/60"
+                title={msg.pathHashSize != null ? `${msg.pathHashSize}-byte path hashes` : undefined}
+              >
                 {msg.hops} hop{msg.hops > 1 ? "s" : ""}
+                {msg.pathHashSize != null && ` · ${msg.pathHashSize}B`}
               </span>
             )}
             {msg.repeatCount != null && msg.repeatCount > 0 && (
@@ -2706,7 +2846,7 @@ function HearingRow({ hearing, first }: { hearing: Hearing; first: boolean }) {
           ) : (
             <Radar className="size-3 shrink-0 text-muted-foreground/60" />
           )}
-          <span className="truncate">{hearingVia(hearing.path)}</span>
+          <span className="truncate">{hearingVia(hearing.path, hearing.hops)}</span>
         </span>
         <span className="ml-auto flex items-center gap-2 font-mono text-[10px] tabular-nums uppercase tracking-widest text-muted-foreground shrink-0">
           {first && <span className="text-primary/70">first</span>}

@@ -64,11 +64,18 @@ type pendingLogin struct {
 	peerPubKey     [32]byte
 }
 
+// airtimeEstimator is the one method the reply timeout needs off the modem, so it can be tested
+// without a radio. modem.StatsProvider satisfies it.
+type airtimeEstimator interface {
+	EstAirtimeMs(packetLen int) uint32
+}
+
 type Client struct {
 	node        *node.Node
 	store       *store.Store
 	companionID int64 // owner of the contact rows that persist learned routes
 	log         *slog.Logger
+	stats       airtimeEstimator
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -98,12 +105,13 @@ func (rm *Client) UniqueTimestamp() uint32 {
 	return ts
 }
 
-func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger) *Client {
+func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator) *Client {
 	return &Client{
 		node:        n,
 		store:       st,
 		companionID: companionID,
 		log:         log,
+		stats:       stats,
 		sessions:    make(map[string]*Session),
 		pending:     make(map[uint32]*pendingRequest),
 		cliPending:  make(map[string]chan string),
@@ -118,19 +126,38 @@ func (rm *Client) persistOutPath(pubkey []byte, path []byte, hashSize uint8) {
 	})
 }
 
+// learnedRoute resolves the send-path to a peer: the live peer table first, then the contact row the
+// route was persisted to. Without that fallback every admin command floods after a restart, because
+// hydratePeerTables leaves the table's OutPath nil and only an inbound PATH refills it — and a flood
+// request makes the far end reply by flood too (src/helpers/RoutingPolicy.h:39 returns PATH_RETURN
+// unconditionally), so one missing route costs both directions. The table wins when both hold one,
+// since persistOutPath writes the row asynchronously and so lags a freshly learned path.
+func (rm *Client) learnedRoute(pubkey [meshcore.PubKeySize]byte, peer *node.Peer) (path []byte, hashSize uint8) {
+	if peer != nil && peer.OutPath != nil {
+		return peer.OutPath, max(peer.OutPathHashSize, 1)
+	}
+	if rm.store == nil {
+		return nil, 0
+	}
+	ct, err := rm.store.Contacts.Get(context.Background(), rm.companionID, pubkey[:])
+	if err != nil || ct == nil || ct.OutPath == nil {
+		return nil, 0
+	}
+	return ct.OutPath, max(ct.OutPathHashSize, 1)
+}
+
 // routeForPeer follows the OutPath contract: only nil (unknown) floods, and the length byte is hashSize-1 in the upper 2 bits.
-func routeForPeer(peer *node.Peer) (routeType byte, pathLen uint8) {
-	if peer == nil || peer.OutPath == nil {
+func routeForPeer(path []byte, hashSize uint8) (routeType byte, pathLen uint8) {
+	if path == nil {
 		return meshcore.RouteTypeFlood, 0
 	}
-	if len(peer.OutPath) == 0 {
+	if len(path) == 0 {
 		return meshcore.RouteTypeDirect, 0 // direct neighbour, no hops to encode
 	}
-	hashSize := int(peer.OutPathHashSize)
 	if hashSize == 0 {
-		hashSize = int(meshcore.PathHashSize)
+		hashSize = meshcore.PathHashSize
 	}
-	return meshcore.RouteTypeDirect, uint8(hashSize-1)<<6 | uint8(len(peer.OutPath)/hashSize)
+	return meshcore.RouteTypeDirect, (hashSize-1)<<6 | uint8(len(path)/int(hashSize))
 }
 
 func (rm *Client) Session(pubkeyHex string) *Session {
@@ -171,6 +198,41 @@ func (rm *Client) sendBinaryRequest(pubkeyHex string, body []byte, timeout time.
 
 	// The session decrypts the response, so the pending entry needn't carry the secret.
 	return rm.roundtripRequest(peerIdentity.PublicKey(), peer, sess.sharedSecret, sess.localPubKey[0], body, timeout, label, false)
+}
+
+// replyTimeout sizes the wait on a repeater's reply from airtime, as the firmware sizes its ACK
+// waits (MyMesh.cpp:851-858), treating the caller's value as a floor. The reply sets the pace, not
+// the request: a telemetry body runs to a full packet, and over two hops that alone outruns the
+// flat 10s every command used to get.
+func (rm *Client) replyTimeout(reqLen int, path []byte, hashSize uint8, floor time.Duration) time.Duration {
+	if rm.stats == nil {
+		return floor
+	}
+	airtime := rm.stats.EstAirtimeMs(max(reqLen, meshcore.MaxPacketPayload))
+	if airtime == 0 {
+		return floor // radio params unknown; a guess here would be worse than the caller's value
+	}
+	if path == nil {
+		return max(node.CalcFloodTimeout(airtime), floor)
+	}
+	hops := len(path) / int(max(hashSize, 1))
+	return max(node.CalcDirectTimeout(airtime, uint8(min(hops, 255))), floor)
+}
+
+// routedPacket builds a packet already addressed down a peer's learned route. It exists so the
+// length byte and the hops can never come from different places: meshcore-go writes PathLength
+// from the field and the hops from Path, so a mismatch makes the receiver read that many bytes of
+// PAYLOAD as path — a well-formed-looking send that is garbage on air. One call site did exactly
+// that. It returns the route alongside, since callers also size their reply wait from it.
+func (rm *Client) routedPacket(peerPub [meshcore.PubKeySize]byte, peer *node.Peer, payloadType byte, payload []byte) (*meshcore.Packet, []byte, uint8) {
+	outPath, hashSize := rm.learnedRoute(peerPub, peer)
+	routeType, pathLen := routeForPeer(outPath, hashSize)
+	return &meshcore.Packet{
+		Header:     meshcore.MakeHeader(routeType, payloadType, 0),
+		PathLength: pathLen,
+		Path:       outPath,
+		Payload:    payload,
+	}, outPath, hashSize
 }
 
 // roundtripRequest awaits the tagged response; storeSecret puts the secret on the pending entry for sessionless matching.
@@ -218,25 +280,19 @@ func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecr
 		rm.pendingMu.Unlock()
 	}()
 
-	routeType, pathLen := routeForPeer(peer)
-
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeReq, 0),
-		PathLength: pathLen,
-		Path:       peer.OutPath,
-		Payload:    reqBytes,
-	}
+	pkt, outPath, hashSize := rm.routedPacket(peerPub, peer, meshcore.PayloadTypeReq, reqBytes)
 
 	if err := rm.node.SendPacket(pkt); err != nil {
 		return nil, fmt.Errorf("sending %s req: %w", label, err)
 	}
 
-	rm.log.Debug(label+" req sent", "peer", fmt.Sprintf("%x", peerPub[:6]), "tag", fmt.Sprintf("%08x", tag))
+	wait := rm.replyTimeout(len(reqBytes), outPath, hashSize, timeout)
+	rm.log.Debug(label+" req sent", "peer", fmt.Sprintf("%x", peerPub[:6]), "tag", fmt.Sprintf("%08x", tag), "wait", wait)
 
 	select {
 	case data := <-resultCh:
 		return data, nil
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("%s request timed out", label)
+	case <-time.After(wait):
+		return nil, fmt.Errorf("%s request timed out after %s", label, wait)
 	}
 }

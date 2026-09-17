@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiList } from "@/hooks/useApiList";
-import { useCompanions } from "@/hooks/useCompanions";
+import { useCompanionRef, useCompanions } from "@/hooks/useCompanions";
 import { BackLink } from "@/components/BackLink";
 import { InlineConfirm } from "@/components/InlineConfirm";
 import { LoadErrorAlert } from "@/components/LoadErrorAlert";
@@ -24,8 +24,12 @@ interface Contact {
 }
 
 export function ContactsPage() {
-  const { name } = useParams();
-  const companion = decodeURIComponent(name ?? "");
+  const { ref } = useParams();
+  const {
+    ref: companion,
+    id: companionId,
+    name: companionName,
+  } = useCompanionRef(ref);
 
   const {
     items: contacts,
@@ -41,7 +45,7 @@ export function ContactsPage() {
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   // The companion's own pubkey, so the add dialog can block a self-contact inline.
-  const ownPubkey = useCompanions().find((c) => c.name === companion)?.pubkey;
+  const ownPubkey = useCompanions().find((c) => c.id === companionId)?.pubkey;
 
   const removeContact = useCallback(
     async (pubkey: string) => {
@@ -82,7 +86,7 @@ export function ContactsPage() {
       <div className="flex flex-col gap-3">
         <BackLink
           to={`/companions/${encodeURIComponent(companion)}`}
-          label={companion || "companion"}
+          label={companionName || "companion"}
         />
 
         <PageHeader
@@ -166,6 +170,7 @@ export function ContactsPage() {
 
       <AddContactDialog
         companion={companion}
+        companionName={companionName}
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         existingPubkeys={existingPubkeys}

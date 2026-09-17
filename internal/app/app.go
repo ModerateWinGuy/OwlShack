@@ -87,6 +87,10 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 		return fmt.Errorf("resolving config: %w", err)
 	}
 
+	if err := seedListenAddr(ctx, db, cfg); err != nil {
+		return fmt.Errorf("listen address: %w", err)
+	}
+
 	logLevel := ""
 	if cfg.LogLevel != nil {
 		logLevel = *cfg.LogLevel
@@ -128,11 +132,17 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 		listenAddr = *cfg.ListenAddr
 	}
 	listenAddr = applyListenEnvOverrides(listenAddr)
-	httpServer := &http.Server{Addr: listenAddr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+	// Bound before the goroutine: a failed bind must stop the process, not run on with no UI.
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("web listen on %s: %w", listenAddr, err)
+	}
+	httpServer := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+	httpErr := make(chan error, 1)
 	go func() {
 		slog.Info("web UI listening", "addr", listenAddr)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("http server error", "error", err)
+		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			httpErr <- err
 		}
 	}()
 
@@ -243,6 +253,10 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 			httpServer.Close()
 			stopRadio()
 			return nil
+
+		case err := <-httpErr:
+			stopRadio()
+			return fmt.Errorf("web server on %s: %w", listenAddr, err)
 
 		case <-sighup:
 			slog.Info("SIGHUP received, reloading config...")
@@ -413,7 +427,7 @@ func reloadCompanions(ctx context.Context, oldCfg, newCfg *config.Config, runnin
 			companions = append(companions, p.reuse)
 			continue
 		}
-		c, err := companion.NewCompanion(p.block, mux, db, hub, echoTracker, ms.Stats, ms.RecvErrors)
+		c, err := companion.NewCompanion(p.block, mux, db, hub, echoTracker, ms.Stats, ms.ParseErrors)
 		if err != nil {
 			stopAll()
 			return nil, stats, fmt.Errorf("creating companion %q: %w", p.block.Name, err)

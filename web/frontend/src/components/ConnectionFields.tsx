@@ -12,6 +12,7 @@ import {
 // The stored setting is still one URL string; these controls only spare the operator from typing it.
 const BACKENDS = [
   { value: "kiss", label: "KISS modem (serial / TCP)" },
+  { value: "openhop", label: "openHop Modem (serial / TCP)" },
   { value: "spi", label: "SPI radio hat" },
 ];
 
@@ -25,11 +26,28 @@ const SPI_PORTS = ["SPI0.0", "SPI0.1", "SPI1.0", "SPI1.1", "SPI1.2"];
 
 const DEFAULT_SERIAL = "/dev/ttyACM0";
 
-export function connectionScheme(c: string): "serial" | "tcp" | "spi" {
+export function connectionScheme(c: string): "serial" | "tcp" | "spi" | "openhop" {
   if (c.startsWith("tcp://")) return "tcp";
   if (c.startsWith("spi://")) return "spi";
+  if (c.startsWith("openhop://")) return "openhop";
   return "serial";
 }
+
+// backendFor derives the radio backend from the connection string rather than the stored
+// connectionType. Only the connection string decides which driver the server loads, so a stored
+// backend that disagrees with it is stale, not a preference.
+export function backendFor(connection: string): string {
+  const scheme = connectionScheme(connection);
+  return scheme === "spi" || scheme === "openhop" ? scheme : "kiss";
+}
+
+// BACKEND_LABELS is the one-word name a section eyebrow uses for the chosen backend.
+export const BACKEND_LABELS: Record<string, string> = {
+  kiss: "kiss modem",
+  openhop: "openhop modem",
+  spi: "spi radio",
+};
+
 
 export function connectionTarget(c: string): string {
   return c.replace(/^[a-z0-9]+:\/\//, "");
@@ -61,6 +79,7 @@ export function connectionSummary(
   spiBoard: string,
   boards: SpiBoard[],
   ports: SerialPort[],
+  modemTokenSet = false,
 ): ConnectionRow[] {
   const target = connectionTarget(connection);
 
@@ -70,6 +89,23 @@ export function connectionSummary(
       { label: "Radio backend", value: "SPI radio hat" },
       { label: "Hat", value: board?.label ?? spiBoard ?? "—" },
       { label: "SPI port", value: target || board?.spiPort || "—" },
+    ];
+  }
+
+  if (connectionType === "openhop") {
+    if (target.startsWith("/")) {
+      return [
+        { label: "Radio backend", value: "openHop Modem over serial" },
+        { label: "Device", value: target || "-" },
+        { label: "Baud rate", value: baudRate },
+      ];
+    }
+    const sep = target.lastIndexOf(":");
+    return [
+      { label: "Radio backend", value: "openHop Modem over the network" },
+      { label: "Host", value: sep > 0 ? target.slice(0, sep) : target || "-" },
+      { label: "Port", value: sep > 0 ? target.slice(sep + 1) : "-" },
+      { label: "Token", value: modemTokenSet ? "set" : "none" },
     ];
   }
 
@@ -107,6 +143,9 @@ export function ConnectionFields({
   spiBoard,
   setSpiBoard,
   boards,
+  modemToken,
+  setModemToken,
+  modemTokenSet,
 }: {
   connectionType: string;
   setConnectionType: (v: string) => void;
@@ -117,18 +156,33 @@ export function ConnectionFields({
   spiBoard: string;
   setSpiBoard: (v: string) => void;
   boards: SpiBoard[];
+  // modemToken is write-only: it starts blank on every load, because a read never returns it.
+  modemToken: string;
+  setModemToken: (v: string) => void;
+  modemTokenSet: boolean;
 }) {
   const spi = connectionType === "spi";
+  const openhop = connectionType === "openhop";
   const ports = useSerialPorts(!spi);
-  const transport = spi ? "spi" : connectionScheme(connection);
   const target = connectionTarget(connection);
+  // openhop carries both transports under one scheme, so the device path is what tells them apart.
+  const transport = spi
+    ? "spi"
+    : openhop
+      ? target.startsWith("/")
+        ? "serial"
+        : "tcp"
+      : connectionScheme(connection);
   const board = boards.find((b) => b.name === spiBoard);
+
+  const setTarget = (v: string) =>
+    setConnection(`${openhop ? "openhop" : transport}://${v.trim()}`);
 
   // An install from before the picker stores the tty. Adopt the same device's stable name so it is
   // one device on one row, not the tty and its own by-id entry offered as two choices. Settings load
   // after this component mounts, so this reacts to the connection too, not just the port list.
   useEffect(() => {
-    if (spi || connectionScheme(connection) !== "serial") return;
+    if (spi || openhop || connectionScheme(connection) !== "serial") return;
     const same = ports.find((p) => p.stable && p.device === connectionTarget(connection));
     if (same) setConnection(`serial://${same.path}`);
   }, [ports, connection, spi, setConnection]);
@@ -141,14 +195,18 @@ export function ConnectionFields({
       if (connectionScheme(connection) !== "spi") {
         setConnection(`spi://${pick?.spiPort ?? SPI_PORTS[0]}`);
       }
-    } else if (connectionScheme(connection) === "spi") {
+    } else if (v === "openhop") {
+      if (connectionScheme(connection) !== "openhop") setConnection("openhop://");
+    } else if (connectionScheme(connection) === "spi" || connectionScheme(connection) === "openhop") {
       setConnection(`serial://${ports[0]?.path ?? DEFAULT_SERIAL}`);
     }
   };
 
   const pickTransport = (v: string) => {
-    if (v === "tcp") setConnection("tcp://");
-    else setConnection(`serial://${ports[0]?.path ?? DEFAULT_SERIAL}`);
+    const dev = ports[0]?.path ?? DEFAULT_SERIAL;
+    if (openhop) setConnection(v === "tcp" ? "openhop://" : `openhop://${dev}`);
+    else if (v === "tcp") setConnection("tcp://");
+    else setConnection(`serial://${dev}`);
   };
 
   const pickBoard = (name: string) => {
@@ -167,7 +225,9 @@ export function ConnectionFields({
         hint={
           spi
             ? "A radio wired to this host's SPI bus. No MeshCore firmware involved."
-            : "MeshCore firmware driving the radio, over serial or TCP."
+            : openhop
+              ? "openHop Modem firmware, which owns the radio and does its own listen-before-talk."
+              : "MeshCore firmware driving the radio, over serial or TCP."
         }
       />
 
@@ -211,13 +271,33 @@ export function ConnectionFields({
             onChange={pickTransport}
           />
           {transport === "tcp" ? (
-            <TextField
-              label="Address"
-              value={target}
-              onChange={(v) => setConnection(`tcp://${v.trim()}`)}
-              placeholder="192.168.1.50:5000"
-              hint="host:port of a MeshCore node exposing its KISS interface over the network"
-            />
+            <>
+              <TextField
+                label="Address"
+                value={target}
+                onChange={(v) => setTarget(v)}
+                placeholder={openhop ? "192.168.1.50:5055" : "192.168.1.50:5000"}
+                hint={
+                  openhop
+                    ? "host:port of an openHop Modem on the network; its own default port is 5055"
+                    : "host:port of a MeshCore node exposing its KISS interface over the network"
+                }
+              />
+              {openhop ? (
+                <TextField
+                  label="Token"
+                  type="password"
+                  value={modemToken}
+                  onChange={setModemToken}
+                  placeholder={modemTokenSet ? "\u2022\u2022\u2022\u2022\u2022\u2022 saved" : "blank if the modem has no token"}
+                  hint={
+                    modemTokenSet
+                      ? "leave blank to keep the stored token"
+                      : "The modem's own access token. Only network clients authenticate."
+                  }
+                />
+              ) : null}
+            </>
           ) : (
             <>
               {ports.length > 0 ? (
@@ -228,14 +308,14 @@ export function ConnectionFields({
                     value: p.path,
                     label: p.label ? `${p.label} · ${p.device}` : p.device,
                   }))}
-                  onChange={(v) => setConnection(`serial://${v}`)}
+                  onChange={(v) => setTarget(v)}
                   hint={serialHint(ports, target)}
                 />
               ) : (
                 <TextField
                   label="Device"
                   value={target}
-                  onChange={(v) => setConnection(`serial://${v.trim()}`)}
+                  onChange={(v) => setTarget(v)}
                   placeholder={DEFAULT_SERIAL}
                   hint="No serial devices detected. Plug the modem in, or type its path."
                 />

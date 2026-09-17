@@ -19,7 +19,7 @@ import {
   Users,
   Waves,
 } from "lucide-react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Sidebar,
   SidebarContent,
@@ -49,6 +49,12 @@ import { type ConfigCompanion } from "@/lib/configApi";
 import { useTheme } from "@/lib/theme";
 import { truncateMid } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { useCompanionsChanged } from "@/lib/companionsChanged";
+import {
+  companionIdFromRef,
+  companionPath,
+  findByRef,
+} from "@/lib/companionRef";
 
 type IconType = React.ComponentType<React.SVGProps<SVGSVGElement>>;
 
@@ -224,10 +230,12 @@ function CommsSection({
   const { isMobile, setOpenMobile } = useSidebar();
   const closeMobile = () => isMobile && setOpenMobile(false);
 
-  // The selected companion (if any) from /companions/<name>[/...].
+  // The selected companion (if any) from /companions/<ref>[/...].
   const seg = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  const activeCompanion =
-    seg[0] === "companions" && seg[1] ? seg[1] : null;
+  const activeItem =
+    seg[0] === "companions" && seg[1]
+      ? findByRef(seg[1], companions)
+      : undefined;
 
   return (
     <SidebarGroup>
@@ -256,7 +264,7 @@ function CommsSection({
             {companions.length > 0 && (
               <SidebarMenuSub>
                 {companions.map((c) => {
-                  const active = activeCompanion === c.name;
+                  const active = activeItem === c;
                   return (
                     <SidebarMenuSubItem key={c.id}>
                       <SidebarMenuSubButton
@@ -269,7 +277,7 @@ function CommsSection({
                         )}
                       >
                         <Link
-                          to={`/companions/${encodeURIComponent(c.name)}`}
+                          to={companionPath(c)}
                           onClick={closeMobile}
                           title={c.name}
                         >
@@ -347,6 +355,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       reloadCompanions();
     }
   }, [pathname, reloadCompanions]);
+  useCompanionsChanged(reloadCompanions);
+
+  // A link made before refs existed still resolves, but swapping it for the ref on arrival means
+  // the next rename cannot break the bookmark the user just followed.
+  const navigate = useNavigate();
+  useEffect(() => {
+    const seg = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (seg[0] !== "companions" || !seg[1]) return;
+    if (companionIdFromRef(seg[1]) != null) return;
+    const c = (companions ?? []).find((x) => x.name === seg[1]);
+    if (!c) return;
+    const tail = seg.slice(2).map(encodeURIComponent).join("/");
+    navigate(
+      companionPath(c, tail ? `/${tail}` : "") + location.search + location.hash,
+      { replace: true },
+    );
+  }, [pathname, companions, navigate, location.search, location.hash]);
 
   return (
     <SidebarProvider
@@ -414,8 +439,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Separator orientation="vertical" className="h-5" />
           <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground min-w-0 overflow-hidden">
             <Waves className="size-3.5 text-primary shrink-0" />
-            <span className="text-foreground truncate hidden sm:inline">{routeLabel(pathname)}</span>
-            <span className="text-foreground truncate sm:hidden">{routeLabelShort(pathname)}</span>
+            <span className="text-foreground truncate hidden sm:inline">{routeLabel(pathname, companions ?? [])}</span>
+            <span className="text-foreground truncate sm:hidden">{routeLabelShort(pathname, companions ?? [])}</span>
           </div>
           <div className="ml-auto flex items-center gap-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">
             <ClockBadge />
@@ -431,32 +456,39 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function routeLabel(pathname: string): string {
+// The companion segment is a "<id>-<slug>" ref, not a name, so the header has to resolve it or it
+// reads the link rather than the companion. The raw segment stands in until the roster loads.
+function companionLabel(seg: string, companions: ConfigCompanion[]): string {
+  return findByRef(seg, companions)?.name ?? seg;
+}
+
+function routeLabel(pathname: string, companions: ConfigCompanion[]): string {
   if (pathname === "/") return "overview";
   const seg = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (seg.length === 0) return "overview";
+  const who = seg[1] ? companionLabel(seg[1], companions) : "";
   if (seg[0] === "companions" && seg[1] && seg[2] === "repeaters")
-    return `companions / ${seg[1]} / repeater`;
+    return `companions / ${who} / repeater`;
   if (seg[0] === "companions" && seg[1] && seg[2] === "sensors")
-    return `companions / ${seg[1]} / sensor`;
+    return `companions / ${who} / sensor`;
   if (seg[0] === "companions" && seg[1] && seg[2] === "rooms")
-    return `companions / ${seg[1]} / room`;
+    return `companions / ${who} / room`;
   if (seg[0] === "companions" && seg[1] && seg[2])
-    return `companions / ${seg[1]} / ${seg[2]}`;
-  if (seg[0] === "companions" && seg[1]) return `companions / ${seg[1]}`;
+    return `companions / ${who} / ${seg[2]}`;
+  if (seg[0] === "companions" && seg[1]) return `companions / ${who}`;
   if (seg[0] === "monitoring" && seg[1]) return `monitoring / ${truncateMid(seg[1], 8, 4)}`;
   return seg.join(" / ");
 }
 
 // The phone header has room for one segment only.
-function routeLabelShort(pathname: string): string {
+function routeLabelShort(pathname: string, companions: ConfigCompanion[]): string {
   if (pathname === "/") return "overview";
   const seg = pathname.split("/").filter(Boolean).map(decodeURIComponent);
   if (seg[0] === "companions" && seg[1] && seg[2] === "repeaters") return "repeater";
   if (seg[0] === "companions" && seg[1] && seg[2] === "sensors") return "sensor";
   if (seg[0] === "companions" && seg[1] && seg[2] === "rooms") return "room";
   if (seg[0] === "companions" && seg[1] && seg[2]) return seg[2];
-  if (seg[0] === "companions" && seg[1]) return seg[1];
+  if (seg[0] === "companions" && seg[1]) return companionLabel(seg[1], companions);
   if (seg[0] === "monitoring" && seg[1]) return "monitoring";
   return seg[seg.length - 1] ?? "overview";
 }
@@ -472,7 +504,7 @@ function BottomNav({
   const { setOpenMobile } = useSidebar();
   const messagesTo =
     companions.length === 1
-      ? `/companions/${encodeURIComponent(companions[0].name)}`
+      ? companionPath(companions[0])
       : "/companions";
   const items: NavItem[] = [
     PRIMARY[0],

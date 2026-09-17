@@ -27,9 +27,16 @@ func TestSettings_RoundTripsEveryColumn(t *testing.T) {
 		TX:             intPtr2(22),
 		ListenAddr:     strPtr(":8081"),
 		MapTileKey:     strPtr("tile-key"),
+		ModemToken:     strPtr("s3cret"),
 		PathHashSize:   intPtr2(2),
 		DutyCyclePct:   fltPtr(12.5),
 		SetupComplete:  true,
+	}
+	// Seed a different row first, so the assertions below run against the UPDATE arm of Set's
+	// upsert. That is the arm every save after the first one takes, and a column left out of the
+	// ON CONFLICT list is invisible to an insert-only test.
+	if err := st.Settings.Set(ctx, &Settings{ConnectionType: "kiss", Connection: strPtr("serial:///dev/ttyACM0")}); err != nil {
+		t.Fatalf("seed Set: %v", err)
 	}
 	if err := st.Settings.Set(ctx, want); err != nil {
 		t.Fatalf("Set: %v", err)
@@ -54,6 +61,7 @@ func TestSettings_RoundTripsEveryColumn(t *testing.T) {
 	eqStr("spiBoard", want.SPIBoard, got.SPIBoard)
 	eqStr("listenAddr", want.ListenAddr, got.ListenAddr)
 	eqStr("mapTileKey", want.MapTileKey, got.MapTileKey)
+	eqStr("modemToken", want.ModemToken, got.ModemToken)
 	if got.ConnectionType != want.ConnectionType {
 		t.Errorf("connectionType: got %q, want %q", got.ConnectionType, want.ConnectionType)
 	}

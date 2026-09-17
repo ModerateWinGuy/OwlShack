@@ -157,8 +157,11 @@ func (r *Repeater) dispatchCLI(cmd string) string {
 		return "Err - discover.neighbors has no options"
 	case cmd == "neighbors":
 		return r.neighborsList()
-	case strings.HasPrefix(cmd, "neighbor.remove "):
-		return r.cliNeighborRemove(strings.TrimSpace(cmd[len("neighbor.remove "):]))
+	// dispatchCLI trims the command, which eats the trailing space the firmware treats as
+	// significant (memcmp of "neighbor.remove " is 16 chars), so the no-argument form has to be
+	// matched separately or the app's "Remove all Neighbours" reads as an unknown command.
+	case cmd == "neighbor.remove", strings.HasPrefix(cmd, "neighbor.remove "):
+		return r.cliNeighborRemove(strings.TrimSpace(strings.TrimPrefix(cmd, "neighbor.remove")))
 	case cmd == "clear stats":
 		r.clearStats()
 		return "(OK - stats reset)"
@@ -527,9 +530,12 @@ func (r *Repeater) cliPassword(pass string) string {
 }
 
 // cliNeighborRemove matches on the bytes supplied; the firmware accepts a prefix.
+// An empty pubkey is a zero-length prefix that matches every entry, which is how the app sends
+// "Remove all Neighbours": the firmware's fromHex(dest, 0, "") succeeds and its memcmp of 0 bytes
+// is always equal (CommonCLI.cpp:230-239, examples/simple_repeater/MyMesh.cpp:1134-1142). Rejecting it broke that button.
 func (r *Repeater) cliNeighborRemove(pubHex string) string {
 	pub, err := hex.DecodeString(strings.ToLower(pubHex))
-	if err != nil || len(pub) == 0 || len(pub) > 32 {
+	if err != nil || len(pub) > 32 {
 		return "ERR: bad pubkey"
 	}
 	r.removeNeighbor(pub)

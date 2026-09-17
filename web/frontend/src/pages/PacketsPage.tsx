@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, CircleDashed, RefreshCw, Search } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useApiList } from "@/hooks/useApiList";
+import { useResume } from "@/lib/resume";
+import { HopPath, type PathPeer } from "@/components/HopPath";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -52,8 +54,12 @@ interface Packet {
 
 interface PacketGroup {
   key: string;
-  latest: Packet;
+  // origin is what the row renders: our own transmission when we sent the packet, otherwise the
+  // first time we heard it. Rendering the newest observation instead flipped a packet we sent to RX
+  // the moment a relay echoed it back — and took its route and hop count with it.
+  origin: Packet;
   // Parsed once during grouping so the sort comparator allocates no Date objects.
+  originTs: number;
   latestTs: number;
   observations: Packet[];
 }
@@ -79,6 +85,24 @@ function payloadLabel(pt: number | undefined): string {
   return PAYLOAD_TYPE_LABELS[pt] ?? `T${pt}`;
 }
 
+// A hop count means opposite things by route type: a flood ACCUMULATES a hash at each relay, so the
+// count is how far the packet has come; a direct route CONSUMES one, so the count is how far it has
+// left to go. Live proof of the second: one packet logged as DIRECT hops=2 path=e640 on transmit
+// came back as hops=1 path=40 after a single relay.
+function hopSense(route: string | undefined): string | null {
+  if (!route) return null;
+  return route.includes("DIRECT") ? "remaining" : "travelled";
+}
+
+// "DIRECT" is the routing mode, not a hop count — a direct packet still crosses its stored path.
+// Carrying the count in the same cell stops it reading as "went straight there" on the narrow
+// layouts, where the Hops column is hidden entirely.
+function routeLabel(p: Packet): string {
+  if (!p.route) return "—";
+  if (!p.hops) return p.route;
+  return `${p.route} · ${p.hops}`;
+}
+
 function packetKey(p: Packet): string {
   if (p.packetHash && p.packetHash.length > 0) return p.packetHash;
   return `${p.direction}:${p.raw}`;
@@ -98,6 +122,19 @@ const FILTER_LIMIT = 500;
 
 const NO_PACKETS: Packet[] = [];
 
+// beatsOrigin decides which observation represents the packet: the first one seen, TX or RX alike.
+// A repeat never rewrites the row, it only joins the observation list. Row id beats timestamp where
+// both are known, being insertion order rather than a clock — live socket packets carry no id yet,
+// hence the fallback. Observations arrive newest-first from the API but oldest-first over the
+// socket, so neither comparison can trust arrival order. receivedAt must therefore carry sub-second
+// precision (both surfaces send RFC3339Nano): at second resolution a relay's echo and our own
+// transmit tie, the strict comparison cannot break the tie, and whichever the loop happened to meet
+// first became the row — the exact flapping this function exists to stop.
+function beatsOrigin(p: Packet, ts: number, g: PacketGroup): boolean {
+  if (p.id != null && g.origin.id != null) return p.id < g.origin.id;
+  return ts < g.originTs;
+}
+
 // Collapses observations sharing a packet hash into one group, newest first.
 function buildGroups(packets: Packet[]): PacketGroup[] {
   const map = new Map<string, PacketGroup>();
@@ -106,26 +143,36 @@ function buildGroups(packets: Packet[]): PacketGroup[] {
     const ts = new Date(p.receivedAt).getTime();
     const existing = map.get(k);
     if (!existing) {
-      map.set(k, { key: k, latest: p, latestTs: ts, observations: [p] });
-    } else {
-      existing.observations.push(p);
-      if (ts > existing.latestTs) {
-        existing.latest = p;
-        existing.latestTs = ts;
-      }
+      map.set(k, { key: k, origin: p, originTs: ts, latestTs: ts, observations: [p] });
+      continue;
+    }
+    existing.observations.push(p);
+    if (ts > existing.latestTs) existing.latestTs = ts;
+    if (beatsOrigin(p, ts, existing)) {
+      existing.origin = p;
+      existing.originTs = ts;
     }
   }
-  return Array.from(map.values()).sort((a, b) => b.latestTs - a.latestTs);
+  // Ordered by origin, not by the last echo: sorting on latestTs would show one time and order by
+  // another, and would jump an old packet back to the top every time a relay repeated it.
+  return Array.from(map.values()).sort((a, b) => b.originTs - a.originTs);
 }
 
 export function PacketsPage() {
+  // Hop hashes are resolved against the peer table; a failure here only leaves hops as hex.
+  const { items: peers } = useApiList<PathPeer>(
+    "/api/peers",
+    "Failed to load peers",
+  );
   const {
     items,
     setItems: setPackets,
     loading,
     error,
     reload,
+    refresh,
   } = useApiList<Packet>("/api/packets?limit=100", "Failed to load packets");
+  useResume(refresh);
   const livePackets = items ?? NO_PACKETS;
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -172,7 +219,7 @@ export function PacketsPage() {
   const typeFilters = useMemo(() => {
     const counts = new Map<number, number>();
     for (const g of liveGroups) {
-      const pt = g.latest.payloadType;
+      const pt = g.origin.payloadType;
       if (pt == null) continue;
       counts.set(pt, (counts.get(pt) ?? 0) + 1);
     }
@@ -334,7 +381,7 @@ export function PacketsPage() {
               </div>
             ) : (
               groups.map((g) => {
-                const p = g.latest;
+                const p = g.origin;
                 const isSelected = selectedKey === g.key;
                 const heard = g.observations.length;
                 return (
@@ -375,7 +422,7 @@ export function PacketsPage() {
                       {p.snr != null && (
                         <span className={snrTextClass(p.snr)}>{p.snr.toFixed(1)}dB</span>
                       )}
-                      {p.hops != null && <span>{p.hops} hop{p.hops !== 1 ? "s" : ""}</span>}
+                      {p.route && <span className="uppercase">{routeLabel(p)}</span>}
                     </div>
                   </div>
                 );
@@ -429,7 +476,7 @@ export function PacketsPage() {
                 </TableRow>
               ) : (
                 groups.map((g) => {
-                  const p = g.latest;
+                  const p = g.origin;
                   const isSelected = selectedKey === g.key;
                   const heard = g.observations.length;
                   return (
@@ -475,7 +522,7 @@ export function PacketsPage() {
                       </TableCell>
                       <TableCell>
                         <span className="font-mono text-xs uppercase tracking-[0.08em] text-muted-foreground">
-                          {p.route || "—"}
+                          {routeLabel(p)}
                         </span>
                       </TableCell>
                       <TableCell className="hidden md:table-cell text-right font-mono text-xs tabular-nums text-muted-foreground">
@@ -548,6 +595,7 @@ export function PacketsPage() {
           {selected && (
             <PacketDetail
               group={selected}
+              peers={peers}
               onClose={() => setSelectedKey(null)}
             />
           )}
@@ -559,12 +607,14 @@ export function PacketsPage() {
 
 function PacketDetail({
   group,
+  peers,
   onClose,
 }: {
   group: PacketGroup;
+  peers: PathPeer[] | null;
   onClose: () => void;
 }) {
-  const p = group.latest;
+  const p = group.origin;
   const heard = group.observations.length;
   const sortedObs = useMemo(
     () =>
@@ -649,16 +699,27 @@ function PacketDetail({
             </dd>
 
             <dt className="label-overline">Path</dt>
-            <dd className="tabular-nums break-all">
-              {p.path ? (
-                p.path
-              ) : (
-                <span className="text-muted-foreground/60">—</span>
-              )}
+            <dd className="break-all">
+              <HopPath
+                path={p.path}
+                hashSize={p.pathHashSize}
+                direction={p.direction}
+                route={p.route}
+                peers={peers}
+              />
             </dd>
 
             <dt className="label-overline">Hops</dt>
-            <dd className="tabular-nums">{p.hops != null ? p.hops : "—"}</dd>
+            <dd className="tabular-nums">
+              {p.hops != null ? (
+                <>
+                  {p.hops}
+                  <span className="text-muted-foreground/60"> {hopSense(p.route)}</span>
+                </>
+              ) : (
+                "—"
+              )}
+            </dd>
 
             <dt className="label-overline">Signal</dt>
             <dd className="tabular-nums">
@@ -700,16 +761,21 @@ function PacketDetail({
                 {heard}
               </span>
             </div>
-            <Table>
+            {/* Fixed layout, or a long hop chain widens the table instead of wrapping: a 31-hop
+                path stretched this to 3032px inside a 479px sheet. */}
+            <Table className="table-fixed w-full">
               <TableHeader>
                 <TableRow className="border-border hover:bg-transparent">
                   <TableHead className="font-mono text-[10px] uppercase tracking-[0.12em] pl-5">
                     Time
                   </TableHead>
-                  <TableHead className="font-mono text-[10px] uppercase tracking-[0.12em] w-[44px] text-center">
+                  <TableHead className="font-mono text-[10px] uppercase tracking-[0.12em] w-9 text-center">
                     Dir
                   </TableHead>
-                  <TableHead className="font-mono text-[10px] uppercase tracking-[0.12em] text-right pr-5">
+                  <TableHead className="font-mono text-[10px] uppercase tracking-[0.12em] w-20">
+                    Route
+                  </TableHead>
+                  <TableHead className="font-mono text-[10px] uppercase tracking-[0.12em] w-16 text-right pr-5">
                     SNR
                   </TableHead>
                 </TableRow>
@@ -718,12 +784,34 @@ function PacketDetail({
                 {sortedObs.map((o, i) => (
                   <TableRow
                     key={`${o.receivedAt}-${i}`}
-                    className="border-border/60"
+                    className={cn(
+                      "border-border/60",
+                      o === p && "bg-primary/5",
+                    )}
                   >
-                    <TableCell className="font-mono text-xs tabular-nums pl-5 text-muted-foreground">
-                      {formatDateTime(o.receivedAt)}
+                    {/* TableCell ships whitespace-nowrap, which outranks table-fixed and would keep
+                        a long hop chain on one line. */}
+                    <TableCell className="pl-5 align-top space-y-0.5 whitespace-normal">
+                      <div className="font-mono text-xs tabular-nums text-muted-foreground">
+                        {formatDateTime(o.receivedAt)}
+                        {o === p && (
+                          <span className="ml-2 text-[10px] uppercase tracking-[0.08em] text-primary">
+                            first
+                          </span>
+                        )}
+                      </div>
+                      <div className="[overflow-wrap:anywhere]">
+                        <HopPath
+                          path={o.path}
+                          hashSize={o.pathHashSize}
+                          direction={o.direction}
+                          route={o.route}
+                          peers={peers}
+                          compact
+                        />
+                      </div>
                     </TableCell>
-                    <TableCell className="text-center">
+                    <TableCell className="text-center align-top">
                       <span
                         className={cn(
                           "font-mono text-sm",
@@ -735,7 +823,10 @@ function PacketDetail({
                         {dirGlyph(o.direction)}
                       </span>
                     </TableCell>
-                    <TableCell className="text-right font-mono text-xs tabular-nums pr-5">
+                    <TableCell className="align-top font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+                      {routeLabel(o)}
+                    </TableCell>
+                    <TableCell className="text-right align-top font-mono text-xs tabular-nums pr-5">
                       {o.snr != null ? (
                         <span className={snrTextClass(o.snr)}>
                           {o.snr.toFixed(1)}dB

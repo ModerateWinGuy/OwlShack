@@ -208,10 +208,11 @@ export function RadioHealthPage() {
 
       <section className="flex flex-col gap-2">
         <SectionTitle eyebrow="Receive" title="Losses and stalls" />
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-border rounded-md overflow-hidden">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-px bg-border rounded-md overflow-hidden">
           <StatTile label="Queue full (new)" value={num(status.inboundDroppedNew)} band={faultBand(status.inboundDroppedNew)} />
           <StatTile label="Queue full (oldest)" value={opt(status.inboundDroppedOldest)} band={faultBand(status.inboundDroppedOldest ?? 0)} />
-          <StatTile label="Decode errors" value={num(status.hwDecodeErrors)} band={faultBand(status.hwDecodeErrors)} />
+          <StatTile label="Board frame decode" value={opt(status.hwDecodeErrors)} band={faultBand(status.hwDecodeErrors ?? 0)} />
+          <StatTile label="Radio recv errors" value={opt(status.recvErrors)} band={faultBand(status.recvErrors ?? 0)} />
           <StatTile label="Handler slow" value={num(status.handlerSlow)} band={faultBand(status.handlerSlow)} />
           <StatTile label="Hardware errors" value={opt(status.hwErrors)} band={faultBand(status.hwErrors ?? 0)} />
           <StatTile label="TX outcome lost" value={opt(status.txOutcomeLost)} band={faultBand(status.txOutcomeLost ?? 0)} />

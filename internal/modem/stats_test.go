@@ -1,6 +1,11 @@
 package modem
 
-import "testing"
+import (
+	"log/slog"
+	"testing"
+
+	"github.com/meshcore-go/meshcore-go/hardware"
+)
 
 // Zero radio params must give 0 rather than a fabricated number the caller would publish.
 func TestKissStatsProvider_DerivedValues(t *testing.T) {
@@ -20,5 +25,35 @@ func TestKissStatsProvider_DerivedValues(t *testing.T) {
 
 	if ms := (&kissStatsProvider{}).EstAirtimeMs(16); ms != 0 {
 		t.Errorf("EstAirtimeMs with no radio params = %d, want 0", ms)
+	}
+}
+
+// nil must mean the modem did not answer: a 0 here would read as a radio hearing everything cleanly.
+func TestKissLinkStats_FirmwareCountersAbsentUntilPolled(t *testing.T) {
+	p := &kissStatsProvider{modem: &hardware.KissModem{}, log: slog.Default()}
+
+	ls := p.LinkStats()
+	if ls.RecvErrors != nil || ls.PacketsRecv != nil || ls.PacketsSent != nil {
+		t.Errorf("unpolled: RecvErrors=%v PacketsRecv=%v PacketsSent=%v, want all nil",
+			ls.RecvErrors, ls.PacketsRecv, ls.PacketsSent)
+	}
+
+	p.mu.Lock()
+	p.fwCounters = &hardware.FirmwareStats{PacketsRecv: 900, PacketsSent: 12, PacketsErrors: 4}
+	p.mu.Unlock()
+
+	ls = p.LinkStats()
+	if ls.RecvErrors == nil || *ls.RecvErrors != 4 {
+		t.Errorf("RecvErrors = %v, want 4", ls.RecvErrors)
+	}
+	if ls.PacketsRecv == nil || *ls.PacketsRecv != 900 {
+		t.Errorf("PacketsRecv = %v, want 900", ls.PacketsRecv)
+	}
+	if ls.PacketsSent == nil || *ls.PacketsSent != 12 {
+		t.Errorf("PacketsSent = %v, want 12", ls.PacketsSent)
+	}
+	// KISS measures this one and SPI does not; the reverse of the fields above.
+	if ls.HwDecodeErrors == nil {
+		t.Error("HwDecodeErrors = nil on KISS, where a SETHARDWARE frame can fail to decode")
 	}
 }

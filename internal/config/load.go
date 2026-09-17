@@ -93,9 +93,9 @@ func Marshal(path string, cfg *Config) ([]byte, error) {
 	}
 }
 
-// ParseConnection splits "serial://<addr>" or "tcp://<addr>" into scheme and address.
+// ParseConnection splits "serial://<addr>", "tcp://<addr>", "spi://<addr>" or "openhop://<addr>" into scheme and address.
 func ParseConnection(conn string) (scheme, addr string, ok bool) {
-	for _, prefix := range []string{"serial://", "tcp://", "spi://"} {
+	for _, prefix := range []string{"serial://", "tcp://", "spi://", "openhop://"} {
 		if strings.HasPrefix(conn, prefix) {
 			return strings.TrimSuffix(prefix, "://"), conn[len(prefix):], true
 		}
@@ -108,7 +108,7 @@ func (c *Config) Validate() error {
 	if c.Connection != nil {
 		scheme, _, ok := ParseConnection(*c.Connection)
 		if !ok {
-			return fmt.Errorf("invalid connection string %q: must start with serial://, tcp:// or spi://", *c.Connection)
+			return fmt.Errorf("invalid connection string %q: must start with serial://, tcp://, spi:// or openhop://", *c.Connection)
 		}
 		// This process drives the radio, so the pins are unknown rather than defaultable.
 		if scheme == "spi" && (c.SPIBoard == nil || *c.SPIBoard == "") {
@@ -169,6 +169,18 @@ func (c *Config) Validate() error {
 		}
 		if v := comp.PathHashSize; v != nil && (*v < MinPathHashSize || *v > MaxPathHashSize) {
 			return fmt.Errorf("companion %q: pathHashSize must be %d-%d bytes", comp.Name, MinPathHashSize, MaxPathHashSize)
+		}
+		switch comp.DMPolicyOrDefault() {
+		case DMPolicyContacts, DMPolicyAllowlist, DMPolicyAnyone:
+		default:
+			return fmt.Errorf("companion %q: dmPolicy must be %q, %q or %q", comp.Name, DMPolicyContacts, DMPolicyAllowlist, DMPolicyAnyone)
+		}
+		if comp.DMAllow != nil {
+			for _, k := range *comp.DMAllow {
+				if err := validateDMAllowKey(k); err != nil {
+					return fmt.Errorf("companion %q dmAllow: %w", comp.Name, err)
+				}
+			}
 		}
 		if comp.Triggers != nil {
 			for j, trig := range *comp.Triggers {

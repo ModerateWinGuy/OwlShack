@@ -4,11 +4,16 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/meshcore-go/OwlShack/internal/store"
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
+
+// TimestampLayout is RFC 3339 with exactly three fractional digits. Packet observations are
+// ordered by this on the client, so the fraction has to be there — but ECMAScript defines only
+// three digits and treats more as implementation-defined, and this ships as a PWA on phones, so
+// RFC3339Nano's variable 0-9 digits would be a bet on every viewer's engine.
+const TimestampLayout = "2006-01-02T15:04:05.000Z07:00"
 
 func (s *Server) handleListPackets(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -54,7 +59,7 @@ func (s *Server) handleListPackets(w http.ResponseWriter, r *http.Request) {
 	for _, p := range packets {
 		j := packetJSON{
 			ID:          p.ID,
-			ReceivedAt:  p.ReceivedAt.UTC().Format(time.RFC3339),
+			ReceivedAt:  p.ReceivedAt.UTC().Format(TimestampLayout),
 			Direction:   p.Direction,
 			Raw:         hex.EncodeToString(p.Raw),
 			RouteType:   p.RouteType,

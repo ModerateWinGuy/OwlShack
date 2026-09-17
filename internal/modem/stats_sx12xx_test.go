@@ -40,8 +40,12 @@ func TestSx12xxStats_KeepsCRCAndDriverErrorsSeparate(t *testing.T) {
 	if ls.InboundDroppedNew != 5 {
 		t.Errorf("InboundDroppedNew = %d, want 5 (PacketsDropped)", ls.InboundDroppedNew)
 	}
-	if ls.HwDecodeErrors != 3 {
-		t.Errorf("HwDecodeErrors = %d, want 3 (PacketsRecvErrors)", ls.HwDecodeErrors)
+	// PacketsRecvErrors is the firmware's recv_errors, not a SETHARDWARE decode failure.
+	if ls.RecvErrors == nil || *ls.RecvErrors != 3 {
+		t.Errorf("RecvErrors = %v, want 3 (PacketsRecvErrors)", ls.RecvErrors)
+	}
+	if ls.HwDecodeErrors != nil {
+		t.Errorf("HwDecodeErrors = %v, want nil: SETHARDWARE frames do not exist on SPI", *ls.HwDecodeErrors)
 	}
 	// Without PacketsRecv a 0 CRC count reads the same on a healthy quiet channel and a deaf radio.
 	if ls.PacketsRecv == nil || *ls.PacketsRecv != 100 {
@@ -52,7 +56,7 @@ func TestSx12xxStats_KeepsCRCAndDriverErrorsSeparate(t *testing.T) {
 	}
 	// Nil, not zero: a 0 here would tell a consumer the SPI path measured these and saw none.
 	if ls.RxMetaTimeouts != nil || ls.RxMetaMisattributed != nil || ls.HwErrors != nil ||
-		ls.TxOutcomeLost != nil || ls.InboundDroppedOldest != nil {
+		ls.TxOutcomeLost != nil || ls.InboundDroppedOldest != nil || ls.HwDecodeErrors != nil {
 		t.Errorf("a KISS-only field was populated on the SPI path: %+v", ls)
 	}
 }

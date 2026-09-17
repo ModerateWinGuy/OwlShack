@@ -135,12 +135,12 @@ type Observer struct {
 	floodTx  atomic.Uint64
 	directTx atomic.Uint64
 	// relaying is the repeater's `repeat` setting; false when no repeater runs here.
-	relaying   atomic.Bool
-	lastSNR    atomic.Int64 // quarter-dB, so the float survives an atomic
-	lastRSSI   atomic.Int32
-	floodDups  atomic.Uint64
-	directDups atomic.Uint64
-	recvErrors *atomic.Uint64
+	relaying    atomic.Bool
+	lastSNR     atomic.Int64 // quarter-dB, so the float survives an atomic
+	lastRSSI    atomic.Int32
+	floodDups   atomic.Uint64
+	directDups  atomic.Uint64
+	parseErrors *atomic.Uint64
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -252,20 +252,20 @@ func (o *Observer) BrokerStatuses() []BrokerStatus {
 	return out
 }
 
-func NewObserver(cfg config.MqttConfig, name string, mux *node.RadioMux, id meshcore.LocalIdentity, stats modem.StatsProvider, recvErrors *atomic.Uint64) (*Observer, error) {
+func NewObserver(cfg config.MqttConfig, name string, mux *node.RadioMux, id meshcore.LocalIdentity, stats modem.StatsProvider, parseErrors *atomic.Uint64) (*Observer, error) {
 	pkHex := publicKeyHex(id)
 	radio := mux.NewRadio()
 
 	obs := &Observer{
-		radio:      radio,
-		mux:        mux,
-		id:         id,
-		cfg:        cfg,
-		stats:      stats,
-		recvErrors: recvErrors,
-		originName: name,
-		pubKeyHx:   pkHex,
-		log:        slog.Default().With("component", "mqtt", "observer", name),
+		radio:       radio,
+		mux:         mux,
+		id:          id,
+		cfg:         cfg,
+		stats:       stats,
+		parseErrors: parseErrors,
+		originName:  name,
+		pubKeyHx:    pkHex,
+		log:         slog.Default().With("component", "mqtt", "observer", name),
 	}
 
 	return obs, nil
@@ -713,7 +713,7 @@ func (o *Observer) publishStatus(ctx context.Context, bc *brokerClient, status s
 	}
 
 	payload, err := formatStatus(status, o.originName, o.pubKeyHx, radio, ds, packets,
-		o.txCounts(), o.linkStats(), o.observerCounts(), o.recvErrors.Load())
+		o.txCounts(), o.linkStats(), o.observerCounts(), o.parseErrors.Load())
 	if err != nil {
 		o.log.Error("status format error", "error", err)
 		return

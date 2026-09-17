@@ -1,4 +1,4 @@
-// Package modem connects to the KISS radio hardware and exposes it as a node.Modem, a stats provider and the standard mux options.
+// Package modem connects to the radio hardware — KISS or openHop firmware, or a bare SX12xx — and exposes it as a node.Modem, a stats provider and the standard mux options.
 package modem
 
 import (
@@ -20,9 +20,10 @@ const handlerWatchdog = 500 * time.Millisecond
 
 // State holds a live modem connection with the resources torn down when it is replaced or shut down.
 type State struct {
-	Modem      node.Modem
-	Stats      StatsProvider
-	RecvErrors *atomic.Uint64
+	Modem node.Modem
+	Stats StatsProvider
+	// ParseErrors is intact bytes that did not decode as a MeshCore packet; the radio did its job.
+	ParseErrors *atomic.Uint64
 
 	radioConfig   *hardware.RadioConfig
 	airtimeFactor float64
@@ -135,7 +136,7 @@ func MuxOptions(ms *State) []node.MuxOption {
 		node.WithMuxLogger(slog.Default()),
 		node.WithMuxErrorHandler(func(err error) {
 			slog.Debug("mux receive error", "component", "modem", "error", err)
-			ms.RecvErrors.Add(1)
+			ms.ParseErrors.Add(1)
 		}),
 	}
 	if ms.radioConfig != nil {
@@ -145,10 +146,10 @@ func MuxOptions(ms *State) []node.MuxOption {
 	return opts
 }
 
-// Setup connects the radio: KISS firmware over serial/TCP, or a bare SX12xx on the host's SPI bus.
+// Setup connects the radio: KISS firmware over serial/TCP, openHop Modem firmware over serial/TCP, or a bare SX12xx on the host's SPI bus.
 func Setup(ctx context.Context, cfg *config.Config) (*State, error) {
 	ms := &State{
-		RecvErrors: &atomic.Uint64{},
+		ParseErrors: &atomic.Uint64{},
 	}
 
 	conn := *cfg.Connection
@@ -173,6 +174,8 @@ func Setup(ctx context.Context, cfg *config.Config) (*State, error) {
 	switch connScheme {
 	case "spi":
 		err = setupSPI(ms, cfg, connAddr, radioConfig)
+	case "openhop":
+		err = setupOpenhop(ctx, ms, cfg, connAddr, radioConfig)
 	default:
 		err = setupKiss(ctx, ms, cfg, connScheme, connAddr, radioConfig)
 	}

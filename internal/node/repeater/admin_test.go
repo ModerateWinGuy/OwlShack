@@ -437,6 +437,24 @@ func TestNeighborRemove(t *testing.T) {
 }
 
 // Pins the bare `region` reply against the firmware's exportTo.
+// "Remove all Neighbours" in the app sends an empty pubkey: a zero-length prefix matches every
+// entry, matching fromHex(dest, 0, "") plus a 0-byte memcmp in the firmware.
+func TestCLINeighborRemoveAll(t *testing.T) {
+	r := &Repeater{}
+	r.neighbors.m = map[[32]byte]*neighbor{}
+	var a, b [32]byte
+	a[0], b[0] = 0xaa, 0xcc
+	r.neighbors.m[a] = &neighbor{pubkey: a}
+	r.neighbors.m[b] = &neighbor{pubkey: b}
+
+	if got := r.runCLI("neighbor.remove "); got != "OK" {
+		t.Fatalf("empty pubkey = %q, want OK (this is the app's Remove all Neighbours)", got)
+	}
+	if len(r.neighbors.m) != 0 {
+		t.Errorf("%d neighbours left, want all cleared: %+v", len(r.neighbors.m), r.neighbors.m)
+	}
+}
+
 func TestRegionTree(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{
 		HomeRegion: "alpha",

@@ -15,10 +15,13 @@ type Trigger struct {
 	CharLimitBehaviour *string
 	MatchPatterns      []string
 	Contacts           []string
+	FailoverPattern    string
+	FailoverTimeout    int64
 	RetryTimeout       *int64
 	MaxRetries         *int
 	PathHashSize       *int
 	Schedule           *string
+	URL                string
 	ChannelIDs         []int64
 }
 
@@ -29,7 +32,7 @@ func (r *TriggerRepo) scanRow(s interface{ Scan(...any) error }) (*Trigger, erro
 	var match, contacts string
 	if err := s.Scan(
 		&t.ID, &t.CompanionID, &t.Type, &t.Template, &t.CharLimitBehaviour,
-		&match, &contacts, &t.RetryTimeout, &t.MaxRetries, &t.PathHashSize, &t.Schedule,
+		&match, &contacts, &t.RetryTimeout, &t.MaxRetries, &t.PathHashSize, &t.Schedule, &t.URL, &t.FailoverPattern, &t.FailoverTimeout,
 	); err != nil {
 		return nil, err
 	}
@@ -63,7 +66,7 @@ func (r *TriggerRepo) channelIDs(ctx context.Context, triggerID int64) ([]int64,
 func (r *TriggerRepo) List(ctx context.Context) ([]Trigger, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, companion_id, type, template, char_limit_behaviour,
-		       match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule
+		       match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule, url, failover_pattern, failover_timeout
 		FROM triggers ORDER BY companion_id ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("querying triggers: %w", err)
@@ -93,7 +96,7 @@ func (r *TriggerRepo) List(ctx context.Context) ([]Trigger, error) {
 func (r *TriggerRepo) ListByCompanion(ctx context.Context, companionID int64) ([]Trigger, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, companion_id, type, template, char_limit_behaviour,
-		       match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule
+		       match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule, url, failover_pattern, failover_timeout
 		FROM triggers WHERE companion_id = ? ORDER BY id ASC`, companionID)
 	if err != nil {
 		return nil, fmt.Errorf("querying triggers by companion: %w", err)
@@ -124,7 +127,7 @@ func (r *TriggerRepo) ListByCompanion(ctx context.Context, companionID int64) ([
 func (r *TriggerRepo) Get(ctx context.Context, id int64) (*Trigger, error) {
 	t, err := r.scanRow(r.db.QueryRowContext(ctx, `
 		SELECT id, companion_id, type, template, char_limit_behaviour,
-		       match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule
+		       match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule, url, failover_pattern, failover_timeout
 		FROM triggers WHERE id = ?`, id))
 	if err != nil {
 		return nil, fmt.Errorf("getting trigger: %w", err)
@@ -144,11 +147,11 @@ func (r *TriggerRepo) Create(ctx context.Context, t *Trigger) error {
 
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO triggers
-			(companion_id, type, template, char_limit_behaviour, match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(companion_id, type, template, char_limit_behaviour, match_patterns, contacts, retry_timeout, max_retries, path_hash_size, schedule, url, failover_pattern, failover_timeout)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.CompanionID, t.Type, t.Template, t.CharLimitBehaviour,
 		encodeList(t.MatchPatterns), encodeList(t.Contacts),
-		t.RetryTimeout, t.MaxRetries, t.PathHashSize, t.Schedule)
+		t.RetryTimeout, t.MaxRetries, t.PathHashSize, t.Schedule, t.URL, t.FailoverPattern, t.FailoverTimeout)
 	if err != nil {
 		return fmt.Errorf("inserting trigger: %w", err)
 	}
@@ -173,10 +176,10 @@ func (r *TriggerRepo) Update(ctx context.Context, t *Trigger) error {
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE triggers SET type=?, template=?, char_limit_behaviour=?, match_patterns=?, contacts=?,
-			retry_timeout=?, max_retries=?, path_hash_size=?, schedule=?
+			retry_timeout=?, max_retries=?, path_hash_size=?, schedule=?, url=?, failover_pattern=?, failover_timeout=?
 		WHERE id=?`,
 		t.Type, t.Template, t.CharLimitBehaviour, encodeList(t.MatchPatterns), encodeList(t.Contacts),
-		t.RetryTimeout, t.MaxRetries, t.PathHashSize, t.Schedule, t.ID); err != nil {
+		t.RetryTimeout, t.MaxRetries, t.PathHashSize, t.Schedule, t.URL, t.FailoverPattern, t.FailoverTimeout, t.ID); err != nil {
 		return fmt.Errorf("updating trigger: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM trigger_channels WHERE trigger_id = ?`, t.ID); err != nil {

@@ -103,12 +103,12 @@ func testObserver(t *testing.T) *Observer {
 	seed[0] = 1 // deterministic; the identity only has to exist and be stable
 	id := meshcore.NewLocalIdentityFromSeed(seed)
 	return &Observer{
-		log:        slog.New(slog.DiscardHandler),
-		id:         id,
-		originName: "test",
-		pubKeyHx:   publicKeyHex(id),
-		health:     map[string]*brokerHealth{},
-		recvErrors: &atomic.Uint64{},
+		log:         slog.New(slog.DiscardHandler),
+		id:          id,
+		originName:  "test",
+		pubKeyHx:    publicKeyHex(id),
+		health:      map[string]*brokerHealth{},
+		parseErrors: &atomic.Uint64{},
 	}
 }
 

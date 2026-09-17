@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useCompanionRef } from "@/hooks/useCompanions";
 import {
   CircleDashed,
   Crosshair,
@@ -52,8 +53,8 @@ interface Peer {
 const HEX64 = /^[0-9a-fA-F]{64}$/;
 
 export function RepeatersListPage() {
-  const { name } = useParams();
-  const companion = decodeURIComponent(name ?? "");
+  const { ref } = useParams();
+  const { ref: companion, name: companionName } = useCompanionRef(ref);
 
   const [contacts, setContacts] = useState<Contact[] | null>(null);
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -196,7 +197,7 @@ export function RepeatersListPage() {
       <div className="flex flex-col gap-3">
         <BackLink
           to={`/companions/${encodeURIComponent(companion)}`}
-          label={companion || "companion"}
+          label={companionName || "companion"}
         />
 
         <PageHeader

@@ -15,6 +15,8 @@ export interface Settings {
   tx: number | null;
   listenAddr: string | null;
   mapTileKey: string | null;
+  // The openHop modem token is a secret: reads report only whether one is stored.
+  modemTokenSet: boolean;
   pathHashSize: number | null;
   // TX airtime cap as a percentage, the unit the firmware uses. null = 50%.
   dutyCycle: number | null;
@@ -117,6 +119,8 @@ export interface ConfigCompanion {
   longitude: number | null;
   advertInterval: number | null;
   pathHashSize: number | null; // null = inherit the global default
+  dmPolicy: string; // contacts | allowlist | anyone
+  dmAllow: string[] | null;
 }
 
 export interface ConfigChannel {
@@ -135,10 +139,13 @@ export interface Trigger {
   match: string[] | null;
   contacts: string[] | null;
   channelIds: number[] | null;
+  failoverPattern: string;
+  failoverTimeout: number;
   retryTimeout: number | null;
   maxRetries: number | null;
   pathHashSize: number | null;
   schedule: string | null;
+  url: string;
 }
 
 // The single repeater NODE (the relay we run), not a remote one being administered.
@@ -230,6 +237,7 @@ export interface SettingsInput {
   tx?: number | null;
   listenAddr?: string | null;
   mapTileKey?: string | null; // omit = keep, "" = clear
+  modemToken?: string; // omit = keep the stored token
   pathHashSize?: number | null;
   dutyCycle?: number | null;
   // Only set by the first-run wizard; omit elsewhere so a radio edit never re-opens setup.
@@ -272,6 +280,8 @@ export interface CompanionInput {
   longitude?: number | null;
   advertInterval?: number | null;
   pathHashSize?: number | null; // null = inherit the global default
+  dmPolicy?: string;
+  dmAllow?: string[] | null;
 }
 
 export interface ChannelInput {
@@ -324,10 +334,13 @@ export interface TriggerInput {
   match?: string[] | null;
   contacts?: string[] | null;
   channelIds?: number[] | null;
+  failoverPattern?: string;
+  failoverTimeout?: number;
   retryTimeout?: number | null;
   maxRetries?: number | null;
   pathHashSize?: number | null;
   schedule?: string | null;
+  url?: string | null;
 }
 
 // --- request helper ---

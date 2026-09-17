@@ -63,6 +63,10 @@ func (rm *Client) ResetPeerPath(pubkeyHex string) error {
 	if !rm.node.Peers().ResetOutPath(peerIdentity.PublicKey()) {
 		return fmt.Errorf("peer not found in peer table")
 	}
+	// The contact row has to be cleared too, or learnedRoute reads the old path straight back and
+	// the reset does nothing.
+	rm.persistOutPath(pubkeyBytes, nil, 0)
+	rm.log.Debug("peer path reset", "peer", pubkeyHex[:12])
 	return nil
 }
 
@@ -89,5 +93,7 @@ func (rm *Client) SetPeerPath(pubkeyHex, pathHex string, pathHashSize int) error
 	if !rm.node.Peers().SetOutPath(peerIdentity.PublicKey(), pathBytes, uint8(pathHashSize)) {
 		return fmt.Errorf("peer not found in peer table")
 	}
+	rm.persistOutPath(pubkeyBytes, pathBytes, uint8(pathHashSize))
+	rm.log.Debug("peer path set", "peer", pubkeyHex[:12], "path", pathHex)
 	return nil
 }

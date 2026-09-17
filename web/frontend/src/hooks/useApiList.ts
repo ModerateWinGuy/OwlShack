@@ -8,6 +8,8 @@ interface ApiList<T> {
   loading: boolean;
   error: string | null;
   reload: () => void;
+  /** Re-fetch with no spinner, leaving what is on screen if it fails — for useResume. */
+  refresh: () => void;
 }
 
 // Refetches whenever the URL changes; pass url=null to defer (e.g. a missing route param).
@@ -20,26 +22,37 @@ export function useApiList<T>(
   const [error, setError] = useState<string | null>(null);
 
   const seq = useRef(0);
-  const reload = useCallback(() => {
-    if (!url) return;
-    const id = ++seq.current;
-    setLoading(true);
-    setError(null);
-    fetch(url)
-      .then((r) => {
-        if (!r.ok) throw new Error(errorMessage);
-        return r.json();
-      })
-      .then((data: T[] | null) => {
-        if (seq.current === id) setItems(data || []);
-      })
-      .catch(() => {
-        if (seq.current === id) setError(errorMessage);
-      })
-      .finally(() => {
-        if (seq.current === id) setLoading(false);
-      });
-  }, [url, errorMessage]);
+  const load = useCallback(
+    (silent: boolean) => {
+      if (!url) return;
+      const id = ++seq.current;
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
+      fetch(url)
+        .then((r) => {
+          if (!r.ok) throw new Error(errorMessage);
+          return r.json();
+        })
+        .then((data: T[] | null) => {
+          if (seq.current !== id) return;
+          setItems(data || []);
+          setError(null);
+        })
+        .catch(() => {
+          if (seq.current === id && !silent) setError(errorMessage);
+        })
+        .finally(() => {
+          // Clears a spinner this request superseded, whether or not it was the one that raised it.
+          if (seq.current === id) setLoading(false);
+        });
+    },
+    [url, errorMessage],
+  );
+
+  const reload = useCallback(() => load(false), [load]);
+  const refresh = useCallback(() => load(true), [load]);
 
   useEffect(() => {
     reload();
@@ -48,5 +61,5 @@ export function useApiList<T>(
     };
   }, [reload]);
 
-  return { items, setItems, loading, error, reload };
+  return { items, setItems, loading, error, reload, refresh };
 }

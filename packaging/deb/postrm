@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|purge)
+    [ -d /run/systemd/system ] && systemctl daemon-reload || true
+    ;;
+esac
+
+if [ "$1" = purge ]; then
+  # Debian convention: purge takes the data with it. There is no copy of this database.
+  rm -rf /var/lib/owlshack
+  getent passwd owlshack >/dev/null && deluser --quiet --system owlshack || true
+fi

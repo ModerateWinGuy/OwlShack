@@ -24,6 +24,7 @@ type settingsDTO struct {
 	TX             *int     `json:"tx"`
 	ListenAddr     *string  `json:"listenAddr"`
 	MapTileKey     *string  `json:"mapTileKey"` // sent to the browser by design: it rides on tile URLs
+	ModemTokenSet  bool     `json:"modemTokenSet"` // redacted
 	PathHashSize   *int     `json:"pathHashSize"`
 	// DutyCycle is a percentage, the unit the firmware's `set dutycycle` takes; null is the default (50%).
 	DutyCycle     *float64 `json:"dutyCycle"`
@@ -69,6 +70,8 @@ type companionDTO struct {
 	Longitude      *float64 `json:"longitude"`
 	AdvertInterval *int     `json:"advertInterval"`
 	PathHashSize   *int     `json:"pathHashSize"`
+	DMPolicy       string   `json:"dmPolicy"`
+	DMAllow        []string `json:"dmAllow"`
 }
 
 type channelDTO struct {
@@ -87,10 +90,13 @@ type triggerDTO struct {
 	Match              []string `json:"match"`
 	Contacts           []string `json:"contacts"`
 	ChannelIDs         []int64  `json:"channelIds"`
+	FailoverPattern    string   `json:"failoverPattern"`
+	FailoverTimeout    int64    `json:"failoverTimeout"`
 	RetryTimeout       *int64   `json:"retryTimeout"`
 	MaxRetries         *int     `json:"maxRetries"`
 	PathHashSize       *int     `json:"pathHashSize"`
 	Schedule           *string  `json:"schedule"`
+	URL                string   `json:"url"`
 }
 
 func brokerToDTO(b store.Broker) brokerDTO {
@@ -108,6 +114,7 @@ func companionToDTO(c store.Companion) companionDTO {
 		ID: c.ID, Name: c.Name, PubKey: c.PubKey, PrivateKeySet: c.PrivateKey != "",
 		Latitude: c.Latitude, Longitude: c.Longitude, AdvertInterval: c.AdvertInterval,
 		PathHashSize: c.PathHashSize,
+		DMPolicy:     c.DMPolicy, DMAllow: c.DMAllow,
 	}
 }
 
@@ -120,7 +127,8 @@ func triggerToDTO(t store.Trigger) triggerDTO {
 		ID: t.ID, CompanionID: t.CompanionID, Type: t.Type, Template: t.Template,
 		CharLimitBehaviour: t.CharLimitBehaviour, Match: t.MatchPatterns, Contacts: t.Contacts,
 		ChannelIDs: t.ChannelIDs, RetryTimeout: t.RetryTimeout, MaxRetries: t.MaxRetries,
-		PathHashSize: t.PathHashSize, Schedule: t.Schedule,
+		PathHashSize: t.PathHashSize, Schedule: t.Schedule, URL: t.URL,
+		FailoverPattern: t.FailoverPattern, FailoverTimeout: t.FailoverTimeout,
 	}
 }
 
@@ -137,6 +145,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		BaudRate: st.BaudRate, SPIBoard: st.SPIBoard,
 		Freq: st.Freq, BW: st.BW, SF: st.SF, CR: st.CR, TX: st.TX,
 		ListenAddr: st.ListenAddr, MapTileKey: st.MapTileKey, PathHashSize: st.PathHashSize,
+		ModemTokenSet: st.ModemToken != nil && *st.ModemToken != "",
 		DutyCycle: st.DutyCyclePct, SetupComplete: st.SetupComplete,
 	})
 }

@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { PATH_HASH_SIZE_OPTIONS, TextField, SelectField } from "@/components/ConfigFields";
-import { ConnectionFields, connectionSummary, useSerialPorts } from "@/components/ConnectionFields";
+import { BACKEND_LABELS, backendFor, ConnectionFields, connectionSummary, useSerialPorts } from "@/components/ConnectionFields";
 import { RadioPresetSelect } from "@/components/RadioPresetSelect";
 import { PositionPicker } from "@/components/PositionPicker";
 import { toast } from "sonner";
@@ -85,13 +85,14 @@ export function SetupWizard({
 
   // Radio (pre-filled from the bootstrapped defaults).
   const [connectionType, setConnectionType] = useState(
-    settings.connectionType || "kiss",
+    backendFor(settings.connection ?? ""),
   );
   const [connection, setConnection] = useState(
     settings.connection ?? "serial:///dev/ttyACM0",
   );
   const [baudRate, setBaudRate] = useState(String(settings.baudRate ?? 115200));
   const [spiBoard, setSpiBoard] = useState(settings.spiBoard ?? "");
+  const [modemToken, setModemToken] = useState("");
   const [boards, setBoards] = useState<SpiBoard[]>([]);
   const [freq, setFreq] = useState(
     settings.freq != null ? String(settings.freq) : "917.375",
@@ -162,6 +163,7 @@ export function SetupWizard({
         tx: tx === "" ? null : parseInt(tx, 10),
         pathHashSize: parseInt(pathHashSize, 10) || 1,
         dutyCycle: settings.dutyCycle,
+        ...(modemToken !== "" ? { modemToken } : {}),
         setupComplete: true,
       });
       // Writes are validated and reloaded server-side before returning, so the re-fetched config already gates this wizard away.
@@ -217,7 +219,7 @@ export function SetupWizard({
           <div className="space-y-5">
             <div className="space-y-3">
               <span className="label-overline">
-                {spi ? "spi radio · connection" : "kiss modem · connection"}
+                {`${BACKEND_LABELS[connectionType] ?? "kiss modem"} · connection`}
               </span>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <ConnectionFields
@@ -230,6 +232,9 @@ export function SetupWizard({
                   spiBoard={spiBoard}
                   setSpiBoard={setSpiBoard}
                   boards={boards}
+                  modemToken={modemToken}
+                  setModemToken={setModemToken}
+                  modemTokenSet={settings.modemTokenSet}
                 />
               </div>
             </div>
@@ -378,7 +383,7 @@ export function SetupWizard({
         {step === "review" && (
           <div className="space-y-4">
             <div className="border border-border bg-card divide-y divide-border font-mono text-xs">
-              {connectionSummary(connectionType, connection, baudRate, spiBoard, boards, ports).map(
+              {connectionSummary(connectionType, connection, baudRate, spiBoard, boards, ports, modemToken !== "" || settings.modemTokenSet).map(
                 (row) => (
                   <div key={row.label} className="flex justify-between gap-4 px-3 py-2">
                     <span className="shrink-0 text-muted-foreground uppercase tracking-[0.08em]">

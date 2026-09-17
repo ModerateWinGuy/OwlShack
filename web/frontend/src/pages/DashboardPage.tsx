@@ -32,6 +32,7 @@ import {
 } from "@/components/StatusIndicator";
 import { timeAgo, truncateMid } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { companionPath } from "@/lib/companionRef";
 
 interface Peer {
   pubkey: string;
@@ -45,6 +46,7 @@ interface Peer {
 }
 
 interface Companion {
+  id: number;
   name: string;
   pubkey: string;
   peerCount: number;
@@ -326,7 +328,7 @@ export function DashboardPage() {
                     data.companions.map((c) => (
                       <Link
                         key={c.name}
-                        to={`/companions/${c.name}`}
+                        to={companionPath(c)}
                         className="flex items-center justify-between px-4 py-3 hover:bg-muted/40 transition-colors group"
                       >
                         <div className="space-y-0.5">

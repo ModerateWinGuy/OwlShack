@@ -16,10 +16,10 @@ import (
 // A broker that never connected sits in o.brokers with a nil paho client, and Stop must survive a second call.
 func TestObserver_StopWithUnconnectedBroker(t *testing.T) {
 	o := &Observer{
-		log:        slog.New(slog.DiscardHandler),
-		originName: "test",
-		health:     map[string]*brokerHealth{},
-		recvErrors: &atomic.Uint64{},
+		log:         slog.New(slog.DiscardHandler),
+		originName:  "test",
+		health:      map[string]*brokerHealth{},
+		parseErrors: &atomic.Uint64{},
 	}
 	bc := &brokerClient{
 		cfg:            config.BrokerConfig{Name: "down", Host: "127.0.0.1"},

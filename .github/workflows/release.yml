@@ -97,7 +97,9 @@ jobs:
           SUFFIX="${GOOS}-${GOARCH}"
           if [ -n "$GOARM" ]; then SUFFIX="${SUFFIX}v${GOARM}"; fi
           OUTPUT="OwlShack-${SUFFIX}${EXT}"
-          CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/meshcore-go/OwlShack/internal/buildinfo.Version=${{ github.ref_name }}" -o "${OUTPUT}" .
+          # Mirrors the firmware's own build.sh. The commit's own date and offset, so all 11 jobs agree.
+          BUILD_DATE="$(git log -1 --format=%cd --date=format:'%d-%b-%Y')"
+          CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/meshcore-go/OwlShack/internal/buildinfo.Version=${{ github.ref_name }} -X github.com/meshcore-go/OwlShack/internal/buildinfo.Date=${BUILD_DATE}" -o "${OUTPUT}" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -106,10 +108,46 @@ jobs:
           name: OwlShack-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
           path: OwlShack-*
 
+  deb:
+    name: Debian Packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # build-deb.sh reads the armhf binary's recorded GOARM to prove it is ARMv6.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/download-artifact@v8
+        if: ${{ !env.ACT }}
+        with:
+          pattern: OwlShack-linux-*
+          path: bin
+          merge-multiple: true
+
+      # armhf takes the armv6 binary: Raspberry Pi OS calls a Pi Zero armhf too.
+      - name: Build .deb packages
+        run: |
+          set -e
+          build() { packaging/deb/build-deb.sh "bin/$1" "$2" "${GITHUB_REF_NAME}"; }
+          build OwlShack-linux-amd64 amd64
+          build OwlShack-linux-arm64 arm64
+          build OwlShack-linux-armv6 armhf
+          build OwlShack-linux-386   i386
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !env.ACT }}
+        with:
+          name: OwlShack-deb
+          path: owlshack_*.deb
+          if-no-files-found: error
+
   release:
     name: Create Release
     if: ${{ !github.event.act }}
-    needs: build
+    needs: [build, deb]
     runs-on: ubuntu-latest
     steps:
       # The release job otherwise never checks out, so CHANGELOG.md would not be here to read.

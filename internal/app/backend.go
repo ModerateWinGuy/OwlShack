@@ -63,6 +63,7 @@ func (b *backend) Companions() []api.CompanionInfo {
 		}
 		lat, lon := c.LatLon()
 		infos = append(infos, api.CompanionInfo{
+			ID:        c.ID(),
 			Name:      c.Name(),
 			PubKey:    hex.EncodeToString(c.Node().Identity().Identity.PublicKeyBytes()),
 			PeerCount: c.Node().Peers().Count(),
@@ -334,6 +335,14 @@ func (b *backend) SPIBoards() []api.SPIBoardInfo {
 
 // RadioStats reports the modem's link counters, so the SPI path's fault counters are readable with MQTT off.
 func (b *backend) RadioStats() (api.RadioStatsInfo, bool) {
+	return b.radioStats(true)
+}
+
+// radioStats builds the radio snapshot. poll asks the board for fresh readings over the wire, which
+// costs a 500ms round trip and is right for a diagnostics page a person is looking at; the health
+// endpoint passes false so that a monitor scraping it every few seconds cannot put that much
+// traffic on the link.
+func (b *backend) radioStats(poll bool) (api.RadioStatsInfo, bool) {
 	// No provider means the modem never came up. Reporting a zeroed struct here would draw a page of
 	// healthy-looking counters for a radio that is not there.
 	if b.stats == nil {
@@ -358,14 +367,18 @@ func (b *backend) RadioStats() (api.RadioStatsInfo, bool) {
 		PacketsRecv:          ls.PacketsRecv,
 		PacketsSent:          ls.PacketsSent,
 		CRCErrors:            ls.CRCErrors,
+		RecvErrors:           ls.RecvErrors,
 		DriverErrors:         ls.DriverErrors,
 		RecvRecoveries:       ls.RecvRecoveries,
 		Transport:            b.stats.Transport(),
 	}
 
-	// Polls the board over the wire, so it is the slow part of this endpoint; the readings drop out
-	// on their own once the modem stops answering rather than reporting the last known values.
-	ds := b.stats.Stats(context.Background())
+	// The readings drop out on their own once the modem stops answering, rather than reporting the
+	// last known values, on both paths.
+	ds := b.stats.CachedStats()
+	if poll {
+		ds = b.stats.Stats(context.Background())
+	}
 	out.UptimeSecs = ds.UptimeSecs
 	if ds.HaveBattery {
 		mv := ds.BatteryMV

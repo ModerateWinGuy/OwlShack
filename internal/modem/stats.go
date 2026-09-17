@@ -40,10 +40,11 @@ type LinkStats struct {
 	// InboundDroppedNew is a frame discarded because our inbound queue was full; the SPI driver's own drop count lands here.
 	InboundDroppedNew uint64
 	// HandlerSlow counts dispatches over the watchdog; DATA dispatch is serial, so one slow handler stalls RX for every consumer.
-	HandlerSlow    uint64
-	HwDecodeErrors uint64
+	HandlerSlow uint64
 
 	// KISS framing concepts: the SPI chip hands us a decoded packet with its metadata attached, so none of these can occur there.
+	// HwDecodeErrors is a malformed SETHARDWARE frame, i.e. the battery/temp/noise-floor channel, not a mesh packet.
+	HwDecodeErrors       *uint64
 	InboundDroppedOldest *uint64
 	// RxMetaTimeouts: metadata never arrived. RxMetaMisattributed: matched to the wrong packet, so its SNR/RSSI is wrong.
 	RxMetaTimeouts      *uint64
@@ -56,6 +57,8 @@ type LinkStats struct {
 	PacketsRecv *uint64
 	PacketsSent *uint64
 	CRCErrors   *uint64 // chip-level CRC and header errors: a noisy channel
+	// RecvErrors is the radio driver failing to read a packet it knew had arrived: the firmware's recv_errors, measurable on both transports.
+	RecvErrors *uint64
 	// DriverErrors is SPI transaction failures, busy timeouts and failed IRQ reads.
 	DriverErrors *uint64
 	// RecvRecoveries is the watchdog re-arming a stuck receiver.
@@ -67,6 +70,8 @@ type StatsProvider interface {
 	Transport() string
 	RadioConfig() RadioInfo
 	Stats(ctx context.Context) DeviceStats
+	// CachedStats is the last readings the board volunteered: no wire traffic, no 500ms wait, up to staleReadingAfter old.
+	CachedStats() DeviceStats
 	// LinkStats takes no ctx: atomic loads, unlike Stats which polls the board over the wire.
 	LinkStats() LinkStats
 	// EstAirtimeMs and PacketScore mirror the firmware's getEstAirtimeFor and packetScore; both return 0 when radio params are unknown.
@@ -85,6 +90,7 @@ type kissStatsProvider struct {
 	lastReply atomic.Int64
 
 	mu          sync.Mutex
+	fwCounters  *hardware.FirmwareStats // nil until the modem answers HW_CMD_GET_STATS
 	noiseFloor  int16
 	batteryMV   uint16
 	haveBattery bool
@@ -122,17 +128,29 @@ func NewKissStatsProvider(modem *hardware.KissModem, radio RadioInfo) *kissStats
 
 func (p *kissStatsProvider) LinkStats() LinkStats {
 	s := p.modem.Stats()
-	return LinkStats{
+	p.mu.Lock()
+	fw := p.fwCounters
+	p.mu.Unlock()
+
+	ls := LinkStats{
 		InboundDroppedNew:    s.InboundDroppedNew,
 		HandlerSlow:          s.HandlerSlow,
-		HwDecodeErrors:       s.HwDecodeErrors,
+		HwDecodeErrors:       &s.HwDecodeErrors,
 		InboundDroppedOldest: &s.InboundDroppedOldest,
 		RxMetaTimeouts:       &s.RxMetaTimeouts,
 		RxMetaMisattributed:  &s.RxMetaMisattributed,
 		HwErrors:             &s.HwErrors,
 		TxOutcomeLost:        &s.TxOutcomeLost,
 	}
+	if fw != nil {
+		recv, sent, errs := uint64(fw.PacketsRecv), uint64(fw.PacketsSent), uint64(fw.PacketsErrors)
+		ls.PacketsRecv, ls.PacketsSent, ls.RecvErrors = &recv, &sent, &errs
+	}
+	return ls
 }
+
+// CachedStats skips the queries and the wait; snapshot already drops a reading once the board goes quiet, so stale becomes absent.
+func (p *kissStatsProvider) CachedStats() DeviceStats { return p.snapshot() }
 
 func (p *kissStatsProvider) Transport() string { return "kiss" }
 
@@ -154,6 +172,14 @@ func (p *kissStatsProvider) PacketScore(snrDB float64, packetLen int) float64 {
 }
 
 func (p *kissStatsProvider) Stats(ctx context.Context) DeviceStats {
+	// Must run before the queries below: the waiter takes any non-TX_BUSY HW_RESP_ERROR, so a battery query's HW_ERR_NO_CALLBACK would fail this one.
+	if fw, err := p.modem.FirmwareCounters(ctx); err != nil {
+		p.log.Debug("firmware counters unavailable", "error", err)
+	} else {
+		p.mu.Lock()
+		p.fwCounters = &fw
+		p.mu.Unlock()
+	}
 	if err := p.modem.GetNoiseFloor(); err != nil {
 		p.log.Error("get noise floor", "error", err)
 	}

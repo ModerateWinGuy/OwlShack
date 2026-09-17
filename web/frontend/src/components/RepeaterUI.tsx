@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -9,13 +8,9 @@ import {
 import {
   ChevronLeft,
   ChevronRight,
-  CircleDashed,
-  Plus,
-  Search,
 } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -32,8 +27,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { PeerAvatar } from "@/components/PeerAvatar";
-import { truncateMid } from "@/lib/format";
+import { PeerPicker } from "@/components/PeerPicker";
 import { cn } from "@/lib/utils";
 
 // Shared by RepeaterDetailPage (remote) and RepeaterNodePage (local).
@@ -204,13 +198,23 @@ export function rolePillClass(perms: number): string {
   }
 }
 
+// The three the official app offers, so a role set there can be set here too.
 export const ROLE_OPTIONS: { value: string; label: string }[] = [
   { value: String(PERM_READ_ONLY), label: "Read only" },
   { value: String(PERM_READ_WRITE), label: "Read / Write" },
   { value: String(PERM_ADMIN), label: "Admin" },
 ];
 
-const HEX64_RE = /^[0-9a-fA-F]{64}$/;
+// Radix aligns the popover on the selected item, so a value with no item renders it off-screen.
+export function CurrentRoleItem({ perms }: { perms: number }) {
+  const role = String(perms & PERM_ROLE_MASK);
+  if (ROLE_OPTIONS.some((o) => o.value === role)) return null;
+  return (
+    <SelectItem value={role} disabled className="rounded-none font-mono text-xs">
+      {roleLabel(perms)}
+    </SelectItem>
+  );
+}
 
 // knownPrefixes: lowercase 12-hex prefixes already in the ACL.
 export function AddAccessDialog({
@@ -223,14 +227,12 @@ export function AddAccessDialog({
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  peers: { pubkey: string; name: string }[];
+  peers: { pubkey: string; name: string; type?: string }[];
   knownPrefixes: Set<string>;
   onAdd: (pubkey: string, perms: number) => Promise<void>;
   kind?: "repeater" | "sensor" | "room";
 }) {
-  const [search, setSearch] = useState("");
-  const [manualKey, setManualKey] = useState("");
-  const [role, setRole] = useState<string>(String(PERM_READ_WRITE));
+  const [role, setRole] = useState<string>(String(PERM_READ_ONLY));
   // Sensors: what a password login grants, so an added client behaves the same.
   const [alertHi, setAlertHi] = useState(true);
   const [alertLo, setAlertLo] = useState(true);
@@ -240,36 +242,12 @@ export function AddAccessDialog({
 
   useEffect(() => {
     if (!open) {
-      setSearch("");
-      setManualKey("");
-      setRole(String(PERM_READ_WRITE));
+      setRole(String(PERM_READ_ONLY));
       setAlertHi(true);
       setAlertLo(true);
       setSubmitting(false);
     }
   }, [open]);
-
-  const candidates = useMemo(() => {
-    const pool = peers.filter(
-      (p) => !knownPrefixes.has(p.pubkey.toLowerCase().slice(0, 12)),
-    );
-    const q = search.trim().toLowerCase();
-    const filtered = q
-      ? pool.filter(
-          (p) =>
-            p.name.toLowerCase().includes(q) ||
-            p.pubkey.toLowerCase().includes(q),
-        )
-      : pool;
-    return [...filtered].sort((a, b) =>
-      (a.name || "").localeCompare(b.name || ""),
-    );
-  }, [peers, knownPrefixes, search]);
-
-  const manualValid = HEX64_RE.test(manualKey.trim());
-  const manualAlreadyAdded =
-    manualValid &&
-    knownPrefixes.has(manualKey.trim().toLowerCase().slice(0, 12));
 
   const submitWith = async (pubkey: string) => {
     setSubmitting(true);
@@ -328,103 +306,14 @@ export function AddAccessDialog({
             </div>
           )}
 
-          <div className="space-y-2">
-            <span className="label-overline block">Available peers</span>
-            <div className="relative">
-              <Search className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60 pointer-events-none" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="search name or pubkey…"
-                className="pl-8 rounded-none font-mono text-base md:text-xs h-8"
-              />
-            </div>
-            <div className="border border-border max-h-64 overflow-y-auto divide-y divide-border">
-              {candidates.length === 0 ? (
-                <div className="px-4 py-8 text-center">
-                  <CircleDashed className="size-5 mx-auto mb-2 text-muted-foreground/40" />
-                  <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                    No matching peers
-                  </p>
-                </div>
-              ) : (
-                candidates.map((p) => (
-                  <div
-                    key={p.pubkey}
-                    className="flex items-center gap-3 px-3 py-2 hover:bg-muted/40 transition-colors"
-                  >
-                    <PeerAvatar name={p.name || p.pubkey} size="sm" />
-                    <div className="min-w-0 flex-1 space-y-0.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-medium truncate">
-                          {p.name || (
-                            <span className="text-muted-foreground italic">
-                              unknown
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                      <code className="font-mono text-[10px] text-muted-foreground">
-                        {truncateMid(p.pubkey, 6, 4)}
-                      </code>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      disabled={submitting}
-                      onClick={() => submitWith(p.pubkey)}
-                      className="font-mono uppercase tracking-widest text-primary hover:text-primary"
-                    >
-                      <Plus className="size-3" /> add
-                    </Button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="border-t border-border pt-4 space-y-2">
-            <Label
-              htmlFor="acl-manual-pubkey"
-              className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground"
-            >
-              Manual pubkey
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                id="acl-manual-pubkey"
-                value={manualKey}
-                onChange={(e) => setManualKey(e.target.value)}
-                placeholder="64-character hex…"
-                spellCheck={false}
-                autoCorrect="off"
-                autoCapitalize="off"
-                aria-invalid={
-                  manualKey.length > 0 && (!manualValid || manualAlreadyAdded)
-                }
-                className="rounded-none font-mono text-base md:text-xs h-8 flex-1"
-              />
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => submitWith(manualKey.trim())}
-                disabled={!manualValid || manualAlreadyAdded || submitting}
-                className="font-mono uppercase tracking-widest"
-              >
-                <Plus className="size-3" /> add
-              </Button>
-            </div>
-            {manualKey.length > 0 && !manualValid && (
-              <p className="text-[10px] text-destructive font-mono">
-                must be 64 hex characters
-              </p>
-            )}
-            {manualAlreadyAdded && (
-              <p className="text-[10px] text-destructive font-mono">
-                already in ACL
-              </p>
-            )}
-          </div>
+          <PeerPicker
+            peers={peers}
+            knownPrefixes={knownPrefixes}
+            onPick={submitWith}
+            disabled={submitting}
+            manualInputId="acl-manual-pubkey"
+            alreadyAddedLabel="already in ACL"
+          />
         </div>
       </DialogContent>
     </Dialog>

@@ -16,9 +16,9 @@ func TestFormatStatus_CountersMapDistinctly(t *testing.T) {
 	}
 	u := func(v uint64) *uint64 { return &v }
 	link := modem.LinkStats{
-		InboundDroppedNew: 8, HandlerSlow: 11, HwDecodeErrors: 12,
+		InboundDroppedNew: 8, HandlerSlow: 11, HwDecodeErrors: u(12),
 		InboundDroppedOldest: u(7), RxMetaTimeouts: u(9), RxMetaMisattributed: u(10),
-		HwErrors: u(13), TxOutcomeLost: u(14),
+		HwErrors: u(13), TxOutcomeLost: u(14), RecvErrors: u(15),
 	}
 
 	raw, err := formatStatus("online", "n", "id", modem.RadioInfo{}, modem.DeviceStats{},
@@ -61,7 +61,9 @@ func TestFormatStatus_CountersMapDistinctly(t *testing.T) {
 		"hw_decode_errors":      12,
 		"hw_errors":             13,
 		"tx_outcome_lost":       14,
-		"recv_errors":           99,
+		// Distinct values, so a re-crossed mapping shows up as the wrong number rather than passing.
+		"packet_parse_errors": 99,
+		"recv_errors":         15,
 	} {
 		v, ok := got.Stats[field]
 		if !ok {
@@ -333,6 +335,50 @@ func TestFormatPacket_RxWithoutSignalInfoOmitsMeasurements(t *testing.T) {
 	for _, field := range []string{"duration", "path", "hash"} {
 		if _, ok := got[field]; !ok {
 			t.Errorf("%q is derived from the frame and must survive", field)
+		}
+	}
+}
+
+// recv_errors is the firmware's field, published to the same brokers by meshcoretomqtt, so a parse failure must never land in it.
+func TestFormatStatus_RecvErrorsIsTheRadioCounterNotTheParseCount(t *testing.T) {
+	u := func(v uint64) *uint64 { return &v }
+	read := func(link modem.LinkStats, parseErrors uint64) map[string]any {
+		raw, err := formatStatus("online", "n", "id", modem.RadioInfo{}, modem.DeviceStats{},
+			PacketCounts{}, TxCounts{}, link, ObserverCounts{}, parseErrors)
+		if err != nil {
+			t.Fatalf("formatStatus: %v", err)
+		}
+		var got struct {
+			Stats map[string]any `json:"stats"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return got.Stats
+	}
+
+	// SPI: the radio driver measures it, the parse count is its own number.
+	stats := read(modem.LinkStats{RecvErrors: u(4)}, 40)
+	if stats["recv_errors"] != float64(4) {
+		t.Errorf("recv_errors = %v, want the radio counter 4", stats["recv_errors"])
+	}
+	if stats["packet_parse_errors"] != float64(40) {
+		t.Errorf("packet_parse_errors = %v, want 40", stats["packet_parse_errors"])
+	}
+
+	// A modem that does not answer: 0 on the wire, never the parse count leaking across.
+	stats = read(modem.LinkStats{}, 40)
+	if stats["recv_errors"] != float64(0) {
+		t.Errorf("recv_errors = %v unmeasured, want 0 and never the parse count", stats["recv_errors"])
+	}
+	if stats["packet_parse_errors"] != float64(40) {
+		t.Errorf("packet_parse_errors = %v, want 40", stats["packet_parse_errors"])
+	}
+
+	// Both keys always ship: they are on a shared schema, so a consumer never sees one vanish.
+	for _, k := range []string{"recv_errors", "packet_parse_errors", "hw_decode_errors"} {
+		if _, ok := stats[k]; !ok {
+			t.Errorf("%q dropped off the published schema", k)
 		}
 	}
 }

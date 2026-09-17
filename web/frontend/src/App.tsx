@@ -133,33 +133,33 @@ export function App() {
           <Route path="/settings" element={<RadioPage />} />
           <Route path="/repeater" element={<RepeaterNodePage />} />
           <Route path="/companions" element={<CompanionsPage />} />
-          <Route path="/companions/:name" element={<CompanionDetailPage />} />
+          <Route path="/companions/:ref" element={<CompanionDetailPage />} />
           <Route
-            path="/companions/:name/contacts"
+            path="/companions/:ref/contacts"
             element={<ContactsPage />}
           />
           <Route
-            path="/companions/:name/contacts/:pubkey"
+            path="/companions/:ref/contacts/:pubkey"
             element={<ContactDetailPage />}
           />
           <Route
-            path="/companions/:name/channels"
+            path="/companions/:ref/channels"
             element={<ChannelsPage />}
           />
           <Route
-            path="/companions/:name/repeaters"
+            path="/companions/:ref/repeaters"
             element={<RepeatersListPage />}
           />
           <Route
-            path="/companions/:name/repeaters/:pubkey"
+            path="/companions/:ref/repeaters/:pubkey"
             element={<RepeaterDetailPage />}
           />
           <Route
-            path="/companions/:name/sensors/:pubkey"
+            path="/companions/:ref/sensors/:pubkey"
             element={<RepeaterDetailPage kind="sensor" />}
           />
           <Route
-            path="/companions/:name/rooms/:pubkey"
+            path="/companions/:ref/rooms/:pubkey"
             element={<RepeaterDetailPage kind="room" />}
           />
         </Routes>

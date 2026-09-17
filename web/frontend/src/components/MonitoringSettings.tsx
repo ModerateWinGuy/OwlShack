@@ -65,14 +65,14 @@ export type NodeKind = "repeater" | "companion";
 
 // PATCHes the full contact metadata, preserving fields this form doesn't own.
 export function MonitoringSettings({
-  companionName,
+  companionRef,
   pubkey,
   kind = "repeater",
   metadata,
   onSaved,
   className,
 }: {
-  companionName: string;
+  companionRef: string;
   pubkey: string;
   kind?: NodeKind;
   metadata?: MonitorMetadata;
@@ -106,7 +106,7 @@ export function MonitoringSettings({
       apply(metadata);
       return;
     }
-    fetch(`/api/companions/${encodeURIComponent(companionName)}/contacts`)
+    fetch(`/api/companions/${encodeURIComponent(companionRef)}/contacts`)
       .then((r) => (r.ok ? r.json() : []))
       .then((cs: ContactLike[]) => {
         const c = (cs || []).find(
@@ -115,7 +115,7 @@ export function MonitoringSettings({
         apply(c?.metadata || {});
       })
       .catch(() => apply({}));
-  }, [companionName, pubkey, metadata, apply]);
+  }, [companionRef, pubkey, metadata, apply]);
 
   const toggleProbe = (key: ProbeKey) => {
     setProbes((prev) => {
@@ -148,7 +148,7 @@ export function MonitoringSettings({
     }
     try {
       const r = await fetch(
-        `/api/companions/${encodeURIComponent(companionName)}/contacts/${encodeURIComponent(pubkey)}`,
+        `/api/companions/${encodeURIComponent(companionRef)}/contacts/${encodeURIComponent(pubkey)}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -164,7 +164,7 @@ export function MonitoringSettings({
     } finally {
       setSaving(false);
     }
-  }, [base, kind, password, enabled, intervalSecs, retrySecs, maxRetries, probes, companionName, pubkey, onSaved]);
+  }, [base, kind, password, enabled, intervalSecs, retrySecs, maxRetries, probes, companionRef, pubkey, onSaved]);
 
   return (
     <div className={cn("panel", className)}>

@@ -54,7 +54,11 @@ import {
   type SignalTestSummary,
   type SignalTestWsMessage,
 } from "@/lib/signalTestApi";
-import { hexToHopHashes, buildPeerByHash } from "@/lib/linkPath";
+import {
+  hexToHopHashes,
+  buildPeerCandidatesByHash,
+  resolveHopPeer,
+} from "@/lib/linkPath";
 
 interface Companion {
   name: string;
@@ -129,15 +133,24 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// Resolves a 1-indexed hop number to "N. <repeater name or hash>".
+// A resolved hop reads as a plain name until it is a guess, when it carries the count of other
+// repeaters the hash could equally have named.
+function hopName(hit?: { name: string; alternatives: number }): string | undefined {
+  if (!hit) return undefined;
+  return hit.alternatives > 0 ? `${hit.name} +${hit.alternatives}` : hit.name;
+}
+
+// Resolves a 1-indexed hop number to "N. <repeater name or hash>". A hash that several repeaters
+// share gets "+N" appended, and one that names no repeater at all stays hex — see resolveHopPeer.
 function hopLabelFor(pathHex: string, hashSize: number, peers: Peer[]) {
   const hashes = hexToHopHashes(pathHex, hashSize);
-  const byHash = buildPeerByHash(peers, hashSize);
+  const byHash = buildPeerCandidatesByHash(peers, hashSize);
   return (hop: number) => {
     const hash = hashes[hop - 1];
     if (!hash) return `Hop ${hop}`;
-    const peer = byHash.get(hash);
-    return `${hop}. ${peer?.name || hash}`;
+    const { peer, alternatives } = resolveHopPeer(hash, byHash.get(hash));
+    if (!peer) return `${hop}. ${hash}`;
+    return `${hop}. ${peer.name}${alternatives.length > 0 ? ` +${alternatives.length}` : ""}`;
   };
 }
 
@@ -407,11 +420,14 @@ export function TracesPage() {
     });
   }, [peers, filter, sort, companionCoords]);
 
+  // Hop names for the timeline. Keyed by hash to the resolved repeater, or absent when no repeater
+  // matches — the timeline then shows "unknown" over the raw hash, which is the honest reading.
   const peerByHash = useMemo(() => {
-    const map = new Map<string, Peer>();
-    for (const p of peers) {
-      const k = p.pubkey.slice(0, hashSize * 2).toLowerCase();
-      if (!map.has(k)) map.set(k, p);
+    const candidates = buildPeerCandidatesByHash(peers, hashSize);
+    const map = new Map<string, { name: string; alternatives: number }>();
+    for (const [hash, list] of candidates) {
+      const { peer, alternatives } = resolveHopPeer(hash, list);
+      if (peer) map.set(hash, { name: peer.name, alternatives: alternatives.length });
     }
     return map;
   }, [peers, hashSize]);
@@ -1331,7 +1347,7 @@ function TraceTimeline({
   companionName: string;
   routeHashes: string[];
   liveSNRs: number[];
-  peerByHash: Map<string, Peer>;
+  peerByHash: Map<string, { name: string; alternatives: number }>;
 }) {
   const steps = useMemo<TimelineStep[]>(() => {
     const out: TimelineStep[] = [];
@@ -1364,7 +1380,7 @@ function TraceTimeline({
       out.push({
         badge: hash.slice(0, 2).toUpperCase(),
         label: `Hop ${i + 1} · Repeated the packet`,
-        name: peerByHash.get(hash)?.name,
+        name: hopName(peerByHash.get(hash)),
         hashHex: hash,
         snr: hasSnr ? snr : undefined,
         showSignal: hasSnr,

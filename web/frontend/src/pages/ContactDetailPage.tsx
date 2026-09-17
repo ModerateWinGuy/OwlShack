@@ -49,8 +49,8 @@ interface Contact {
 }
 
 export function ContactDetailPage() {
-  const { name, pubkey } = useParams();
-  const companion = decodeURIComponent(name ?? "");
+  const { ref, pubkey } = useParams();
+  const companion = ref ?? "";
   const contactPubkey = decodeURIComponent(pubkey ?? "");
 
   const apiBase = `/api/companions/${encodeURIComponent(companion)}/contacts/${encodeURIComponent(contactPubkey)}`;
@@ -272,7 +272,7 @@ export function ContactDetailPage() {
           {/* Chat nodes, sensors and rooms answer the sessionless telemetry request. */}
           {(contact.type?.toUpperCase() === "CHAT" || isSensor || isRoom) && (
             <MonitoringSettings
-              companionName={companion}
+              companionRef={companion}
               pubkey={contactPubkey}
               kind="companion"
               metadata={contact.metadata}

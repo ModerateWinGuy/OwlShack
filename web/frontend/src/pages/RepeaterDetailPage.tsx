@@ -109,6 +109,7 @@ import {
   PERM_READ_WRITE,
   PERM_ROLE_MASK,
   ROLE_OPTIONS,
+  CurrentRoleItem,
   RepeaterTab,
   RepeaterTabsList,
   StatTile,
@@ -205,8 +206,8 @@ export type AdminNodeKind = "repeater" | "sensor" | "room";
 
 // kind only gates what that role's firmware answers: a sensor has no GET_STATUS, GET_NEIGHBOURS, owner info, routing settings or guest password.
 export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind }) {
-  const { name, pubkey } = useParams<{ name: string; pubkey: string }>();
-  const decodedName = name ? decodeURIComponent(name) : "";
+  const { ref, pubkey } = useParams<{ ref: string; pubkey: string }>();
+  const decodedName = ref ?? "";
   const decodedPubkey = pubkey ? decodeURIComponent(pubkey) : "";
   const navigate = useNavigate();
   const isSensor = kind === "sensor";
@@ -679,7 +680,7 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
           </TabsContent>
           <TabsContent value="monitoring" className="mt-0">
             <MonitoringSettings
-              companionName={decodedName}
+              companionRef={decodedName}
               pubkey={decodedPubkey}
               kind={isSensor ? "companion" : "repeater"}
               metadata={contact?.metadata}
@@ -2025,6 +2026,7 @@ function AccessTab({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent className="rounded-none font-mono text-xs">
+                        <CurrentRoleItem perms={entry.permissions} />
                         {ROLE_OPTIONS.map((opt) => (
                           <SelectItem
                             key={opt.value}

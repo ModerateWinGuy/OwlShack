@@ -81,17 +81,16 @@ func (s *Server) handleGetMessagePath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hops stays a pointer: a direct-routed packet arrives with its path consumed, so an absent
+	// count means "not measurable" and flattening it to 0 would claim the message came direct.
 	type pathJSON struct {
-		Hops         int           `json:"hops"`
+		Hops         *int          `json:"hops,omitempty"`
 		PathHashSize int           `json:"pathHashSize"`
 		Sender       string        `json:"sender"`
 		Path         []pathHopJSON `json:"path"`
 	}
 
-	result := pathJSON{Sender: m.Sender}
-	if m.Hops != nil {
-		result.Hops = *m.Hops
-	}
+	result := pathJSON{Sender: m.Sender, Hops: m.Hops}
 	if m.PathHashSize != nil {
 		result.PathHashSize = *m.PathHashSize
 	}

@@ -17,7 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { pollNode } from "@/lib/nodesApi";
 import { formatSecsAgo } from "@/lib/format";
-import { filterMetrics, hopDirectionLabel, type NamedPeer } from "@/lib/linkPath";
+import { filterMetrics, hopDirectionLabel, type PathPeer } from "@/lib/linkPath";
 import type { LinkMonitorInfo } from "@/components/LinkMonitorSettings";
 
 interface MonitoredNode {
@@ -57,7 +57,7 @@ export function MonitoringPage() {
   const [history, setHistory] = useState<Record<string, NodeHistory>>({});
   const [loading, setLoading] = useState(true);
   const [links, setLinks] = useState<LinkMonitorInfo[]>([]);
-  const [peers, setPeers] = useState<NamedPeer[]>([]);
+  const [peers, setPeers] = useState<PathPeer[]>([]);
 
   // Fetch a recent window of each sparkline metric the node actually reports.
   const loadHistories = useCallback((list: MonitoredNode[]) => {
@@ -107,7 +107,7 @@ export function MonitoringPage() {
       .catch(() => {});
     fetch("/api/peers")
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: NamedPeer[]) => setPeers(data || []))
+      .then((data: PathPeer[]) => setPeers(data || []))
       .catch(() => {});
   }, []);
 

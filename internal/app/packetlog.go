@@ -18,6 +18,7 @@ func wirePacketLogger(mux *node.RadioMux, modem node.Modem, db *store.Store, srv
 	logRadio := mux.NewRadio()
 
 	logRadio.SetRawDataHandler(func(data []byte, snr float32, rssi int8, hasSignalInfo bool) {
+		radioSeen.rx()
 		pkt, err := meshcore.PacketFromBytes(data)
 		routeType, payloadType := packetTypes(pkt, err)
 
@@ -57,6 +58,7 @@ func wirePacketLogger(mux *node.RadioMux, modem node.Modem, db *store.Store, srv
 	})
 
 	modem.AddOutboundHandler(func(data []byte) {
+		radioSeen.tx()
 		pkt, err := meshcore.PacketFromBytes(data)
 		routeType, payloadType := packetTypes(pkt, err)
 
@@ -103,7 +105,7 @@ func packetTypes(pkt *meshcore.Packet, parseErr error) (routeType, payloadType *
 func packetBroadcastMsg(direction string, receivedAt time.Time, data []byte, pkt *meshcore.Packet, parseErr error, channels api.ChannelLookup) map[string]any {
 	msg := map[string]any{
 		"direction":  direction,
-		"receivedAt": receivedAt.Format(time.RFC3339),
+		"receivedAt": receivedAt.Format(api.TimestampLayout), // sub-second: the packets UI orders observations by this
 		"raw":        hex.EncodeToString(data),
 	}
 	if parseErr != nil {

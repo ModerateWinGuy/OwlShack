@@ -118,8 +118,11 @@ type statsBlock struct {
 	DirectTx   uint64 `json:"direct_tx"`
 	FloodDups  uint64 `json:"flood_dups"`
 	DirectDups uint64 `json:"direct_dups"`
+	// recv_errors is the radio driver failing to read a packet it knew had arrived, matching the firmware field meshcoretomqtt forwards to these same brokers.
 	RecvErrors uint64 `json:"recv_errors"`
-	QueueLen   int    `json:"queue_len"`
+	// PacketParseErrors is what recv_errors used to carry: intact bytes that did not decode.
+	PacketParseErrors uint64 `json:"packet_parse_errors"`
+	QueueLen          int    `json:"queue_len"`
 
 	// Firmware stats-core / stats-radio key names; omitted when unmeasurable, but a KISS 0 still publishes.
 	BatteryMV  *uint16  `json:"battery_mv,omitempty"`
@@ -206,7 +209,7 @@ type PacketCounts struct {
 	DirectDups uint64
 }
 
-func formatStatus(status, originName, originID string, radio modem.RadioInfo, ds modem.DeviceStats, packets PacketCounts, tx TxCounts, link modem.LinkStats, obs ObserverCounts, recvErrors uint64) ([]byte, error) {
+func formatStatus(status, originName, originID string, radio modem.RadioInfo, ds modem.DeviceStats, packets PacketCounts, tx TxCounts, link modem.LinkStats, obs ObserverCounts, parseErrors uint64) ([]byte, error) {
 	var radioStr string
 	if radio.FreqHz > 0 {
 		radioStr = fmt.Sprintf("%.3f,%.1f,%d,%d",
@@ -237,14 +240,15 @@ func formatStatus(status, originName, originID string, radio modem.RadioInfo, ds
 		ClientVersion:   "OwlShack/" + buildinfo.Version,
 		Repeat:          obs.Relaying,
 		Stats: statsBlock{
-			UptimeSecs:  ds.UptimeSecs,
-			Recv:        packets.Received,
-			PacketsRecv: packets.Received,
-			FloodRx:     packets.FloodRx,
-			DirectRx:    packets.DirectRx,
-			FloodDups:   packets.FloodDups,
-			DirectDups:  packets.DirectDups,
-			RecvErrors:  recvErrors,
+			UptimeSecs:        ds.UptimeSecs,
+			Recv:              packets.Received,
+			PacketsRecv:       packets.Received,
+			FloodRx:           packets.FloodRx,
+			DirectRx:          packets.DirectRx,
+			FloodDups:         packets.FloodDups,
+			DirectDups:        packets.DirectDups,
+			RecvErrors:        u64(link.RecvErrors),
+			PacketParseErrors: parseErrors,
 
 			BatteryMV:  batteryMV,
 			MCUTempC:   mcuTemp,
@@ -269,7 +273,7 @@ func formatStatus(status, originName, originID string, radio modem.RadioInfo, ds
 			RxMetaMisattributed: u64(link.RxMetaMisattributed),
 			RxMetaTimeouts:      u64(link.RxMetaTimeouts),
 			HwErrors:            u64(link.HwErrors),
-			HwDecodeErrors:      link.HwDecodeErrors,
+			HwDecodeErrors:      u64(link.HwDecodeErrors),
 			HandlerSlow:         link.HandlerSlow,
 
 			CRCErrors:      link.CRCErrors,

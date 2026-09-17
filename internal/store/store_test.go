@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,7 @@ func mkCompanion(t *testing.T, st *Store, name string) int64 {
 func f64(v float64) *float64 { return &v }
 func i8(v int8) *int8        { return &v }
 func iptr(v int) *int        { return &v }
+func i64ptr(v int64) *int64  { return &v }
 func sptr(v string) *string  { return &v }
 
 func TestMessageRepo_InsertRoundTrip(t *testing.T) {
@@ -763,7 +765,7 @@ func TestPacketRepo_ListFilter(t *testing.T) {
 // Bump wantVersion whenever a migration is appended to the migrations slice.
 func TestStore_MigrateUserVersion(t *testing.T) {
 	t.Parallel()
-	const wantVersion = 11 // migrateV1, 2 squashed noop slots, migrateV2..migrateV9
+	const wantVersion = 16 // migrateV1, 2 squashed noop slots, migrateV2..migrateV14
 	st := newTestStore(t)
 	var v int
 	if err := st.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&v); err != nil {
@@ -933,5 +935,59 @@ func TestMigrations_ShippedSlotsFrozen(t *testing.T) {
 				"already at that version will skip it. Append a new slot instead.",
 				rel.slots, rel.tag, got, rel.digest)
 		}
+	}
+}
+
+// A 4-byte trigger could only come from the bot form, which alone offered it. Config.Validate now
+// rejects that, and a save validates the whole assembled config — so leaving one in place would
+// wall off every later config change, not just an edit to that bot.
+func TestMigrateV12_ClampsTriggerPathHashSize(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := t.Context()
+
+	var companionID int64
+	st.WriteSync(func() {
+		c := Companion{Name: "c"}
+		if err := st.Companions.Create(ctx, &c); err != nil {
+			t.Fatalf("creating companion: %v", err)
+		}
+		companionID = c.ID
+	})
+
+	for _, size := range []int{4, 3, 1} {
+		if _, err := st.db.ExecContext(ctx,
+			`INSERT INTO triggers (companion_id, type, template, path_hash_size) VALUES (?, 'dm', 'x', ?)`,
+			companionID, size); err != nil {
+			t.Fatalf("seeding trigger with %d: %v", size, err)
+		}
+	}
+	// And one that mirrors, which must survive: 0 is not a byte count.
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO triggers (companion_id, type, template, path_hash_size) VALUES (?, 'dm', 'x', 0)`,
+		companionID); err != nil {
+		t.Fatalf("seeding mirror trigger: %v", err)
+	}
+
+	if err := migrateV12(ctx, st.db); err != nil {
+		t.Fatalf("migrateV12: %v", err)
+	}
+
+	rows, err := st.db.QueryContext(ctx, `SELECT path_hash_size FROM triggers ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, v)
+	}
+	want := []int{3, 3, 1, 0}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("path_hash_size = %v, want %v (4 clamped, the rest untouched)", got, want)
 	}
 }

@@ -107,20 +107,14 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 		rm.loginMu.Unlock()
 	}()
 
-	routeType, pathLen := routeForPeer(peer)
-
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeAnonReq, 0),
-		PathLength: pathLen,
-		Path:       peer.OutPath,
-		Payload:    payload,
-	}
+	pkt, outPath, hashSize := rm.routedPacket(peerIdentity.PublicKey(), peer, meshcore.PayloadTypeAnonReq, payload)
 
 	if err := rm.node.SendPacket(pkt); err != nil {
 		return nil, fmt.Errorf("sending login: %w", err)
 	}
 
-	rm.log.Debug("login sent", "peer", pubkeyHex[:12])
+	wait := rm.replyTimeout(len(payload), outPath, hashSize, timeout)
+	rm.log.Debug("login sent", "peer", pubkeyHex[:12], "wait", wait)
 
 	select {
 	case data := <-resultCh:
@@ -155,7 +149,21 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 		}
 		rm.mu.Unlock()
 		return &LoginResult{Success: true, IsAdmin: isAdmin, Permissions: perms, Role: role}, nil
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("login timed out")
+	case <-time.After(wait):
+		// A login sent down a learned route that never answers is the one case where that route has
+		// to be doubted: every later command depends on the session it establishes, and nothing
+		// else ever clears the path, so a route gone stale would fail forever and identically each
+		// time. Dropping it here makes the next attempt flood and rediscover, which is what the
+		// firmware's own path discovery does deliberately (companion MyMesh.cpp:1613-1616) and what
+		// its operators do by hand with CMD_RESET_PATH. Only login does this: a mid-session command
+		// timing out is far more likely to be ordinary loss, and dropping a good route over it
+		// would put a lossy link into a flood loop.
+		if outPath != nil {
+			rm.log.Debug("login timed out on a learned route, clearing it so the retry floods",
+				"peer", pubkeyHex[:12], "path", hex.EncodeToString(outPath))
+			rm.node.Peers().ResetOutPath(peerIdentity.PublicKey())
+			rm.persistOutPath(pubkeyBytes, nil, 0)
+		}
+		return nil, fmt.Errorf("login timed out after %s", wait)
 	}
 }

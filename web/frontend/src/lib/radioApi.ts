@@ -10,7 +10,6 @@ export interface RadioStatus {
 
   inboundDroppedNew: number;
   handlerSlow: number;
-  hwDecodeErrors: number;
 
   inboundDroppedOldest?: number;
   rxMetaTimeouts?: number;
@@ -32,7 +31,9 @@ export interface RadioStatus {
 
   packetsRecv?: number;
   packetsSent?: number;
+  hwDecodeErrors?: number; // KISS only: a malformed SETHARDWARE frame
   crcErrors?: number;
+  recvErrors?: number; // SPI only: the driver could not read a packet it knew had arrived
   driverErrors?: number;
   recvRecoveries?: number;
 }

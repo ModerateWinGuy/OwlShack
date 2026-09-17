@@ -13,6 +13,9 @@ type Backend interface {
 	// signal. False means there is no modem to report on, which must not be answered with zeroes.
 	RadioStats() (RadioStatsInfo, bool)
 
+	// Health reports the monitoring snapshot behind GET /api/health.
+	Health() HealthInfo
+
 	// ResetModem drops the modem and reconnects it, the same path a vanished serial port takes.
 	ResetModem()
 
@@ -156,6 +159,74 @@ type DiscoveryState struct {
 	Results       []DiscoveryInfo `json:"results"`
 }
 
+// HealthInfo backs GET /api/health: facts for a monitor to threshold, never verdicts, and 200 whenever the process is alive.
+type HealthInfo struct {
+	Status     string   `json:"status"` // "ok" when Problems is empty, else "degraded"
+	Problems   []string `json:"problems"`
+	Version    string   `json:"version"`
+	UptimeSecs int64    `json:"uptimeSecs"`
+
+	Radio    RadioHealth    `json:"radio"`
+	Database DatabaseHealth `json:"database"`
+	Brokers  []BrokerHealth `json:"brokers"`
+}
+
+// RadioHealth keeps "modem attached", "board answering" and "mesh talking" apart: a quiet mesh moves only the last.
+type RadioHealth struct {
+	Connected bool   `json:"connected"`
+	Transport string `json:"transport"`
+
+	// Null where this transport cannot be probed, so "not answering" and "cannot say" stay distinct.
+	LastReplySecs *int64 `json:"lastReplySecs"`
+	// Null when none since startup.
+	LastRxSecs *int64 `json:"lastRxSecs"`
+	LastTxSecs *int64 `json:"lastTxSecs"`
+
+	TxQueueLen     int    `json:"txQueueLen"`
+	TxSent         uint64 `json:"txSent"`
+	TxFailed       uint64 `json:"txFailed"`
+	TxDroppedBusy  uint64 `json:"txDroppedBusy"`
+	TxDroppedQueue uint64 `json:"txDroppedQueue"`
+
+	InboundDroppedNew uint64 `json:"inboundDroppedNew"`
+	HandlerSlow       uint64 `json:"handlerSlow"`
+
+	// Absent where the transport cannot measure them at all, 0 where it measured none.
+	CRCErrors    *uint64 `json:"crcErrors,omitempty"`
+	RecvErrors   *uint64 `json:"recvErrors,omitempty"`
+	DriverErrors *uint64 `json:"driverErrors,omitempty"`
+	HwErrors     *uint64 `json:"hwErrors,omitempty"`
+
+	NoiseFloor *int16   `json:"noiseFloor,omitempty"`
+	BatteryMV  *uint16  `json:"batteryMv,omitempty"`
+	MCUTempC   *float64 `json:"mcuTempC,omitempty"`
+}
+
+// DatabaseHealth watches the write queue, not a ping: a dropped write leaves everything downstream looking healthy.
+type DatabaseHealth struct {
+	// A point sample of a queue that drains in microseconds: shows sustained backpressure, not a spike.
+	WriteQueueLen int    `json:"writeQueueLen"`
+	WriteQueueCap int    `json:"writeQueueCap"`
+	WritesDropped uint64 `json:"writesDropped"`
+	// The one to threshold: WritesDropped only rises, so it cannot tell "now" from "last Tuesday".
+	WritesDroppedLastSecs *int64 `json:"writesDroppedLastSecs"`
+}
+
+// No node listing on purpose: a name or peer count cannot report a fault (a node that fails to start exits the process), and both resolve to coordinates on public maps.
+
+// BrokerHealth carries ages, not the transport error (it names the broker's address) and not flags (the observer never clears lastErr, so a bool would latch).
+type BrokerHealth struct {
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	Connected bool   `json:"connected"`
+	// Null when disconnected. Resetting toward zero on every scrape is how flapping shows; Connected alone reads true.
+	ConnectedSecs *int64 `json:"connectedSecs"`
+	// Null when it has never erred.
+	LastErrorSecs *int64 `json:"lastErrorSecs"`
+	Published     uint64 `json:"published"`
+	Dropped       uint64 `json:"dropped"`
+}
+
 // RadioStatsInfo mirrors modem.LinkStats plus the radio's configuration; the pointer counters are absent when the backend cannot measure them, 0 when it measured none.
 type RadioStatsInfo struct {
 	FreqHz  uint32 `json:"freqHz"`
@@ -166,8 +237,8 @@ type RadioStatsInfo struct {
 
 	InboundDroppedNew uint64 `json:"inboundDroppedNew"`
 	HandlerSlow       uint64 `json:"handlerSlow"`
-	HwDecodeErrors    uint64 `json:"hwDecodeErrors"`
 
+	HwDecodeErrors       *uint64 `json:"hwDecodeErrors,omitempty"`
 	InboundDroppedOldest *uint64 `json:"inboundDroppedOldest,omitempty"`
 	RxMetaTimeouts       *uint64 `json:"rxMetaTimeouts,omitempty"`
 	RxMetaMisattributed  *uint64 `json:"rxMetaMisattributed,omitempty"`
@@ -177,6 +248,7 @@ type RadioStatsInfo struct {
 	PacketsRecv    *uint64 `json:"packetsRecv,omitempty"`
 	PacketsSent    *uint64 `json:"packetsSent,omitempty"`
 	CRCErrors      *uint64 `json:"crcErrors,omitempty"`
+	RecvErrors     *uint64 `json:"recvErrors,omitempty"`
 	DriverErrors   *uint64 `json:"driverErrors,omitempty"`
 	RecvRecoveries *uint64 `json:"recvRecoveries,omitempty"`
 
@@ -212,6 +284,8 @@ type SettingsInput struct {
 	TX           *int     `json:"tx"`
 	ListenAddr   *string  `json:"listenAddr"`
 	MapTileKey   *string  `json:"mapTileKey"` // omit = keep, "" = clear
+	// ModemToken is the openHop modem's access token: omit = keep the stored one, "" = clear it.
+	ModemToken *string `json:"modemToken"`
 	PathHashSize *int     `json:"pathHashSize"`
 	// DutyCycle is a TX airtime cap percentage (0 < pct <= 100); null means the default, not "keep".
 	DutyCycle     *float64 `json:"dutyCycle"`
@@ -252,6 +326,8 @@ type CompanionInput struct {
 	ID             int64    `json:"id"`
 	Name           string   `json:"name"`
 	PrivateKey     *string  `json:"privateKey"` // nil = keep (update) / generate (create)
+	DMPolicy       string   `json:"dmPolicy"`   // "" = contacts
+	DMAllow        []string `json:"dmAllow"`
 	Latitude       *float64 `json:"latitude"`
 	Longitude      *float64 `json:"longitude"`
 	AdvertInterval *int     `json:"advertInterval"`
@@ -321,10 +397,13 @@ type TriggerInput struct {
 	Match              []string `json:"match"`
 	Contacts           []string `json:"contacts"`
 	ChannelIDs         []int64  `json:"channelIds"`
+	FailoverPattern    string   `json:"failoverPattern"`
+	FailoverTimeout    int64    `json:"failoverTimeout"`
 	RetryTimeout       *int64   `json:"retryTimeout"`
 	MaxRetries         *int     `json:"maxRetries"`
 	PathHashSize       *int     `json:"pathHashSize"`
 	Schedule           *string  `json:"schedule"`
+	URL                string   `json:"url"`
 }
 
 // BackupFile is a generated backup ready to stream to the browser.

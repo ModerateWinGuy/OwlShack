@@ -5,7 +5,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { LoadErrorAlert } from "@/components/LoadErrorAlert";
 import { SectionTitle } from "@/components/SectionTitle";
 import { PATH_HASH_SIZE_OPTIONS, SelectField, TextField } from "@/components/ConfigFields";
-import { ConnectionFields } from "@/components/ConnectionFields";
+import { BACKEND_LABELS, backendFor, ConnectionFields } from "@/components/ConnectionFields";
 import { RadioPresetSelect } from "@/components/RadioPresetSelect";
 import { BackupPanel } from "@/components/BackupPanel";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,8 @@ export function RadioPage() {
   const [connection, setConnection] = useState("");
   const [baudRate, setBaudRate] = useState("115200");
   const [spiBoard, setSpiBoard] = useState("");
+  // Blank on every load: the server never returns the token, only whether one is stored.
+  const [modemToken, setModemToken] = useState("");
   const [boards, setBoards] = useState<SpiBoard[]>([]);
   const [freq, setFreq] = useState("");
   const [bw, setBw] = useState("");
@@ -43,7 +45,7 @@ export function RadioPage() {
 
   useEffect(() => {
     if (!settings) return;
-    setConnectionType(settings.connectionType || "kiss");
+    setConnectionType(backendFor(settings.connection ?? ""));
     setConnection(settings.connection ?? "");
     setBaudRate(String(settings.baudRate ?? 115200));
     setSpiBoard(settings.spiBoard ?? "");
@@ -89,6 +91,8 @@ export function RadioPage() {
         tx: tx === "" ? null : parseInt(tx, 10),
         listenAddr: listenAddr || null,
         mapTileKey: mapTileKey.trim(), // "" clears
+        // Only send a token when one was typed; blank keeps the stored secret.
+        ...(modemToken !== "" ? { modemToken } : {}),
         pathHashSize: parseInt(pathHashSize, 10) || 1,
         dutyCycle: dutyCycle.trim() === "" ? null : Number(dutyCycle),
         logLevel: logLevel || null,
@@ -143,7 +147,7 @@ export function RadioPage() {
         <>
           <section className="panel">
             <SectionTitle
-              eyebrow={spi ? "spi radio" : "kiss modem"}
+              eyebrow={BACKEND_LABELS[connectionType] ?? "kiss modem"}
               title="Connection"
             />
             <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -157,6 +161,9 @@ export function RadioPage() {
                 spiBoard={spiBoard}
                 setSpiBoard={setSpiBoard}
                 boards={boards}
+                modemToken={modemToken}
+                setModemToken={setModemToken}
+                modemTokenSet={settings?.modemTokenSet ?? false}
               />
             </div>
           </section>

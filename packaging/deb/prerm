@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    if [ -d /run/systemd/system ]; then
+      systemctl stop owlshack.service || true
+      systemctl disable owlshack.service >/dev/null 2>&1 || true
+    fi
+    ;;
+esac

@@ -69,7 +69,12 @@ func TestRouteForPeer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gotRouteType, gotPathLen := routeForPeer(tt.peer)
+			var path []byte
+			var hashSize uint8
+			if tt.peer != nil {
+				path, hashSize = tt.peer.OutPath, tt.peer.OutPathHashSize
+			}
+			gotRouteType, gotPathLen := routeForPeer(path, hashSize)
 			if gotRouteType != tt.wantRouteType {
 				t.Errorf("routeForPeer(%+v) routeType = 0x%02x, want 0x%02x",
 					tt.peer, gotRouteType, tt.wantRouteType)

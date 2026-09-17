@@ -22,7 +22,7 @@ import {
   filterMetricNames,
   filterMetrics,
   hopDirectionLabel,
-  type NamedPeer,
+  type PathPeer,
 } from "@/lib/linkPath";
 import type { LinkMonitorInfo } from "@/components/LinkMonitorSettings";
 
@@ -115,7 +115,7 @@ export function MonitoringDetailPage() {
   const [loading, setLoading] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [link, setLink] = useState<LinkMonitorInfo | null>(null);
-  const [peers, setPeers] = useState<NamedPeer[]>([]);
+  const [peers, setPeers] = useState<PathPeer[]>([]);
 
   const loadMeta = useCallback(() => {
     Promise.all([
@@ -148,7 +148,7 @@ export function MonitoringDetailPage() {
       .catch(() => {});
     fetch("/api/peers")
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: NamedPeer[]) => setPeers(data || []))
+      .then((data: PathPeer[]) => setPeers(data || []))
       .catch(() => {});
   }, [node?.kind, pubkey]);
 
@@ -335,7 +335,7 @@ export function MonitoringDetailPage() {
       )}
       {showSettings && node?.companionId && node.kind !== "link" && (
         <MonitoringSettings
-          companionName={node.companionId}
+          companionRef={node.companionId}
           pubkey={pubkey}
           kind={node.kind === "companion" ? "companion" : "repeater"}
           onSaved={() => loadMeta()}

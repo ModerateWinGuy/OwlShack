@@ -21,7 +21,8 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("OwlShack", buildinfo.Version)
+		// Same shape as the repeater's ver reply, so a stamp can be checked without a radio.
+		fmt.Printf("OwlShack %s (Build: %s)\n", buildinfo.Version, buildinfo.Date)
 		return
 	}
 

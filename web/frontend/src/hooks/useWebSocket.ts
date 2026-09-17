@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { notifyResume } from "@/lib/resume";
+
 type MessageHandler = (topic: string, data: unknown) => void;
 
 // Wait for any inbound message after an app-level ping before declaring the socket half-open.
@@ -19,6 +21,7 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
 
   useEffect(() => {
     let mounted = true;
+    let everOpened = false;
 
     const connect = () => {
       const current = wsRef.current;
@@ -44,6 +47,9 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
         for (const topic of topics) {
           ws.send(JSON.stringify({ action: "subscribe", topic }));
         }
+        // Nothing replays what the stream missed while it was down.
+        if (everOpened) notifyResume();
+        everOpened = true;
       };
 
       ws.onmessage = (event) => {
@@ -60,7 +66,8 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
       };
 
       ws.onclose = () => {
-        if (!mounted) return;
+        // resume() may already have replaced this socket; its close must not null out the new one.
+        if (!mounted || wsRef.current !== ws) return;
         setConnected(false);
         wsRef.current = null;
         reconnectRef.current = window.setTimeout(() => {

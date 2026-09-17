@@ -61,7 +61,7 @@ Installable as a PWA, with a mobile layout and a light theme.
 | Radio | Modem diagnostics: TX outcomes, RX losses, board readings, faults |
 | Discover | Zero-hop scan: which repeaters and sensors are in direct range |
 | Companions | Per-companion chat, contacts, channels, remote repeaters, rooms, sensors |
-| Bots | Create and edit triggers across every companion (group and cron) |
+| Bots | Create and edit triggers across every companion (group, dm and cron) |
 | Repeater | The repeater this instance runs: relay stats, neighbours, access, settings |
 | MQTT | Broker management and the companion that feeds the bridge |
 | Settings | Connection, radio parameters, presets, listen address, log level |
@@ -77,21 +77,24 @@ is enough to run a companion, a repeater and the console at once.
 ### Radio interfaces
 
 Set on the Settings page: `serial://` or `tcp://` for a MeshCore firmware node
-(KISS), `spi://` plus a board to drive a bare radio yourself.
+(KISS), `openhop://` for an openHop Modem over USB or the network, `spi://`
+plus a board to drive a bare radio yourself.
 
 > [!CAUTION]
-> **Which of the two you need.** SPI means this process is the radio driver: it
+> **Which one you need.** SPI means this process is the radio driver: it
 > clocks an SX126x over the host's own bus and toggles its reset, busy and
 > RF-switch lines itself, so the board has to be one it holds a pin map for.
 > Everything else (any other chip family, a gateway concentrator, a bridge
-> that fakes a bus over USB) belongs on the KISS side, behind MeshCore
-> firmware that already knows its own hardware.
+> that fakes a bus over USB) belongs behind firmware that already knows its
+> own hardware — MeshCore over KISS, or an openHop Modem.
 
 | Interface | Status |
 |---|---|
 | Native SX126x on the host SPI bus | Supported |
 | MeshCore firmware over USB serial (KISS) | Supported |
 | MeshCore firmware over TCP (KISS) | Supported |
+| openHop Modem over the network | Supported |
+| openHop Modem over USB serial | Untested — no hardware here |
 | SX127x on SPI | Not supported |
 | SX1302 / SX1303 concentrator boards | Not supported |
 | USB-to-SPI bridges (CH341 and similar) | Not supported |
@@ -171,6 +174,43 @@ Pre-built binaries for Linux, macOS and Windows are on the
 chmod +x OwlShack-linux-arm64
 sudo mv OwlShack-linux-arm64 /usr/local/bin/OwlShack
 ```
+
+### Debian / Ubuntu / Raspberry Pi OS
+
+The installer picks the right package for the machine, installs it, and leaves
+OwlShack running under systemd — nothing has to stay in a terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/meshcore-go/OwlShack/dev/packaging/install.sh | sudo sh
+```
+
+Or take the `.deb` for `amd64`, `arm64`, `armhf` or `i386` from the
+[Releases](https://github.com/meshcore-go/OwlShack/releases) page yourself:
+
+```bash
+sudo apt install ./owlshack_1.4.0_arm64.deb
+systemctl status owlshack
+```
+
+On a Raspberry Pi, `dpkg --print-architecture` is the answer that matters, not
+the model: a 64-bit Pi OS reports `arm64`, a 32-bit one `armhf`. The `armhf`
+package is built for ARMv6, so it runs on every Pi back to the Zero and the
+original Model B.
+
+The service runs as the `owlshack` user (added to `dialout`, plus `spi` and
+`gpio` when the host has them), keeps its database in `/var/lib/owlshack`, and
+serves `http://<host>:8860` — not 8080, which `http-alt` shares with half the
+homelab. The package sets that as `LISTEN_DEFAULT` in `/etc/default/owlshack`,
+which seeds the database on first run; after that the address belongs to the
+Settings page like any other install. The same file carries `HOST`, `PORT`, `TZ`
+and extra flags — `HOST` and `PORT` pin the address on every start, so use them
+only when the UI should not be able to move it. To build one from
+a checkout: `./build.sh && packaging/deb/build-deb.sh ./OwlShack amd64`.
+
+`sudo apt remove owlshack` keeps `/var/lib/owlshack`, so reinstalling resumes
+with the same identity and history. `sudo apt purge owlshack` deletes it, as a
+purge should — and that directory is the only copy of the node's keys, contacts
+and messages, so take a backup from the Settings page first.
 
 ### Docker
 
@@ -264,9 +304,10 @@ UI.
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `connection` | `serial:///dev/ttyACM0`, `tcp://host:port`, or `spi://` | `serial:///dev/ttyACM0` |
-| `connectionType` | `kiss` (MeshCore firmware) or `spi` (bare SX1262) | `kiss` |
+| `connection` | `serial:///dev/ttyACM0`, `tcp://host:port`, `openhop://host:port`, or `spi://` | `serial:///dev/ttyACM0` |
+| `connectionType` | Derived from `connection`, not set by hand: `kiss`, `openhop` or `spi` | `kiss` |
 | `spiBoard` | Board id from the registry, required for `spi://` | none |
+| `modemToken` | openHop modem access token; write-only, reads report only whether one is stored | none |
 | `baudRate` | Serial baud rate | `115200` |
 | `freq` | Frequency in MHz | `917.375` |
 | `bw` | Bandwidth in kHz | `62.50` |
@@ -293,6 +334,8 @@ Companions page.
 | `advertInterval` | Seconds between adverts; `0` = never |
 | `channels` | Channels to join |
 | `trigger` | Triggers attached to this companion |
+| `dmPolicy` | Who may DM this companion: `contacts` (default), `allowlist` or `anyone` |
+| `dmAllow` | Public keys the `allowlist` policy accepts, full or a leading prefix |
 
 ### Triggers
 
@@ -300,12 +343,12 @@ Auto-responders and scheduled messages, managed on the Bots page.
 
 | Field | Description |
 |-------|-------------|
-| `type` | `group` (channel messages) or `cron` |
+| `type` | `group` (channel messages), `dm` (direct messages) or `cron` |
 | `template` | Go `text/template` for the response |
 | `channels` | Channels to listen on / send to |
-| `match` | [Go regexps](https://pkg.go.dev/regexp/syntax) matched against incoming messages (group) |
+| `match` | [Go regexps](https://pkg.go.dev/regexp/syntax) matched against incoming messages (group, dm) |
 | `schedule` | Cron expression, e.g. `"*/5 * * * *"` (cron) |
-| `contacts` | Contact names to answer DMs from |
+| `contacts` | Who a `dm` trigger answers. The Bots page picks from known companions and stores public keys; a hand-written config may also use a peer name or a key prefix. Empty answers everyone the DM policy let through |
 | `retryTimeout` / `maxRetries` | Repeater-echo timeout in seconds (`5`) and resend cap (`3`) |
 | `charLimitBehaviour` | `truncate` or `split` past the character limit |
 | `pathHashSize` | `0` = copy the sender's setting, `1`/`2`/`3` = bytes per hash |
@@ -317,11 +360,45 @@ Channels are public or hashtag channels named directly (`Public`, `#general`),
 or private channels carrying a shared key. `Public` is the well-known channel
 every companion joins.
 
+### Failover replies
+
+Group bots can wait for another sender's response before replying. In the bot
+editor, enable **Failover reply**, set the wait to **10 seconds**, and use:
+
+```text
+Match pattern:    (?i)^wlg$
+Suppress pattern: ^@\[{{.Sender | reQuote}}\].+
+```
+
+The optional config fields are `failoverPattern` and `failoverTimeout` (1–3600
+seconds). An empty pattern and zero timeout disable failover. The suppression
+pattern is a Go template with the original request's `.Sender`; `reQuote`
+escapes regex characters in that name. Brackets around the mention must be
+escaped separately, as above. Invalid patterns are rejected when saving;
+a pattern that becomes invalid for a particular sender is logged and that
+request is answered immediately.
+
+Only an accepted response heard on the same channel during the wait cancels
+the reply; messages from this companion or the original requester do not.
+The response need not match the request pattern. Expiry uses local elapsed
+time and the reply retains the original request's template data. Retry settings
+apply after sending. Duplicate requests keep the original deadline; pending
+replies are cleared on bot edits, restart or shutdown. Each trigger holds at
+most 256 pending requests; past that a request is logged and answered
+immediately rather than dropped.
+
+Any other sender matching the pattern can suppress a reply, and a broad pattern
+can suppress multiple pending requests from the same name. Use staggered waits
+for multiple backup bots; a response the backup cannot hear cannot suppress it.
+
 ### Template variables
 
 Group triggers: `{{.Sender}}` `{{.Channel}}` `{{.Message}}` `{{.Match}}` (named
 capture groups) `{{.Timestamp}}` `{{.SNR}}` `{{.RSSI}}` `{{.Hops}}`
 `{{.PathHashes}}` `{{.PathHashSize}}`.
+
+DM triggers: the same, minus `{{.Channel}}`, plus `{{.SenderPubKey}}`, the
+sender's full public key, which is how the reply is addressed.
 
 Cron triggers: `{{.Time}}` and `{{.Schedule}}`. `{{.BotName}}` is in every
 template.
@@ -330,9 +407,21 @@ template.
 
 | Function | Does |
 |---|---|
-| `formatPathBytes` | Renders raw path hashes readably (`Direct` when there is no path) |
+| `formatPathBytes` | Renders raw path hashes readably, joined by an optional separator (`Direct` when there is no path) |
 | `now` | The current time, as a value you can format or take parts of |
 | `date` | Formats a time in a layout, optionally in a named zone |
+
+`formatPathBytes` takes the path hashes and an optional separator, defaulting
+to `", "`:
+
+```
+{{formatPathBytes .PathHashes}}          A1, B2, C3
+{{formatPathBytes .PathHashes " > "}}    A1 > B2 > C3
+{{formatPathBytes .PathHashes ""}}       A1B2C3
+```
+
+A node heard direct renders as `Direct` whatever the separator, since there is
+nothing to join.
 
 `date` takes a time, a layout, and an optional [IANA zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones);
 without a zone it uses the host's. Layouts are Go's, where the layout is itself
@@ -400,10 +489,13 @@ Only RX packets are published, never TX. See
 |---|---|
 | `HOST` | Bind host. Unset means all interfaces |
 | `PORT` | Bind port. Unset means the stored value, then `8080` |
+| `LISTEN_DEFAULT` | Seeds the stored listen address on first run only; Settings owns it after |
 | `TZ` | The zone the process treats as local, e.g. `Pacific/Auckland` |
 
 `HOST` and `PORT` override the stored listen address at startup (env > stored
 config > `:8080`), which is handy for Docker and PaaS: `PORT=4432 ./OwlShack`.
+An address that cannot be bound is fatal — the process exits rather than run on
+with no web UI, so a service manager can restart it until the address exists.
 
 `TZ` matters wherever a time is rendered without an explicit zone, which in
 practice means bot templates and log lines. **A container has no local zone, so

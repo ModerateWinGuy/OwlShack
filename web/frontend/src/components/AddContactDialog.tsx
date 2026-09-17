@@ -38,6 +38,7 @@ export interface ContactPrefill {
 /** POSTs to the companion's contacts endpoint itself, then calls `onAdded`. */
 export function AddContactDialog({
   companion,
+  companionName,
   open,
   onOpenChange,
   initial,
@@ -46,6 +47,7 @@ export function AddContactDialog({
   onAdded,
 }: {
   companion: string;
+  companionName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   initial?: ContactPrefill;
@@ -117,7 +119,7 @@ export function AddContactDialog({
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             Manually add a contact by public key for{" "}
-            {companion || "this companion"}.
+            {companionName || "this companion"}.
           </DialogDescription>
         </DialogHeader>
 

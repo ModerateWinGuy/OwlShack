@@ -12,9 +12,11 @@ they need (`hooks/useApiObject` for single-row settings/mqtt, `hooks/useApiList`
 for the lists) and write through `lib/configApi.ts`. There is **no
 whole-document fetch or PUT** — the old `GET/PUT /api/config` (and
 `hooks/useConfig.ts`) were removed because the GET shipped every secret to the
-browser. Read DTOs are **secret-redacted** (`privateKeySet` / `passwordSet`
-booleans); a write **omits** a secret field to keep the stored value, sends it
-to set, sends `""` to clear.
+browser. Read DTOs are **secret-redacted** (`privateKeySet` / `passwordSet` /
+`modemTokenSet` booleans); a write **omits** a secret field to keep the stored
+value, sends it to set, sends `""` to clear. The openHop modem token is one of
+these: it lives in `settings.modem_token`, never inside the connection string,
+because `GET /api/config/settings` returns that string in full.
 
 Server-side, every write goes through `backend.configMutate`
 (`internal/app/config_rest.go`): inside one `WriteSync` it loads the current
@@ -66,6 +68,79 @@ radio/connection change still restarts everything (modem reconnect);
   `configMutate` runs this on the assembled config before persisting.
   `TriggerConfig.Validate` parse-checks templates with stubbed trigger funcs
   (`formatPathBytes`) — extend the stubs if the templater gains functions.
+- **`GET /api/health` is the monitoring endpoint**, shaped for Uptime Kuma and
+  friends rather than for a person. It **always answers 200 while the process is
+  alive**, including when the radio is not: a monitor that cannot reach OwlShack
+  already fails the request, so the status code is not spent on a second
+  opinion. `problems` is a possibly-empty array of binary faults (a thing meant
+  to be connected that is not) and `status` is `ok` exactly when it is empty;
+  everything else is a fact to threshold externally, never a verdict. Three
+  radio ages are kept apart on purpose: `lastReplySecs` is the liveness probe's
+  own signal (the board answering a query, which a quiet mesh does not move),
+  `lastRxSecs` is mesh traffic, and `lastTxSecs` is our own sends. Each is
+  `null` rather than `0` when there is nothing to measure from, so "cannot say"
+  is distinguishable from "just now". `database.writesDroppedLastSecs` is the
+  database signal to threshold. The `WriteAsync` overflow is otherwise silent —
+  the write vanishes and every surface downstream still looks healthy — but the
+  raw `writesDropped` count only ever rises, so it cannot tell "failing now"
+  from "had a bad minute last Tuesday". A past loss is deliberately **not** put
+  in `problems`, which would pin the endpoint to `degraded` for the life of the
+  process after one transient overflow. `writeQueueLen` is a point sample of a
+  queue that normally drains in microseconds, so it reads 0 unless the writer is
+  *sustainedly* behind and will not catch a brief spike. **It is written on the
+  assumption it may be public**: the running nodes are not listed at all — a
+  name or pubkey is on-air already, but published on the internet it ties a
+  hostname to a mesh identity that public maps resolve to coordinates — there is
+  no position, and a broker reports
+  `connectedSecs` / `lastErrorSecs` rather than the transport error, which would
+  name a private broker's host and port. Both are ages for the same reason the
+  radio's are: `connected` is a sample, so a broker reconnecting every thirty
+  seconds reads `true` on nearly every scrape and only a connection age resetting
+  to near zero reveals the flapping, while the observer never clears its last
+  error on reconnect, so a boolean built from it would stay true for the life of
+  the process. Leaving the nodes out costs
+  nothing: peer counts are hydrated from SQLite and only grow, so they read the
+  same with the antenna unplugged, and a node that fails to start exits the
+  process rather than quietly leaving a list. "No node is running at all" is the
+  only state worth reporting and it is a `problems` entry. That
+  is a property of this endpoint alone — the rest of the API is unauthenticated
+  and must not be exposed with it. It also never polls the board: board readings
+  come from `StatsProvider.CachedStats`, not `Stats`, so a scrape costs no
+  airtime and no 500ms wait. `GET /api/radio/status` still polls, which is why
+  it takes ~500ms — that one is a diagnostics page a person is looking at.
+- **Feed triggers (`rss`, `cap`) poll `triggers.url`** on `triggers.schedule`,
+  which unlike `cron` may be blank and then defaults to `@every 5m`. The bot
+  editor writes that column as a number and a unit (`@every 15m`) rather than a
+  cron expression, and `validateFeedSchedule` floors any `@every` at one
+  minute — a crontab spec has no seconds field, so a minute is already its
+  finest step and only the descriptor form can ask for less. Each new
+  item goes to every channel in `trigger_channels` *and* as a DM to every
+  pubkey in `triggers.contacts` — the same column the `dm` type uses to filter
+  senders, read here as recipients. At least one of the two is required: with
+  neither, the trigger can never say anything. The first poll after a start only
+  records what is already published, so a restart never replays a backlog onto
+  the mesh, and one poll sends at most five items — a feed that republishes
+  itself would otherwise queue dozens of transmissions onto a duty-cycled
+  radio. A `cap` trigger fetches the alert document each entry links to; a 4xx
+  or unparseable document is recorded as seen rather than refetched every poll.
+  Templates get flattened conveniences (`.Title`/`.Link` for rss,
+  `.Severity`/`.Headline`/`.Areas` for cap) plus the parsed structs themselves:
+  `.Item` (`*gofeed.Item`) on both, and `.Alert`/`.Info` (`*cap.Alert`) on cap.
+  Match patterns on a feed trigger are **field-scoped**, written
+  `<field>:<regex>` (`severity:^(Extreme|Severe)$`). Patterns naming the same
+  field are alternatives; different fields must all match, which is the pairing
+  regex alone cannot express — alternation already says OR inside one field.
+  `matchFields` in `internal/config/feedfields.go` is the vocabulary and
+  `TriggerConfig.Validate` rejects an unscoped or misspelt field rather than
+  compiling it as a bare regex that silently never matches.
+- **DM acceptance is `companions.dm_policy`** (`contacts` | `allowlist` |
+  `anyone`, default `contacts`) with `companions.dm_allow` holding the
+  allowlist's pubkeys newline-encoded, the same encoding `triggers.contacts`
+  uses. The decision is `CompanionConfig.AllowsDMFrom`, applied in the
+  companion's TxtMsg handler to plain DMs only: a CLI reply or room push is a
+  response to a session we opened, so it is never gated. Changing either field
+  restarts the companion, since `triggersOnlyChange` only spares a trigger-only
+  edit — so the RX path reads them without a lock.
 - **MQTT is top-level, one node.** `Config.Mqtt` (`mqtt.node` selects the
   feeding companion, empty = first; `enabled` nil = on). Stored as
   `mqtt_settings.node_companion_id` (a real FK, ON DELETE SET NULL) and
@@ -273,7 +348,7 @@ GET|DELETE /api/companions/{name}/rooms/{pubkey}/session
 # assembled config before persisting (by surrogate id) and reload. There is NO
 # whole-document /api/config endpoint — it was removed (it leaked secrets);
 # unmatched /api/* paths 404.
-GET  /api/config/settings                                    (radio/connection/log + setupComplete)
+GET  /api/config/settings                                    (radio/connection/log + setupComplete; modemTokenSet, never the token)
 PUT  /api/config/settings
 GET  /api/config/mqtt                                        (feed settings; node by companion id)
 PUT  /api/config/mqtt
@@ -282,6 +357,7 @@ POST /api/config/mqtt/brokers          PUT|DELETE /api/config/mqtt/brokers/{id}
 GET  /api/config/companions                                  (id, name, pubkey, privateKeySet, …)
 POST /api/config/companions            PUT|DELETE /api/config/companions/{id}
 GET  /api/config/companions/{id}/channels
+GET  /api/health                                             (monitoring snapshot; see below)
 GET  /api/config/channels                                    (all channels; for trigger name resolution)
 POST /api/config/companions/{id}/channels    PUT|DELETE /api/config/channels/{id}
 GET  /api/config/triggers[?companionId=N]

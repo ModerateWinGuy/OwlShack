@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"os"
 	"path/filepath"
 
 	"github.com/meshcore-go/OwlShack/internal/config"
@@ -37,6 +39,34 @@ func resolveConfig(ctx context.Context, db *store.Store, importPath string) (*co
 		return nil, fmt.Errorf("stored config invalid: %w", verr)
 	}
 	return cfg, nil
+}
+
+// seedListenAddr stores LISTEN_DEFAULT when no address is configured; Settings owns it after.
+func seedListenAddr(ctx context.Context, db *store.Store, cfg *config.Config) error {
+	seed := os.Getenv("LISTEN_DEFAULT")
+	if seed == "" || (cfg.ListenAddr != nil && *cfg.ListenAddr != "") {
+		return nil
+	}
+	if _, _, err := net.SplitHostPort(seed); err != nil {
+		return fmt.Errorf("LISTEN_DEFAULT %q is not host:port: %w", seed, err)
+	}
+
+	var settings *store.Settings
+	var err error
+	db.WriteSync(func() {
+		settings, err = db.Settings.Get(ctx)
+		if err != nil {
+			return
+		}
+		settings.ListenAddr = &seed
+		err = db.Settings.Set(ctx, settings)
+	})
+	if err != nil {
+		return err
+	}
+	cfg.ListenAddr = &seed
+	slog.Info("seeded listen address", "addr", seed)
+	return nil
 }
 
 // mintMissingKeys persists identities for stored nodes that have none, so they survive a restart.

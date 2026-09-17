@@ -33,10 +33,10 @@ func resolvePathHashSize(configured *uint8, evt trigger.Event, def uint8) uint8 
 	if configured == nil {
 		return def
 	}
-	if *configured >= 1 && *configured <= 4 {
+	if *configured >= config.MinPathHashSize && *configured <= config.MaxPathHashSize {
 		return *configured
 	}
-	if incoming, ok := evt.Data["PathHashSize"].(uint8); ok && incoming >= 1 && incoming <= 4 {
+	if incoming, ok := evt.Data["PathHashSize"].(uint8); ok && incoming >= config.MinPathHashSize && incoming <= config.MaxPathHashSize {
 		return incoming
 	}
 	return def

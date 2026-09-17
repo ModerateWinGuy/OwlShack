@@ -1,0 +1,23 @@
+[Unit]
+Description=OwlShack MeshCore Operator Console
+Documentation=https://github.com/meshcore-go/OwlShack
+After=network.target
+
+[Service]
+User=owlshack
+Group=owlshack
+WorkingDirectory=/var/lib/owlshack
+EnvironmentFile=-/etc/default/owlshack
+ExecStart=/usr/bin/owlshack $OWLSHACK_ARGS
+ExecReload=/bin/sh -c 'kill -HUP $MAINPID'
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/owlshack
+
+[Install]
+WantedBy=multi-user.target
