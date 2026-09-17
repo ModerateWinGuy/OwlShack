@@ -300,6 +300,7 @@ func (b *backend) SaveTrigger(ctx context.Context, in api.TriggerInput) (int64, 
 		CharLimitBehaviour: in.CharLimitBehaviour, MatchPatterns: in.Match, Contacts: in.Contacts,
 		RetryTimeout: in.RetryTimeout, MaxRetries: in.MaxRetries, PathHashSize: in.PathHashSize,
 		Schedule: in.Schedule, URL: in.URL, ChannelIDs: in.ChannelIDs,
+		FailoverPattern: in.FailoverPattern, FailoverTimeout: in.FailoverTimeout,
 	}
 	err := b.configMutate(ctx,
 		func(rows *configRows) {

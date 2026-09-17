@@ -360,6 +360,36 @@ Channels are public or hashtag channels named directly (`Public`, `#general`),
 or private channels carrying a shared key. `Public` is the well-known channel
 every companion joins.
 
+### Failover replies
+
+Group bots can wait for another sender's response before replying. In the bot
+editor, enable **Failover reply**, set the wait to **10 seconds**, and use:
+
+```text
+Match pattern:    (?i)^wlg$
+Suppress pattern: ^@\[{{.Sender | reQuote}}\].+
+```
+
+The optional config fields are `failoverPattern` and `failoverTimeout` (1–3600
+seconds). An empty pattern and zero timeout disable failover. The suppression
+pattern is a Go template with the original request's `.Sender`; `reQuote`
+escapes regex characters in that name. Brackets around the mention must be
+escaped separately, as above. Invalid patterns are rejected when saving;
+a pattern that becomes invalid for a particular sender is logged and that
+request is skipped.
+
+Only an accepted response heard on the same channel during the wait cancels
+the reply; messages from this companion or the original requester do not.
+The response need not match the request pattern. Expiry uses local elapsed
+time and the reply retains the original request's template data. Retry settings
+apply after sending. Duplicate requests keep the original deadline; pending
+replies are cleared on bot edits, restart or shutdown. Each trigger holds at
+most 256 pending requests and logs when additional requests are skipped.
+
+Any other sender matching the pattern can suppress a reply, and a broad pattern
+can suppress multiple pending requests from the same name. Use staggered waits
+for multiple backup bots; a response the backup cannot hear cannot suppress it.
+
 ### Template variables
 
 Group triggers: `{{.Sender}}` `{{.Channel}}` `{{.Message}}` `{{.Match}}` (named

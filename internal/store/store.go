@@ -219,6 +219,7 @@ var migrations = []func(context.Context, dbExecer) error{
 	migrateV11,  // 13 — triggers.url (the feed an rss/cap trigger polls)
 	migrateV12,  // 14 — clamp triggers.path_hash_size to the 3-byte maximum the rest of the app uses
 	migrateV13,  // 15 — settings.modem_token (the openHop modem's access token)
+	migrateV14,  // 16 — optional group bot failover
 }
 
 // dbExecer is the subset of *sql.DB / *sql.Tx a migration needs.
@@ -710,6 +711,19 @@ func migrateV6(ctx context.Context, db dbExecer) error {
 		`ALTER TABLE repeater ADD COLUMN direct_tx_delay_factor REAL`,
 		`ALTER TABLE repeater ADD COLUMN rx_delay_base REAL`,
 		`ALTER TABLE repeater ADD COLUMN multi_acks INTEGER`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV14 adds optional group bot failover.
+func migrateV14(ctx context.Context, db dbExecer) error {
+	for _, q := range []string{
+		`ALTER TABLE triggers ADD COLUMN failover_pattern TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE triggers ADD COLUMN failover_timeout INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := db.ExecContext(ctx, q); err != nil {
 			return err

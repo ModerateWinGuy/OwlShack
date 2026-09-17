@@ -90,6 +90,8 @@ type triggerDTO struct {
 	Match              []string `json:"match"`
 	Contacts           []string `json:"contacts"`
 	ChannelIDs         []int64  `json:"channelIds"`
+	FailoverPattern    string   `json:"failoverPattern"`
+	FailoverTimeout    int64    `json:"failoverTimeout"`
 	RetryTimeout       *int64   `json:"retryTimeout"`
 	MaxRetries         *int     `json:"maxRetries"`
 	PathHashSize       *int     `json:"pathHashSize"`
@@ -126,6 +128,7 @@ func triggerToDTO(t store.Trigger) triggerDTO {
 		CharLimitBehaviour: t.CharLimitBehaviour, Match: t.MatchPatterns, Contacts: t.Contacts,
 		ChannelIDs: t.ChannelIDs, RetryTimeout: t.RetryTimeout, MaxRetries: t.MaxRetries,
 		PathHashSize: t.PathHashSize, Schedule: t.Schedule, URL: t.URL,
+		FailoverPattern: t.FailoverPattern, FailoverTimeout: t.FailoverTimeout,
 	}
 }
 

@@ -20,6 +20,8 @@ func TestTriggerRepo_RoundTrip(t *testing.T) {
 
 	want := &Trigger{
 		CompanionID:        companionID,
+		FailoverPattern:    `^@\[{{.Sender | reQuote}}\].+`,
+		FailoverTimeout:    10,
 		Type:               "cap",
 		Template:           "{{.Headline}}",
 		CharLimitBehaviour: sptr("truncate"),
@@ -44,6 +46,8 @@ func TestTriggerRepo_RoundTrip(t *testing.T) {
 		t.Fatalf("after Create/Get:\n got %+v\nwant %+v", got, want)
 	}
 
+	want.FailoverPattern = `^pong$`
+	want.FailoverTimeout = 20
 	want.URL = "https://example.com/other.atom"
 	want.Schedule = sptr("@every 2h")
 	want.MatchPatterns = []string{"event:(?i)tsunami"}
@@ -55,6 +59,11 @@ func TestTriggerRepo_RoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("after Update/Get:\n got %+v\nwant %+v", got, want)
+	}
+
+	all, err := st.Triggers.List(t.Context())
+	if err != nil || len(all) != 1 || !reflect.DeepEqual(&all[0], want) {
+		t.Fatalf("List = %+v, error = %v", all, err)
 	}
 
 	list, err := st.Triggers.ListByCompanion(t.Context(), companionID)

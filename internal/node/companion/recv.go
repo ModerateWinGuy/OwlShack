@@ -416,10 +416,8 @@ func (c *Companion) registerPacketHandlers() {
 				c.hub.Broadcast("messages", wsMsg)
 			}
 		})
-	})
 
-	// One persistent handler (node.OnPacket has no deregistration) registered after the rx-persist handler, so a trigger's reply gets a higher row id than the message it answers.
-	c.node.OnPacket(meshcore.PayloadTypeGrpTxt, func(pkt *meshcore.Packet) {
+		// Dispatch accepted messages after queuing persistence so replies get a higher row id.
 		c.mu.Lock()
 		entries := c.triggers
 		c.mu.Unlock()

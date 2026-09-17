@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/meshcore-go/OwlShack/internal/config"
 	"github.com/meshcore-go/OwlShack/internal/logging"
@@ -20,8 +21,23 @@ type ChannelTrigger struct {
 	channels map[string]bool // channel names this trigger listens on; nil = all
 	log      *slog.Logger
 
-	mu       sync.Mutex
-	callback Callback
+	mu          sync.Mutex
+	callback    Callback
+	ctx         context.Context
+	stopContext func() bool
+	pending     map[groupRequest]*pendingReply
+}
+
+type groupRequest struct {
+	channel, sender, text string
+	timestamp             uint32
+}
+
+type pendingReply struct {
+	pattern    *regexp.Regexp
+	deadline   time.Time
+	timer      *time.Timer
+	suppressed bool
 }
 
 func NewChannelTrigger(botName string, cfg config.TriggerConfig, n *node.Node, channels []*meshcore.ChannelEntry, log *slog.Logger) (*ChannelTrigger, error) {
@@ -48,18 +64,31 @@ func NewChannelTrigger(botName string, cfg config.TriggerConfig, n *node.Node, c
 	}, nil
 }
 
-// Start only stores the callback: group text arrives via the companion's persistent GrpTxt handler, because node.OnPacket cannot deregister.
-func (t *ChannelTrigger) Start(_ context.Context, callback Callback) error {
+// Group text arrives via the companion's persistent handler; node.OnPacket cannot deregister.
+func (t *ChannelTrigger) Start(ctx context.Context, callback Callback) error {
 	t.mu.Lock()
+	t.ctx = ctx
 	t.callback = callback
+	t.pending = make(map[groupRequest]*pendingReply)
+	t.stopContext = context.AfterFunc(ctx, func() { t.Stop() })
 	t.mu.Unlock()
 	return nil
 }
 
-// Stop clears the callback so HandleGroupText is a no-op even if the dispatcher still holds this trigger.
+// Stop cancels pending replies and waits for any committed callback to finish.
 func (t *ChannelTrigger) Stop() error {
 	t.mu.Lock()
 	t.callback = nil
+	if t.stopContext != nil {
+		t.stopContext()
+	}
+	if len(t.pending) > 0 {
+		t.log.Debug("cancelling pending failover replies", "count", len(t.pending))
+	}
+	for key, pending := range t.pending {
+		pending.timer.Stop()
+		delete(t.pending, key)
+	}
 	t.mu.Unlock()
 	return nil
 }
@@ -76,6 +105,15 @@ func (t *ChannelTrigger) HandleGroupText(pkt *meshcore.Packet) {
 	msg, ch, err := t.node.DecryptGroupText(pkt)
 	if err != nil {
 		t.log.Log(context.Background(), logging.LevelTrace, "group decrypt failed", "error", err)
+		return
+	}
+	t.handleGroupText(msg, ch, pkt)
+}
+
+func (t *ChannelTrigger) handleGroupText(msg *meshcore.GroupTextPayload, ch *meshcore.ChannelEntry, pkt *meshcore.Packet) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.callback == nil || t.ctx.Err() != nil {
 		return
 	}
 
@@ -96,6 +134,14 @@ func (t *ChannelTrigger) HandleGroupText(pkt *meshcore.Packet) {
 		return
 	}
 
+	now := time.Now()
+	for key, pending := range t.pending {
+		if !pending.suppressed && now.Before(pending.deadline) && key.channel == ch.Name && key.sender != msg.Sender && pending.pattern.MatchString(msg.Text) {
+			pending.suppressed = true
+			t.log.Debug("failover reply suppressed", "channel", ch.Name, "requester", key.sender, "responder", msg.Sender)
+		}
+	}
+
 	captures := t.matchesAny(msg.Text)
 	if captures == nil {
 		t.log.Log(context.Background(), logging.LevelTrace, "no pattern matched",
@@ -105,7 +151,7 @@ func (t *ChannelTrigger) HandleGroupText(pkt *meshcore.Packet) {
 
 	t.log.Log(context.Background(), logging.LevelTrace, "trigger matched", "captures", captures)
 
-	cb(Event{
+	evt := Event{
 		Type:    "channel",
 		BotName: t.botName,
 		Data: map[string]any{
@@ -121,7 +167,41 @@ func (t *ChannelTrigger) HandleGroupText(pkt *meshcore.Packet) {
 			"PathHashes":   pkt.PathHashes(),
 			"PathHashSize": pkt.PathHashSize(),
 		},
+	}
+	if t.cfg.FailoverPattern == "" {
+		t.callback(evt)
+		return
+	}
+	key := groupRequest{ch.Name, msg.Sender, msg.Text, msg.Timestamp}
+	if _, exists := t.pending[key]; exists {
+		return
+	}
+	if len(t.pending) >= 256 {
+		t.log.Warn("failover pending limit reached", "channel", ch.Name)
+		return
+	}
+	pattern, err := t.cfg.FailoverRegexp(msg.Sender)
+	if err != nil {
+		t.log.Error("failover pattern error", "error", err)
+		return
+	}
+	wait := time.Duration(t.cfg.FailoverTimeout) * time.Second
+	pending := &pendingReply{pattern: pattern, deadline: now.Add(wait)}
+	t.pending[key] = pending
+	pending.timer = time.AfterFunc(time.Until(pending.deadline), func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.pending[key] != pending {
+			return
+		}
+		delete(t.pending, key)
+		if pending.suppressed || t.callback == nil || t.ctx.Err() != nil {
+			return
+		}
+		t.log.Debug("failover deadline expired, replying", "channel", key.channel, "sender", key.sender)
+		t.callback(evt)
 	})
+	t.log.Debug("waiting for failover response", "channel", ch.Name, "sender", msg.Sender, "wait", wait)
 }
 
 func (t *ChannelTrigger) matchesAny(text string) map[string]string {

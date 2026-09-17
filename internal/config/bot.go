@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"net/url"
@@ -21,6 +22,9 @@ type TriggerConfig struct {
 	Match    *[]string    `json:"match" yaml:"match" toml:"match"`          // Patterns to match against (supports wildcards/regex)
 	Channels *ChannelList `json:"channels" yaml:"channels" toml:"channels"` // Channels to listen on (strings or {name, privateKey} objects)
 	Contacts *[]string    `json:"contacts" yaml:"contacts" toml:"contact"`  // What Contacts to listen in for DMs
+
+	FailoverPattern string `json:"failoverPattern,omitempty" yaml:"failoverPattern,omitempty" toml:"failoverPattern,omitempty"`
+	FailoverTimeout int64  `json:"failoverTimeout,omitempty" yaml:"failoverTimeout,omitempty" toml:"failoverTimeout,omitempty"`
 
 	RetryTimeout *int64 `json:"retryTimeout" yaml:"retryTimeout" toml:"retryTimeout"` // Stored as seconds
 	MaxRetries   *int   `json:"maxRetries" yaml:"maxRetries" toml:"maxRetries"`
@@ -82,6 +86,18 @@ func (t *TriggerConfig) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unknown trigger type %q (supported: group, dm, cron, rss, cap)", t.Type)
+	}
+
+	if t.FailoverPattern != "" || t.FailoverTimeout != 0 {
+		if t.Type != "group" && t.Type != "channel" {
+			return fmt.Errorf("failover is only supported for group triggers")
+		}
+		if strings.TrimSpace(t.FailoverPattern) == "" || t.FailoverTimeout < 1 || t.FailoverTimeout > 3600 {
+			return fmt.Errorf("failover requires a response pattern and a timeout of 1-3600 seconds")
+		}
+		if _, err := t.FailoverRegexp("sender"); err != nil {
+			return err
+		}
 	}
 
 	if t.Template == "" {
@@ -182,4 +198,24 @@ func (cr *ChannelRef) Validate() error {
 		}
 	}
 	return nil
+}
+
+// FailoverRegexp binds the response pattern to the original request's sender.
+func (t *TriggerConfig) FailoverRegexp(sender string) (*regexp.Regexp, error) {
+	tmpl, err := template.New("failover").Funcs(template.FuncMap{"reQuote": regexp.QuoteMeta}).Parse(t.FailoverPattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid failover template: %w", err)
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, struct{ Sender string }{sender}); err != nil {
+		return nil, fmt.Errorf("invalid failover template: %w", err)
+	}
+	if strings.TrimSpace(out.String()) == "" {
+		return nil, fmt.Errorf("failover pattern must not render empty")
+	}
+	re, err := regexp.Compile(out.String())
+	if err != nil {
+		return nil, fmt.Errorf("invalid failover pattern: %w", err)
+	}
+	return re, nil
 }

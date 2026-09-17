@@ -397,6 +397,8 @@ type TriggerInput struct {
 	Match              []string `json:"match"`
 	Contacts           []string `json:"contacts"`
 	ChannelIDs         []int64  `json:"channelIds"`
+	FailoverPattern    string   `json:"failoverPattern"`
+	FailoverTimeout    int64    `json:"failoverTimeout"`
 	RetryTimeout       *int64   `json:"retryTimeout"`
 	MaxRetries         *int     `json:"maxRetries"`
 	PathHashSize       *int     `json:"pathHashSize"`

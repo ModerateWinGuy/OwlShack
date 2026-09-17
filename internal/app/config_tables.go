@@ -180,6 +180,8 @@ func assembleFromRows(rows *configRows) *config.Config {
 					PathHashSize:       intToU8Ptr(t.PathHashSize),
 					Schedule:           ptrToStr(t.Schedule),
 					URL:                t.URL,
+					FailoverPattern:    t.FailoverPattern,
+					FailoverTimeout:    t.FailoverTimeout,
 				}
 				if len(t.ChannelIDs) > 0 {
 					cl := make(config.ChannelList, 0, len(t.ChannelIDs))
@@ -470,6 +472,8 @@ func replaceCompanionChildren(ctx context.Context, st *store.Store, companionID 
 			PathHashSize:       u8ToIntPtr(tg.PathHashSize),
 			Schedule:           emptyToNil(tg.Schedule),
 			URL:                tg.URL,
+			FailoverPattern:    tg.FailoverPattern,
+			FailoverTimeout:    tg.FailoverTimeout,
 			ChannelIDs:         chIDs,
 		}
 		if err := st.Triggers.Create(ctx, &tr); err != nil {

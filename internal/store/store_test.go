@@ -765,7 +765,7 @@ func TestPacketRepo_ListFilter(t *testing.T) {
 // Bump wantVersion whenever a migration is appended to the migrations slice.
 func TestStore_MigrateUserVersion(t *testing.T) {
 	t.Parallel()
-	const wantVersion = 15 // migrateV1, 2 squashed noop slots, migrateV2..migrateV13
+	const wantVersion = 16 // migrateV1, 2 squashed noop slots, migrateV2..migrateV14
 	st := newTestStore(t)
 	var v int
 	if err := st.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&v); err != nil {

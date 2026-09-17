@@ -69,3 +69,33 @@ func TestTriggerConfig_MirrorPathHashSizeNeedsAnIncomingMessage(t *testing.T) {
 		})
 	}
 }
+
+func TestTriggerConfig_Failover(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, pattern string
+		timeout             int64
+		valid               bool
+	}{
+		{"disabled", "group", "", 0, true},
+		{"enabled", "group", `^@\[{{.Sender | reQuote}}\].+`, 10, true},
+		{"legacy channel", "channel", `^pong$`, 1, true},
+		{"dm unsupported", "dm", `pong`, 10, false},
+		{"missing pattern", "group", "", 10, false},
+		{"blank pattern", "group", " ", 10, false},
+		{"missing timeout", "group", "pong", 0, false},
+		{"negative timeout", "group", "pong", -1, false},
+		{"excessive timeout", "group", "pong", 3601, false},
+		{"bad regex", "group", `[`, 10, false},
+		{"bad template", "group", `{{`, 10, false},
+		{"unknown function", "group", `{{.Sender | typo}}`, 10, false},
+		{"unknown field", "group", `{{.Typo}}`, 10, false},
+		{"empty rendered pattern", "group", `{{if false}}pong{{end}}`, 10, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := TriggerConfig{Type: tc.kind, Template: "reply", Channels: &ChannelList{{Name: "testing"}}, FailoverPattern: tc.pattern, FailoverTimeout: tc.timeout}
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate = %v, valid = %v", err, tc.valid)
+			}
+		})
+	}
+}

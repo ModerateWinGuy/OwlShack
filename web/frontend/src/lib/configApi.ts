@@ -139,6 +139,8 @@ export interface Trigger {
   match: string[] | null;
   contacts: string[] | null;
   channelIds: number[] | null;
+  failoverPattern: string;
+  failoverTimeout: number;
   retryTimeout: number | null;
   maxRetries: number | null;
   pathHashSize: number | null;
@@ -332,6 +334,8 @@ export interface TriggerInput {
   match?: string[] | null;
   contacts?: string[] | null;
   channelIds?: number[] | null;
+  failoverPattern?: string;
+  failoverTimeout?: number;
   retryTimeout?: number | null;
   maxRetries?: number | null;
   pathHashSize?: number | null;
