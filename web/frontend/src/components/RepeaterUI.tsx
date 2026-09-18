@@ -10,7 +10,6 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {

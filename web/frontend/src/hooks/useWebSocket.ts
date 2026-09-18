@@ -9,6 +9,8 @@ const PROBE_TIMEOUT_MS = 5000;
 
 export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
   const [connected, setConnected] = useState(false);
+  // Cleared by the first open OR the first close, so an unreachable server still reaches "offline".
+  const [pending, setPending] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<number | null>(null);
   const probeRef = useRef<number | null>(null);
@@ -43,6 +45,7 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
       ws.onopen = () => {
         if (!mounted) return;
         setConnected(true);
+        setPending(false);
         backoffRef.current = 1000;
         for (const topic of topics) {
           ws.send(JSON.stringify({ action: "subscribe", topic }));
@@ -69,6 +72,7 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
         // resume() may already have replaced this socket; its close must not null out the new one.
         if (!mounted || wsRef.current !== ws) return;
         setConnected(false);
+        setPending(false);
         wsRef.current = null;
         reconnectRef.current = window.setTimeout(() => {
           backoffRef.current = Math.min(backoffRef.current * 1.5, 30000);
@@ -134,5 +138,5 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topicsKey]);
 
-  return { connected };
+  return { connected, pending };
 }

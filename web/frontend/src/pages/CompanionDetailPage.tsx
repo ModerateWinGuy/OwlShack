@@ -454,7 +454,13 @@ function CompanionActions({ companion }: { companion: string }) {
   );
 }
 
+// Every cache below is per-companion: remount on switch, or one companion's rows leak into another's thread.
 export function CompanionDetailPage() {
+  const { ref } = useParams<{ ref: string }>();
+  return <CompanionChat key={ref ?? ""} />;
+}
+
+function CompanionChat() {
   const { ref } = useParams<{ ref: string }>();
   const {
     ref: companionRef,
@@ -1031,7 +1037,7 @@ export function CompanionDetailPage() {
     ],
   );
 
-  const { connected } = useWebSocket(["messages"], handleWsMessage);
+  const { connected, pending } = useWebSocket(["messages"], handleWsMessage);
 
   // A gap in the stream leaves this thread and the roster short of whatever arrived during it.
   // Other channels catch up on re-open, via the same backfill.
@@ -1446,7 +1452,7 @@ export function CompanionDetailPage() {
               {threadCount === 1 ? "" : "s"}
             </span>
           }
-          trailing={<ConnectionPill connected={connected} />}
+          trailing={<ConnectionPill connected={connected} pending={pending} />}
           actions={<CompanionActions companion={companionRef} />}
         />
       </div>
@@ -1637,7 +1643,7 @@ export function CompanionDetailPage() {
                 <div
                   ref={scrollContainerRef}
                   onScroll={handleMessagesScroll}
-                  className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-background/30"
+                  className="flex-1 flex flex-col justify-end-safe overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-background/30"
                 >
                   {!loadingMsgs && loadingOlder && (
                     <div className="flex items-center justify-center py-2 text-muted-foreground/60">
@@ -2041,7 +2047,7 @@ function ConversationRow({
                     me ›
                   </span>
                 )}
-                {convo.lastMessage.text}
+                {convo.lastMessage.text.replace(MENTION_RE, "@$1")}
               </>
             ) : (
               <span className="italic text-muted-foreground/50">

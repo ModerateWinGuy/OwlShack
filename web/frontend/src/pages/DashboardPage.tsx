@@ -94,7 +94,7 @@ export function DashboardPage() {
     });
   }, []);
 
-  const { connected } = useWebSocket(["peers"], onWsMessage);
+  const { connected, pending } = useWebSocket(["peers"], onWsMessage);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -162,7 +162,7 @@ export function DashboardPage() {
             </span>
           )
         }
-        trailing={<ConnectionPill connected={connected} />}
+        trailing={<ConnectionPill connected={connected} pending={pending} />}
       />
 
       {loading && <DashboardSkeleton />}
