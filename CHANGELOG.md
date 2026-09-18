@@ -5,6 +5,74 @@ top until tagged.
 
 ## Unreleased
 
+## v1.4.1 — 2026-09-18
+
+Frontend only, the same day v1.4.0 shipped. The fix worth taking: if you run two companions
+subscribed to the same channel, switching between them showed the other one's messages. The chat
+page is a single route, so changing companion never remounted it, and the message cache was keyed
+by channel name with no companion in the key — so opening a shared channel as the second companion
+found the first one's rows under that key, rendered them, then backfilled from the first one's
+highest id and merged the second's on top. You saw the same text twice, and the first companion's
+sent copy rendered as Sent in the second's thread.
+
+The rest is paths you can read. The peer sheet names the repeaters in an advert path instead of
+printing five hex bytes, and any path — a peer's advert route, or a packet's — plots on the map as
+a dashed line through each node.
+
+Everything here was verified in a browser against the bench's 374 peers and 10,000 packets, on a
+copy of the database driven by a loopback modem. Nothing in this release has been exercised on air,
+and nothing in it touches the radio: no Go changed, and the schema does not move. There are still
+no frontend tests in the repo, so none of this is guarded by CI.
+
+Baseline `v1.4.0` · schema `user_version` 16, unchanged · frontend only
+
+### Added
+
+- **The peer sheet names the hops in an advert path.** It showed `F9 88 A3 8C E8`; it now reads
+  `Teletronics Rangitumau → WR Aorangi → Remutaka → … → you`. This reuses the resolution the
+  Packets page has had since v1.4.0-rc.2, so it keeps the same honesty: a hash matching no repeater
+  stays hex, and one matching several is underlined with the count of other candidates and opens
+  them on click. A hash is a pubkey prefix, not an identity — on a 338-peer mesh 92 of 211
+  one-byte hashes match more than one node.
+- **Plot a path on the map.** An **on map** link on the peer sheet, on the Peers list's hop count,
+  and on a packet's path draws that path as a dashed line through each node, hides every peer not
+  on it, and frames the map to it. A chip in the filter bar names what is shown and restores the
+  normal map. Two rules keep the drawing as honest as the text it mirrors: a hop that cannot be
+  placed — an unresolvable hash, or a named repeater with no position — **ends the line rather than
+  bridging its neighbours**, because a leg drawn across an unknown hop asserts a link that was
+  never reported and looks identical to one that was; and a `DIRECT` route carries only the road
+  ahead, so neither end is us and no `you` is drawn. Nothing plots by selecting a marker: that
+  opens the details panel and leaves the map alone.
+
+### Fixed
+
+- **Two companions on one channel showed duplicate and mis-sided messages.** Described above. The
+  page is now keyed on the companion in the URL, which also stops the thread list, the composer,
+  the room session and the read high-water mark carrying across a switch. Reproduced before and
+  after on a copy of the database: on the old build the second companion's Public showed all 100 of
+  the first's messages plus three duplicated texts, one of them on the wrong side.
+- **Every page mount flashed the connection pill red.** `connected: false` meant both "the
+  handshake is still in flight" and "the link dropped", so arriving on any page painted a red
+  `offline` for the duration of the WebSocket handshake — one frame locally, the round trip on a
+  real deployment, and the chat fix above made it fire on a routine interaction. The pill has a
+  third state, and `pending` clears on the first open **or** the first close, so a server that is
+  genuinely unreachable still reaches `offline` instead of sitting neutral for ever. Both failure
+  states were provoked: killing the server goes red, and mounting a socket with no server reaches
+  red within 400 ms. The Repeater page's pill is unchanged — there, "off" genuinely means stopped.
+- **A short thread floated at the top of a tall message pane**, leaving a gap between it and the
+  composer. You only ever saw it once the bug above stopped filling short threads with another
+  companion's backlog.
+- **The thread list showed the raw mention syntax**, `@[MWH1]`, where the message itself renders a
+  styled `@MWH1`.
+- **A hop chain's arrows and its trailing `you` were nearly invisible**, dimmed far below the names
+  they separate.
+
+### Internal
+
+- Ten unused imports removed, and `noUnusedLocals` / `noUnusedParameters` turned on so the next one
+  fails the build rather than accumulating. Both flags were `false`, which is how these built up.
+  A branch cut before this that carries an unused import will now fail to build until it is dropped.
+
 ## v1.4.0 — 2026-09-18
 
 Six candidates' worth of work since v1.3.1, which is the version most people are upgrading from.
