@@ -6,9 +6,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import {
-  hexToHopHashes,
-  buildPeerCandidatesByHash,
-  resolveHopPeer,
+  pathEnds,
+  resolveHops,
   type PathPeer,
   type ResolvedHop as Hop,
 } from "@/lib/linkPath";
@@ -20,12 +19,10 @@ function useHops(
   hashSize: number | undefined,
   peers: PathPeer[] | null,
 ): Hop[] {
-  const size = Math.max(1, hashSize ?? 1);
-  return useMemo(() => {
-    if (!path) return [];
-    const byHash = buildPeerCandidatesByHash(peers ?? [], size);
-    return hexToHopHashes(path, size).map((h) => resolveHopPeer(h, byHash.get(h)));
-  }, [path, size, peers]);
+  return useMemo(
+    () => (path ? resolveHops(path, hashSize, peers ?? []) : []),
+    [path, hashSize, peers],
+  );
 }
 
 // An ambiguous hop opens on click rather than hover: a title attribute never appears on a touch
@@ -95,6 +92,7 @@ export function HopPath({
   direction,
   route,
   peers,
+  originName,
   compact,
   className,
 }: {
@@ -102,6 +100,8 @@ export function HopPath({
   hashSize?: number;
   direction?: string;
   route?: string;
+  // Names the node the path starts at, for a caller that knows it — an advert's own sender.
+  originName?: string;
   peers: PathPeer[] | null;
   compact?: boolean;
   className?: string;
@@ -118,40 +118,32 @@ export function HopPath({
 
   const chain = hops.map((h, i) => (
     <span key={`${h.hash}-${i}`}>
-      {i > 0 && <span className="text-muted-foreground/40"> → </span>}
+      {i > 0 && " → "}
       <HopName hop={h} />
     </span>
   ));
-  const us = <span className="text-muted-foreground/60">you</span>;
+  const us = "you";
 
-  // Where we sit on the chain, and whether we sit on it at all. A flood ACCUMULATES a hash at each
-  // relay, so a received one lists where the packet has been and it reached us from the last of
-  // them: "chain → you". Our own send leads: "you → chain". A direct route CONSUMES its hashes
-  // (Mesh.cpp:334-342), so a received one carries only the road ahead — a leg running from the
-  // relay we overheard to its next hop, with us on neither end. That gets no "you" at all: naming
-  // us at the head would claim we are forwarding it on, which is as wrong as the tail claiming the
-  // next hop delivered it to us.
-  const forward = direction === "tx" || route?.includes("DIRECT");
-  const lead = direction === "tx" ? us : null;
-  const tail = forward ? null : us;
-  const ahead = route?.includes("DIRECT") && direction !== "tx";
+  const { weLead, weTrail, aheadOnly } = pathEnds(direction, route);
+  const lead = weLead ? us : (originName ?? null);
+  const tail = weTrail ? us : null;
 
   const body = (
     <>
       {lead && (
         <>
           {lead}
-          <span className="text-muted-foreground/40"> → </span>
+          {" → "}
         </>
       )}
       {chain}
       {tail && (
         <>
-          <span className="text-muted-foreground/40"> → </span>
+          {" → "}
           {tail}
         </>
       )}
-      {ahead && (
+      {aheadOnly && (
         <span className="text-muted-foreground/50"> (still to go)</span>
       )}
     </>

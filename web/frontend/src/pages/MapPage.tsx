@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import L from "leaflet";
-import { ChevronDown, MapPin, RefreshCw } from "lucide-react";
+import { ChevronDown, MapPin, RefreshCw, Route, X } from "lucide-react";
 import { toast } from "sonner";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useApiList } from "@/hooks/useApiList";
@@ -24,6 +24,8 @@ import {
 import { PeerDetailSheet } from "@/components/PeerDetailSheet";
 import { deletePeers, deletedPeersMessage } from "@/lib/peerApi";
 import { peerLatLon, themeTileLayer, useThemeTiles } from "@/lib/leaflet";
+import { pathEnds, resolveHops } from "@/lib/linkPath";
+import { useOwnPosition } from "@/hooks/useOwnPosition";
 import { drawLink, LINK_STAGGER } from "@/lib/mapLinks";
 import { cn } from "@/lib/utils";
 
@@ -36,6 +38,8 @@ interface Peer {
   lastSeen: string;
   snr: number | null;
   rssi: number | null;
+  outPath?: string;
+  outPathHashSize?: number;
 }
 
 interface NeighborLink {
@@ -110,7 +114,7 @@ export function MapPage() {
     "Failed to load neighbor links",
   );
 
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const focus = useMemo(() => {
     const la = parseFloat(searchParams.get("lat") ?? "");
     const lo = parseFloat(searchParams.get("lon") ?? "");
@@ -125,6 +129,7 @@ export function MapPage() {
   const markersRef = useRef<Map<string, L.Marker>>(new Map());
   const focusMarkerRef = useRef<L.Marker | null>(null);
   const linksLayerRef = useRef<L.LayerGroup | null>(null);
+  const pathLayerRef = useRef<L.LayerGroup | null>(null);
   const fittedRef = useRef(false);
   // Bumped on zoom so the links redraw: whether a label fits depends on the current scale.
   const [zoomTick, setZoomTick] = useState(0);
@@ -152,7 +157,7 @@ export function MapPage() {
     [setPeers],
   );
 
-  const { connected } = useWebSocket(["peers"], handleMessage);
+  const { connected, pending } = useWebSocket(["peers"], handleMessage);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -165,6 +170,7 @@ export function MapPage() {
     });
     tileLayerRef.current = themeTileLayer().addTo(map);
     linksLayerRef.current = L.layerGroup().addTo(map);
+    pathLayerRef.current = L.layerGroup().addTo(map);
     map.on("zoomend", () => setZoomTick((t) => t + 1));
     mapRef.current = map;
 
@@ -173,6 +179,7 @@ export function MapPage() {
       mapRef.current = null;
       tileLayerRef.current = null;
       linksLayerRef.current = null;
+      pathLayerRef.current = null;
       markersRef.current.clear();
       focusMarkerRef.current = null;
       fittedRef.current = false;
@@ -214,10 +221,98 @@ export function MapPage() {
     [peers],
   );
 
-  const visible = useMemo(
-    () => located.filter((p) => !hidden.has(p.type)),
-    [located, hidden],
-  );
+  const ownPos = useOwnPosition();
+
+  // Only an explicit "on map" link puts a path up. Selecting a marker opens its details and leaves
+  // the map exactly as it was.
+  const activePath = useMemo(() => {
+    const hex = searchParams.get("path");
+    if (!hex) return null;
+    return {
+      hex,
+      hashSize: Number(searchParams.get("hs")) || 1,
+      origin: searchParams.get("origin") ?? undefined,
+      direction: searchParams.get("dir") ?? undefined,
+      route: searchParams.get("route") ?? undefined,
+    };
+  }, [searchParams]);
+
+  // Resolves the path to map nodes once: the dashed runs, which peers to keep plotted, and the
+  // chip's label. A hop we cannot place ends the run instead of bridging its neighbours — a leg
+  // drawn across an unplaceable hop asserts a link that was never reported.
+  const pathView = useMemo(() => {
+    if (!activePath) return null;
+    const byPubkey = new Map(peers.map((p) => [p.pubkey, p]));
+    const origin = activePath.origin ? byPubkey.get(activePath.origin) : undefined;
+    const hops = resolveHops(activePath.hex, activePath.hashSize, peers).map((h) =>
+      h.peer ? byPubkey.get(h.peer.pubkey) : undefined,
+    );
+    const at = (p?: Peer): [number, number] | null =>
+      p && (p.lat !== 0 || p.lon !== 0) ? peerLatLon(p.lat, p.lon) : null;
+
+    const { weLead, weTrail } = pathEnds(activePath.direction, activePath.route);
+    const points: ([number, number] | null)[] = [
+      ...(weLead ? [ownPos] : [at(origin)]),
+      ...hops.map(at),
+      ...(weTrail ? [ownPos] : []),
+    ];
+
+    const runs: [number, number][][] = [];
+    let run: [number, number][] = [];
+    for (const pt of points) {
+      if (pt) {
+        run.push(pt);
+      } else {
+        if (run.length > 1) runs.push(run);
+        run = [];
+      }
+    }
+    if (run.length > 1) runs.push(run);
+
+    const nodes = new Set(
+      [origin, ...hops].filter((p): p is Peer => !!p).map((p) => p.pubkey),
+    );
+    return { runs, nodes, label: origin?.name ?? "packet path" };
+  }, [activePath, peers, ownPos]);
+
+  useEffect(() => {
+    const layer = pathLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    for (const run of pathView?.runs ?? []) {
+      L.polyline(run, {
+        color: "var(--primary)",
+        weight: 2,
+        opacity: 0.9,
+        dashArray: "6 6",
+        // Every vertex is a node: Leaflet's default simplification drops one whose neighbour is
+        // within a pixel, which silently erases a hop from the drawing.
+        smoothFactor: 0,
+        interactive: false,
+      }).addTo(layer);
+    }
+  }, [pathView]);
+
+  // Frame the path itself, or the plotted peers come back at whatever zoom the last one left.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !pathView) return;
+    const bounds = L.latLngBounds(pathView.runs.flat());
+    if (bounds.isValid()) map.fitBounds(bounds, { padding: [60, 60], maxZoom: 12 });
+  }, [pathView]);
+
+  const clearPath = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    for (const k of ["path", "hs", "origin", "dir", "route"]) next.delete(k);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  // Showing a path drops every peer that is not on it — the point of plotting one is to read it,
+  // and 300 unrelated dots is what made that hard.
+  const plotted = useMemo(() => {
+    const byType = located.filter((p) => !hidden.has(p.type));
+    return pathView ? byType.filter((p) => pathView.nodes.has(p.pubkey)) : byType;
+  }, [located, hidden, pathView]);
 
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -226,7 +321,7 @@ export function MapPage() {
   const deleteShown = useCallback(async () => {
     setClearing(true);
     try {
-      const result = await deletePeers(visible.map((p) => p.pubkey));
+      const result = await deletePeers(plotted.map((p) => p.pubkey));
       toast.success(deletedPeersMessage(result));
       setConfirmClear(false);
     } catch (e) {
@@ -234,13 +329,13 @@ export function MapPage() {
     } finally {
       setClearing(false);
     }
-  }, [visible]);
+  }, [plotted]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const next = new Set(visible.map((p) => p.pubkey));
+    const next = new Set(plotted.map((p) => p.pubkey));
     const markers = markersRef.current;
 
     for (const [key, marker] of markers.entries()) {
@@ -250,7 +345,7 @@ export function MapPage() {
       }
     }
 
-    for (const p of visible) {
+    for (const p of plotted) {
       const [lat, lon] = peerLatLon(p.lat, p.lon);
       const icon = PEER_ICONS[p.type] || PEER_ICONS.NONE;
       const existing = markers.get(p.pubkey);
@@ -266,16 +361,16 @@ export function MapPage() {
       }
     }
 
-    if (!fittedRef.current && visible.length > 0) {
+    if (!fittedRef.current && plotted.length > 0) {
       const bounds = L.latLngBounds(
-        visible.map((p) => peerLatLon(p.lat, p.lon)),
+        plotted.map((p) => peerLatLon(p.lat, p.lon)),
       );
       if (bounds.isValid()) {
         map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
         fittedRef.current = true;
       }
     }
-  }, [visible]);
+  }, [plotted]);
 
   // Full clear-and-redraw: links are cheap and have no per-link identity to diff against.
   useEffect(() => {
@@ -298,6 +393,7 @@ export function MapPage() {
     });
   }, [links, showLinks, zoomTick]);
 
+
   const toggleType = useCallback((type: string) => {
     setHidden((prev) => {
       const next = new Set(prev);
@@ -319,7 +415,7 @@ export function MapPage() {
         title="Map"
         meta={
           <span className="font-mono text-sm text-muted-foreground tabular-nums">
-            {visible.length}/{peers.length} with location
+            {plotted.length}/{peers.length} with location
           </span>
         }
         actions={
@@ -333,7 +429,7 @@ export function MapPage() {
               <RefreshCw className={cn("size-3", loading && "animate-spin")} />
               refresh
             </Button>
-            <ConnectionPill connected={connected} />
+            <ConnectionPill connected={connected} pending={pending} />
           </>
         }
       />
@@ -386,8 +482,19 @@ export function MapPage() {
           >
             links
           </button>
+          {pathView && (
+            <button
+              type="button"
+              onClick={clearPath}
+              className="inline-flex items-center gap-1.5 border border-primary/60 bg-card px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-primary transition-all hover:border-primary"
+            >
+              <Route className="size-3" />
+              path: {pathView.label}
+              <X className="size-3" />
+            </button>
+          )}
           <div className="ml-auto flex items-center gap-3">
-            {visible.length > 0 &&
+            {plotted.length > 0 &&
               (clearing ? (
                 <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
                   deleting…
@@ -398,13 +505,13 @@ export function MapPage() {
                   onAskRemove={() => setConfirmClear(true)}
                   onCancel={() => setConfirmClear(false)}
                   onConfirm={deleteShown}
-                  triggerLabel={`delete ${visible.length} shown`}
+                  triggerLabel={`delete ${plotted.length} shown`}
                 />
               ))}
             <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
               <MapPin className="size-3" />
               <span className="tabular-nums">
-                {visible.length}/{located.length}
+                {plotted.length}/{located.length}
               </span>
               <span className="text-muted-foreground/60">located</span>
             </span>

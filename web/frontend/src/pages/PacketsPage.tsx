@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, CircleDashed, RefreshCw, Search } from "lucide-react";
+import { Link } from "react-router-dom";
+import { ChevronDown, CircleDashed, MapPin, RefreshCw, Search } from "lucide-react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useApiList } from "@/hooks/useApiList";
 import { useResume } from "@/lib/resume";
 import { HopPath, type PathPeer } from "@/components/HopPath";
+import { mapPathHref } from "@/lib/linkPath";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -212,7 +214,7 @@ export function PacketsPage() {
     [setPackets],
   );
 
-  const { connected } = useWebSocket(["packets"], onWsMessage);
+  const { connected, pending } = useWebSocket(["packets"], onWsMessage);
 
   // Pills come from the live buffer, so they stay stable while a search narrows results.
   const liveGroups = useMemo(() => buildGroups(livePackets), [livePackets]);
@@ -294,7 +296,7 @@ export function PacketsPage() {
             >
               <RefreshCw className="size-3" /> reload
             </Button>
-            <ConnectionPill connected={connected} />
+            <ConnectionPill connected={connected} pending={pending} />
           </div>
         }
       />
@@ -707,6 +709,20 @@ function PacketDetail({
                 route={p.route}
                 peers={peers}
               />
+              {p.path && (
+                <Link
+                  to={mapPathHref({
+                    path: p.path,
+                    hashSize: p.pathHashSize,
+                    direction: p.direction,
+                    route: p.route,
+                  })}
+                  className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground hover:text-primary"
+                >
+                  <MapPin className="size-3" />
+                  on map
+                </Link>
+              )}
             </dd>
 
             <dt className="label-overline">Hops</dt>

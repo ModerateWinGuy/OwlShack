@@ -14,6 +14,7 @@ export function usePeerDetailSheet<T extends PeerLike>(peers: T[]) {
     selectPeer: setSelectedKey,
     sheetProps: {
       peer: selected,
+      peers,
       open: !!selectedKey,
       onOpenChange: (open: boolean) => {
         if (!open) setSelectedKey(null);
