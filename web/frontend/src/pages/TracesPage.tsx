@@ -315,7 +315,7 @@ export function TracesPage() {
     [armTimeout],
   );
 
-  const { connected } = useWebSocket(
+  const { connected, pending } = useWebSocket(
     ["traces", "peers", "signaltest"],
     onWsMessage,
   );
@@ -701,7 +701,7 @@ export function TracesPage() {
             {peers.length} repeaters · {companions.length} companions
           </span>
         }
-        actions={<ConnectionPill connected={connected} />}
+        actions={<ConnectionPill connected={connected} pending={pending} />}
       />
 
       {loading && <TracesSkeleton />}

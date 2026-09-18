@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import QRCode from "qrcode";
 import {
   Check,
@@ -17,6 +17,8 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { HopPath, type PathPeer } from "@/components/HopPath";
+import { mapPathHref } from "@/lib/linkPath";
 import {
   Sheet,
   SheetContent,
@@ -117,11 +119,13 @@ async function copy(text: string, label: string) {
 
 export function PeerDetailSheet({
   peer,
+  peers,
   open,
   onOpenChange,
   companions,
 }: {
   peer: PeerLike | null;
+  peers: PathPeer[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   companions: CompanionRef[];
@@ -148,6 +152,7 @@ export function PeerDetailSheet({
           {peer && (
             <PeerDetailBody
               peer={peer}
+              peers={peers}
               companions={companions}
               membershipVersion={membershipVersion}
               onClose={() => onOpenChange(false)}
@@ -183,6 +188,7 @@ export function PeerDetailSheet({
 
 function PeerDetailBody({
   peer,
+  peers,
   companions,
   membershipVersion,
   onClose,
@@ -191,6 +197,7 @@ function PeerDetailBody({
   onShowQr,
 }: {
   peer: PeerLike;
+  peers: PathPeer[];
   companions: CompanionRef[];
   membershipVersion: number;
   onClose: () => void;
@@ -394,16 +401,27 @@ function PeerDetailBody({
                 </span>
               </div>
               {path.hops > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {path.path.map((h, i) => (
-                    <code
-                      key={i}
-                      className="border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-                    >
-                      {h}
-                    </code>
-                  ))}
-                </div>
+                <>
+                  <HopPath
+                    path={peer.outPath}
+                    hashSize={peer.outPathHashSize}
+                    direction="rx"
+                    originName={peer.name}
+                    peers={peers}
+                  />
+                  <Link
+                    to={mapPathHref({
+                      path: peer.outPath ?? "",
+                      hashSize: peer.outPathHashSize,
+                      origin: peer.pubkey,
+                    })}
+                    onClick={onClose}
+                    className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground hover:text-primary"
+                  >
+                    <MapPin className="size-3" />
+                    on map
+                  </Link>
+                </>
               )}
               <div className="flex items-center justify-between">
                 <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">

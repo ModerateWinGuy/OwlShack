@@ -36,6 +36,33 @@ export function resolveHopPeer(
   return { hash, peer: best, alternatives: repeaters.filter((c) => c !== best) };
 }
 
+// Where we sit on a path, and whether we sit on it at all. A flood ACCUMULATES a hash at each
+// relay, so a received one lists where the packet has been and it reached us from the last of
+// them; our own send leads instead. A DIRECT route CONSUMES its hashes (Mesh.cpp:334-342), so a
+// received one carries only the road ahead — a leg running from the relay we overheard to its next
+// hop, with us on neither end. Naming us at the head would claim we are forwarding it on, which is
+// as wrong as the tail claiming the next hop delivered it to us.
+export function pathEnds(direction?: string, route?: string) {
+  const aheadOnly = !!route?.includes("DIRECT") && direction !== "tx";
+  return {
+    weLead: direction === "tx",
+    weTrail: direction !== "tx" && !aheadOnly,
+    aheadOnly,
+  };
+}
+
+// The hops a path carries, each named or left as its hash. Both the chain text and the map read it,
+// so neither can resolve a hop the other would not.
+export function resolveHops(
+  pathHex: string,
+  hashSize: number | undefined,
+  peers: PathPeer[],
+): ResolvedHop[] {
+  const size = Math.max(1, hashSize ?? 1);
+  const byHash = buildPeerCandidatesByHash(peers, size);
+  return hexToHopHashes(pathHex, size).map((h) => resolveHopPeer(h, byHash.get(h)));
+}
+
 export function hexToHopHashes(pathHex: string, hashSize: number): string[] {
   const step = hashSize * 2;
   if (step <= 0) return [];
@@ -120,4 +147,22 @@ export function hopDirectionLabel(
     const from = hop === 1 ? originName : nameFor(hashes[hop - 2]);
     return `${from} → ${to}`;
   };
+}
+
+// A link to plot one path on the map. `origin` is the node the path starts at — an advert has one
+// (its sender), a packet does not. `direction` and `route` carry the same meaning they do in
+// HopPath, so the map places "us" on the end the text does.
+export function mapPathHref(l: {
+  path: string;
+  hashSize?: number;
+  origin?: string;
+  direction?: string;
+  route?: string;
+}): string {
+  const q = new URLSearchParams({ path: l.path });
+  if (l.hashSize) q.set("hs", String(l.hashSize));
+  if (l.origin) q.set("origin", l.origin);
+  if (l.direction) q.set("dir", l.direction);
+  if (l.route) q.set("route", l.route);
+  return `/map?${q}`;
 }

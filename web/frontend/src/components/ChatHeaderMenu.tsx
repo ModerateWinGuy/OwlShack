@@ -2,12 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Ban,
-  Check,
   ClipboardCopy,
   Info,
   MoreVertical,
   Pencil,
-  QrCode,
   Route,
   RotateCw,
   Search,

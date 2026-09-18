@@ -174,7 +174,7 @@ export function MonitoringPage() {
     });
   }, []);
 
-  const { connected } = useWebSocket(["metrics"], onWs);
+  const { connected, pending } = useWebSocket(["metrics"], onWs);
 
   // Stable ordering so cards don't jump around as WS updates arrive.
   const sortedNodes = useMemo(
@@ -196,7 +196,7 @@ export function MonitoringPage() {
             {nodes.length} node{nodes.length === 1 ? "" : "s"}
           </span>
         }
-        trailing={<ConnectionPill connected={connected} />}
+        trailing={<ConnectionPill connected={connected} pending={pending} />}
       />
 
       {loading ? (
