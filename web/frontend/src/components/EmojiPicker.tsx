@@ -8,25 +8,22 @@ import {
 import { ensureEmojiInit } from "@/lib/emoji";
 import { cn } from "@/lib/utils";
 
-// For the mobile inline panel, which the composer toggles instead of anchoring a popover.
+// One trigger for both breakpoints; props spread last so Radix's asChild handlers and ref win.
 export function EmojiButton({
-  onClick,
   active = false,
-}: {
-  onClick?: () => void;
-  active?: boolean;
-}) {
+  ...props
+}: React.ComponentProps<"button"> & { active?: boolean }) {
   return (
     <button
       type="button"
       aria-label="Insert emoji"
-      onClick={onClick}
       className={cn(
-        "relative size-9 shrink-0 grid place-items-center border border-border bg-background hover:bg-muted/60 before:absolute before:-inset-0.5 before:content-[''] sm:before:hidden",
+        "absolute bottom-1 right-1 size-8 grid place-items-center hover:bg-muted/60 before:absolute before:-inset-1.5 before:content-[''] sm:before:hidden",
         active ? "text-primary" : "text-muted-foreground hover:text-foreground",
       )}
+      {...props}
     >
-      <Smile className="size-4" strokeWidth={1.6} />
+      <Smile className="size-5" strokeWidth={1.6} />
     </button>
   );
 }
@@ -37,19 +34,10 @@ export function EmojiPicker({ onSelect }: { onSelect: (emoji: string) => void })
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label="Insert emoji"
-          className={cn(
-            "relative size-9 shrink-0 grid place-items-center border border-border bg-background hover:bg-muted/60 before:absolute before:-inset-0.5 before:content-[''] sm:before:hidden",
-            open ? "text-primary" : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          <Smile className="size-4" strokeWidth={1.6} />
-        </button>
+        <EmojiButton active={open} />
       </PopoverTrigger>
       <PopoverContent
-        align="start"
+        align="end"
         side="top"
         sideOffset={8}
         className="w-auto rounded-none border-border p-0"
