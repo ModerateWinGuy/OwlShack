@@ -64,9 +64,9 @@ export function ComposerAttachMenu({
           <button
             type="button"
             aria-label="Attach"
-            className="relative size-9 shrink-0 grid place-items-center text-muted-foreground hover:text-foreground border border-border bg-background hover:bg-muted/60 before:absolute before:-inset-0.5 before:content-[''] sm:before:hidden"
+            className="relative size-10.5 shrink-0 grid place-items-center text-muted-foreground hover:text-foreground border border-border bg-background hover:bg-muted/60 before:absolute before:-inset-0.5 before:content-[''] sm:before:hidden"
           >
-            <Plus className="size-4" strokeWidth={1.8} />
+            <Plus className="size-6" strokeWidth={1.8} />
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side="top" className="rounded-none min-w-52">
