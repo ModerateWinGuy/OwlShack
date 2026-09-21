@@ -33,8 +33,6 @@ export interface SpiBoard {
   // "hardware" means run on the physical hat; "community" means never tested here.
   verified: string;
   notes?: string;
-  // Why this build refuses the board; such boards are still listed.
-  unsupported?: string;
   hasLeds: boolean;
 }
 
@@ -51,16 +49,15 @@ export interface SerialPort {
 // boardOption labels a hat for the picker, flagging one that cannot be trusted
 // blind: finding out afterwards means the antenna is already up.
 export function boardOption(b: SpiBoard): { value: string; label: string } {
-  let label = b.label;
-  if (b.unsupported) label += " - unsupported";
-  else if (b.verified !== "hardware") label += " - unverified";
-  return { value: b.name, label };
+  return {
+    value: b.name,
+    label: b.verified === "hardware" ? b.label : `${b.label} - unverified`,
+  };
 }
 
 // boardHint describes the selected hat, leading with whatever would stop it working.
 export function boardHint(b: SpiBoard | undefined): string {
   if (!b) return "Pick the board this host has fitted.";
-  if (b.unsupported) return `Cannot be driven by this build: ${b.unsupported}`;
   const parts = [`${b.chip}, up to ${b.maxTxPower} dBm`];
   if (b.hasLeds) parts.push("activity LEDs");
   if (b.verified !== "hardware") {
@@ -70,14 +67,10 @@ export function boardHint(b: SpiBoard | undefined): string {
   return parts.join(". ");
 }
 
-// defaultBoard preselects a usable hat: boards sort by name, so the first entry
-// is alphabetical and may well be one this build refuses.
+// defaultBoard preselects a hat proven here: boards sort by name, so the first
+// entry is only alphabetical.
 export function defaultBoard(boards: SpiBoard[]): SpiBoard | undefined {
-  return (
-    boards.find((b) => !b.unsupported && b.verified === "hardware") ??
-    boards.find((b) => !b.unsupported) ??
-    boards[0]
-  );
+  return boards.find((b) => b.verified === "hardware") ?? boards[0];
 }
 
 export interface MqttSettings {

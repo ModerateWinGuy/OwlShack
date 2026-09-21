@@ -319,15 +319,14 @@ func (b *backend) SPIBoards() []api.SPIBoardInfo {
 	out := make([]api.SPIBoardInfo, 0, len(boards))
 	for _, bd := range boards {
 		out = append(out, api.SPIBoardInfo{
-			Name:        bd.Name,
-			Label:       bd.Label,
-			Chip:        bd.Chip,
-			SPIPort:     bd.SPIPort,
-			MaxTxPower:  int(bd.MaxTxPower),
-			Verified:    bd.Verified,
-			Notes:       bd.Notes,
-			Unsupported: bd.Unsupported,
-			HasLEDs:     bd.HasLEDs(),
+			Name:       bd.Name,
+			Label:      bd.Label,
+			Chip:       bd.Chip,
+			SPIPort:    bd.SPIPort,
+			MaxTxPower: int(bd.MaxTxPower),
+			Verified:   bd.Verified,
+			Notes:      bd.Notes,
+			HasLEDs:    bd.HasLEDs(),
 		})
 	}
 	return out

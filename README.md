@@ -28,8 +28,9 @@ telemetry, all persisted to SQLite. Built on the pure Go
   for room servers and sensor nodes.
 - **Watches the radio.** Modem fault counters, TX outcomes, RX losses, and a
   zero-hop discovery scan that answers "what can this radio actually hear?".
-- **Talks to two radio families.** MeshCore firmware over serial or TCP (KISS),
-  or a bare SX1262 driven straight off a Pi's SPI bus, no firmware node needed.
+- **Talks to three radio families.** MeshCore firmware over serial or TCP
+  (KISS), an openHop Modem over USB or the network, or a bare SX1262 driven
+  straight off a Pi's SPI bus, no firmware node needed.
 - **Bridges to MQTT.** Feeds aggregators like LetsMesh and CoreScope.
 
 The web UI is the configuration surface and the database is the source of
@@ -54,7 +55,7 @@ Installable as a PWA, with a mobile layout and a light theme.
 |---------|--------------|
 | Overview | Peer counts, type spectrum, recently seen, companion roster |
 | Peers | Searchable, sortable table with type pills, signal bars, last-seen |
-| Map | Leaflet map of geolocated peers, filterable, with link lines |
+| Map | Leaflet map of geolocated peers, filterable, with link lines and any advert or packet path drawn hop by hop |
 | Packets | Live packet stream with a detail panel (route, hops, signal, raw hex) |
 | Trace | Interactive path builder and result timeline |
 | Monitoring | Polled nodes with status and telemetry history charts |
@@ -76,9 +77,9 @@ is enough to run a companion, a repeater and the console at once.
 
 ### Radio interfaces
 
-Set on the Settings page: `serial://` or `tcp://` for a MeshCore firmware node
-(KISS), `openhop://` for an openHop Modem over USB or the network, `spi://`
-plus a board to drive a bare radio yourself.
+Set on the Settings page. Pick a **Radio backend** — KISS modem, openHop Modem
+or SPI radio hat — and the rest of the form follows: a transport and a device
+for the first two, the hat and its SPI port for the third.
 
 > [!CAUTION]
 > **Which one you need.** SPI means this process is the radio driver: it
@@ -90,26 +91,27 @@ plus a board to drive a bare radio yourself.
 
 | Interface | Status |
 |---|---|
-| Native SX126x on the host SPI bus | Supported |
+| Native SX126x on a Raspberry Pi's SPI bus | Supported |
 | MeshCore firmware over USB serial (KISS) | Supported |
 | MeshCore firmware over TCP (KISS) | Supported |
 | openHop Modem over the network | Supported |
-| openHop Modem over USB serial | Untested — no hardware here |
+| openHop Modem over USB serial | Supported |
 | SX127x on SPI | Not supported |
 | SX1302 / SX1303 concentrator boards | Not supported |
 | USB-to-SPI bridges (CH341 and similar) | Not supported |
-| Boards needing a non-default `gpiochip` | Not supported |
 
 ### SPI boards
 
 Pin maps live in [`internal/modem/boards.json`](./internal/modem/boards.json)
-and are chosen by board, never by pin. Every entry is an SX1262. Twelve of the
-21 can be driven by the current build:
+and are chosen by board, never by pin. Every entry is an SX1262 on a
+Raspberry Pi header, and every one of them can be driven:
 
 | Board | Max TX | Bus | Status |
 |---|---|---|---|
 | Zindello UltraPeaterZero (E22, 1 W) | 22 dBm | SPI0.0 | **Verified on hardware** |
 | Zindello UltraPeaterZero (E22P, 1 W) | 22 dBm | SPI0.0 | **Verified on hardware** |
+| RAK6421 + RAK1330x, IO slot 1 | 22 dBm | SPI0.0 | **Verified on hardware** |
+| RAK6421 + RAK1330x, IO slot 2 | 22 dBm | SPI0.1 | **Verified on hardware** |
 | MeshAdv | 22 dBm | SPI0.0 | Preset available, untested |
 | Waveshare LoRa HAT | 22 dBm | SPI0.0 | Preset available, untested |
 | uConsole LoRa Module aio v2 | 22 dBm | SPI1.0 | Preset available, untested |
@@ -119,6 +121,7 @@ and are chosen by board, never by pin. Every entry is an SX1262. Twelve of the
 | ZebraHat-1W | 18 dBm | SPI0.0 | Preset available, untested |
 | ZebraHatDuo-R0-1W | 18 dBm | SPI0.0 | Preset available, untested |
 | ZebraHatDuo-R1-1W | 18 dBm | SPI0.1 | Preset available, untested |
+| BQ Voyage Station G3 | 19 dBm | SPI0.0 | Preset available, untested |
 | NebraHat-2W | 8 dBm | SPI0.0 | Preset available, untested |
 
 Max TX is the level the LoRa core is driven at, **not** what leaves the
@@ -131,18 +134,12 @@ receives, or transmits into a dead antenna path, and both look exactly like a
 quiet mesh, so watch the Radio page's counters before you trust a first
 contact.
 
-These nine are listed but **cannot be selected**, and the UI says why:
+**SPI is Raspberry Pi only.** These are BCM header pins, so a hat for another
+single-board computer will not work even when its radio is an SX1262 — the
+LuckFox Pico boards, for one.
 
-| Board | Why not |
-|---|---|
-| Zindello UltraPeater (E22) | Needs a non-default `gpiochip` |
-| Zindello UltraPeater (E22P, 30 dBm) | Needs a non-default `gpiochip` |
-| FemtoFox SX1262 (1W) | Needs a non-default `gpiochip` |
-| FemtoFox SX1262 (2W) | Needs a non-default `gpiochip` |
-| RAK6421 with RAK1330x, slots 1 and 2 | Needs a non-default `gpiochip` |
-| BQ Voyage Station G3 | Needs a non-default `gpiochip` |
-| MeshAdv Mini | No confirmed RF-switch control |
-| uConsole LoRa Module aio v1 | No confirmed RF-switch control |
+Hat not listed? Open a PR with its pin map, or lend or donate the board and it
+gets added and tested here.
 
 ### KISS radios
 

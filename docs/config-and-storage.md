@@ -204,22 +204,26 @@ radio/connection change still restarts everything (modem reconnect);
 
 ## SPI board registry (`internal/modem/boards.json`)
 
-One entry per radio hat, keyed by the name stored in `settings.spi_board`. Two
-of its fields drive the warnings in the picker, and only one of them is in the
-file:
+One entry per radio hat, keyed by the name stored in `settings.spi_board`.
+**Every entry is drivable** — a pin map nobody can complete or test does not go
+in the file, because a listed board reads as a supported one. 15 boards today,
+all SX1262 on a Raspberry Pi header.
 
-- **`verified`** is declared per board and required: `"hardware"` (run here on
-  the physical hat) or `"community"` (wiring transcribed from a vendor or
-  community list, never tested). The UI labels anything but `"hardware"` as
-  **unverified**. 2 of 21 are `"hardware"`.
-- **`unsupported`** is **not in the JSON at all** — `boardFile.board` derives it
-  ([boards.go](../internal/modem/boards.go)) and the UI labels those boards
-  **unsupported**. Two rules set it today: no RF-switch control (neither
-  `use_dio2_rf` nor `txen_pin`), and `gpio_chip` other than 0, which periph
-  cannot select because it resolves pins by name. 9 of 21 land here.
+**`verified`** is declared per board and required: `"hardware"` (run here on
+the physical hat) or `"community"` (wiring transcribed from a vendor or
+community list, never tested). The UI labels anything but `"hardware"` as
+**unverified**, and `modem_sx12xx.go` logs a warning at startup. 4 of 15 are
+`"hardware"`.
 
-An unsupported board stays listed rather than being hidden, because "my hat is
-missing" is a worse bug report than "my hat says why it will not work".
+Two invariants back that up, and neither is a runtime rule:
+
+- `TestBoardRegistryIsComplete` fails on an entry with no RF-switch control
+  (neither `use_dio2_rf` nor `txen_pin`), which would transmit into a
+  terminated switch and read as a quiet mesh.
+- `gpio_chip` is a hard load error: periph resolves pins by name on the default
+  chip, so a banked pin map would drive whatever header line happens to share
+  the number. It is how a hat for a LuckFox Pico or another non-Pi board fails,
+  loudly, instead of silently driving Pi pins.
 
 ## Backup & restore
 
