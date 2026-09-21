@@ -28,17 +28,17 @@ type Settings struct {
 	Connection     *string
 	BaudRate       *int
 	// SPIBoard names the radio hat when Connection is spi://; nil for KISS.
-	SPIBoard     *string
-	Freq         *float64
-	BW           *float64
-	SF           *int
-	CR           *int
-	TX           *int
-	ListenAddr   *string
-	MapTileKey   *string // CARTO basemap API key; nil/"" = keyless tiles
+	SPIBoard   *string
+	Freq       *float64
+	BW         *float64
+	SF         *int
+	CR         *int
+	TX         *int
+	ListenAddr *string
+	MapTileKey *string // CARTO basemap API key; nil/"" = keyless tiles
 	// ModemToken is the openHop modem's access token; a password, never returned by a config read.
-	ModemToken *string
-	PathHashSize *int    // default flood path hash width in bytes; nil = 1
+	ModemToken   *string
+	PathHashSize *int // default flood path hash width in bytes; nil = 1
 	// DutyCyclePct caps TX airtime per hour as a percentage; nil = library default (50%).
 	DutyCyclePct  *float64
 	SetupComplete bool

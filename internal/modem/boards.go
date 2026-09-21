@@ -32,8 +32,6 @@ type Board struct {
 	// Verified is "hardware" (run on the physical hat here) or "community".
 	Verified string
 	Notes    string
-	// Unsupported is why this build refuses the board, which stays listed anyway.
-	Unsupported string
 
 	opts sx12xx.Opts
 }
@@ -69,7 +67,7 @@ type boardFile struct {
 	UseDIO3TCXO     *bool    `json:"use_dio3_tcxo"`
 	DIO3TCXOVoltage *float64 `json:"dio3_tcxo_voltage"`
 	RxBoostedGain   bool     `json:"rx_boosted_gain"`
-	// GPIOChip selects a non-default gpiochip, which periph cannot express.
+	// GPIOChip is rejected outright: periph resolves pins by name on the default chip.
 	GPIOChip *int `json:"gpio_chip"`
 
 	Verified string `json:"verified"`
@@ -149,6 +147,9 @@ func (bf boardFile) board(name string) (Board, error) {
 	if !ok {
 		return Board{}, fmt.Errorf("busy_pin is required")
 	}
+	if bf.GPIOChip != nil && *bf.GPIOChip != 0 {
+		return Board{}, fmt.Errorf("gpio_chip %d: pins are resolved by name on the default chip, so this pin map cannot be driven", *bf.GPIOChip)
+	}
 	tcxo, delay, err := tcxoSetting(bf)
 	if err != nil {
 		return Board{}, err
@@ -194,13 +195,6 @@ func (bf boardFile) board(name string) (Board, error) {
 			BusyTimeout:       100 * time.Millisecond,
 			RxBoostedGain:     bf.RxBoostedGain,
 		},
-	}
-	// DIO2 and a TX-enable pin are the two RF-switch mechanisms; an integrated switch needs neither, and boards.json cannot say so.
-	if !b.opts.UseDIO2AsRfSwitch && b.opts.TxEnPin == "" {
-		b.Unsupported = "no RF switch control configured: set use_dio2_rf or txen_pin once confirmed against the board's schematic"
-	}
-	if bf.GPIOChip != nil && *bf.GPIOChip != 0 {
-		b.Unsupported = fmt.Sprintf("needs gpiochip %d; periph resolves pins by name and has no chip selector", *bf.GPIOChip)
 	}
 	if b.Label == "" {
 		b.Label = name

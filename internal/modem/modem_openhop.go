@@ -77,4 +77,3 @@ func setupOpenhop(ctx context.Context, ms *State, cfg *config.Config, connAddr s
 	ms.Modem = m
 	return nil
 }
-

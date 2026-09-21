@@ -5,6 +5,45 @@ top until tagged.
 
 ## Unreleased
 
+## v1.4.2 - 2026-09-21
+
+Baseline `v1.4.1`, schema `user_version` 16, unchanged.
+
+### Added
+
+- **The RAK6421 WisBlock Pi HAT with a RAK13300 now works, in either IO slot.** Both are in the
+  board list and both have been run on the hardware here: they receive from a live mesh, and a
+  transmit from each was picked up and re-flooded by two neighbouring repeaters. Pick your slot in
+  Settings and the SPI port is filled in for you, since slot 1 and slot 2 sit on different
+  chip-selects. If the stored connection names a different one, the log now says so by name rather
+  than leaving you to read "wrong wiring" and go looking at the hat.
+
+### Changed
+
+- **Every board in the list can actually be driven.** Boards that were listed but refused at
+  startup are gone, and the BQ Voyage Station G3 has been fixed and now works. That is 15 boards,
+  4 of them verified on hardware here. A preset that nobody can complete or test is worse than no
+  preset, because a listed board reads as a supported one.
+
+### Fixed
+
+- **The chat composer on a phone.** The buttons and the text box were three different heights.
+  They now match, the icons are larger, the send button is the icon alone, and the emoji button
+  has moved inside the text box - about 20% more room to type. The character count no longer sits
+  under the box taking up a line; it appears next to send once your message reaches three lines,
+  or when you are close to the limit.
+- **Reply and More could be tapped while invisible.** Tapping a message near those buttons opened
+  the menu with nothing on screen to explain it.
+- **The More menu was cut off at the bottom of the screen.** On a message low down, the last item
+  sat behind the navigation bar. It now opens upward when there is no room below.
+- **The threads page scrolled by a pixel.** Enough for a stray scrollbar over the whole page.
+
+### Upgrading
+
+Nothing to do. If your radio hat was one of the entries that has been removed, Settings will no
+longer show it selected - those boards were refused at startup before, so nothing that was working
+has stopped.
+
 ## v1.4.1 — 2026-09-18
 
 Frontend only, the same day v1.4.0 shipped. The fix worth taking: if you run two companions
