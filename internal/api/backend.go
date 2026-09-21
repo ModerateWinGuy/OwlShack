@@ -129,9 +129,7 @@ type SPIBoardInfo struct {
 	// Verified is "hardware" or "community"; shown in the picker before an antenna goes up.
 	Verified string `json:"verified"`
 	Notes    string `json:"notes,omitempty"`
-	// Unsupported is why this build refuses the board, empty when it can drive it.
-	Unsupported string `json:"unsupported,omitempty"`
-	HasLEDs     bool   `json:"hasLeds"`
+	HasLEDs  bool   `json:"hasLeds"`
 }
 
 // DiscoveryInfo is one node that answered a zero-hop discovery.
@@ -276,17 +274,17 @@ type SettingsInput struct {
 	Connection     *string `json:"connection"`
 	BaudRate       *int    `json:"baudRate"`
 	// SPIBoard names the hat for an spi:// connection; omitted keeps the stored value.
-	SPIBoard     *string  `json:"spiBoard"`
-	Freq         *float64 `json:"freq"`
-	BW           *float64 `json:"bw"`
-	SF           *int     `json:"sf"`
-	CR           *int     `json:"cr"`
-	TX           *int     `json:"tx"`
-	ListenAddr   *string  `json:"listenAddr"`
-	MapTileKey   *string  `json:"mapTileKey"` // omit = keep, "" = clear
+	SPIBoard   *string  `json:"spiBoard"`
+	Freq       *float64 `json:"freq"`
+	BW         *float64 `json:"bw"`
+	SF         *int     `json:"sf"`
+	CR         *int     `json:"cr"`
+	TX         *int     `json:"tx"`
+	ListenAddr *string  `json:"listenAddr"`
+	MapTileKey *string  `json:"mapTileKey"` // omit = keep, "" = clear
 	// ModemToken is the openHop modem's access token: omit = keep the stored one, "" = clear it.
-	ModemToken *string `json:"modemToken"`
-	PathHashSize *int     `json:"pathHashSize"`
+	ModemToken   *string `json:"modemToken"`
+	PathHashSize *int    `json:"pathHashSize"`
 	// DutyCycle is a TX airtime cap percentage (0 < pct <= 100); null means the default, not "keep".
 	DutyCycle     *float64 `json:"dutyCycle"`
 	SetupComplete *bool    `json:"setupComplete"`
