@@ -2687,6 +2687,18 @@ function UrlLink({ url }: { url: string }) {
   );
 }
 
+// --bottom-nav is a calc() over env(), which getPropertyValue hands back unevaluated, so let the
+// browser resolve it. 0px once the sidebar takes over, which is what the media query already says.
+function bottomNavHeight(): number {
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:absolute;visibility:hidden;height:var(--bottom-nav)";
+  document.body.appendChild(probe);
+  const px = probe.getBoundingClientRect().height;
+  probe.remove();
+  return px;
+}
+
 function ContextMenu({
   msg,
   pos,
@@ -2711,15 +2723,31 @@ function ContextMenu({
   const isRx = msg.direction === "rx";
   const showEchoes =
     !isRx && msg.repeatCount != null && msg.repeatCount > 0;
+  const ref = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState({ top: pos.y, left: pos.x });
+  // The menu is 3-6 items depending on the message, so its size is measured rather than assumed,
+  // and the bottom nav overlays the viewport — clamping to innerHeight alone hides the last item.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const gutter = 8;
+    const floor = window.innerHeight - bottomNavHeight() - gutter;
+    setPlace({
+      top:
+        pos.y + height > floor
+          ? Math.max(gutter, pos.y - height)
+          : pos.y,
+      left: Math.max(gutter, Math.min(pos.x, window.innerWidth - width - gutter)),
+    });
+  }, [pos]);
   return (
     <div
+      ref={ref}
       role="menu"
       data-context-menu
       className="fixed z-60 min-w-40 bg-popover border border-border rounded-sm shadow-md py-1 text-sm"
-      style={{
-        top: Math.min(pos.y, window.innerHeight - 240),
-        left: Math.min(pos.x, window.innerWidth - 200),
-      }}
+      style={place}
       onClick={(e) => e.stopPropagation()}
     >
       <CtxItem icon={<Copy className="size-3.5" />} onClick={onCopy}>
