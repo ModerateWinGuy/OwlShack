@@ -653,7 +653,7 @@ func migrateV10(ctx context.Context, db dbExecer) error {
 
 // migrateV16 adds hop_pins: which peer the operator says owns a path hash; pubkey NULL = none of the known ones.
 func migrateV16(ctx context.Context, db dbExecer) error {
-	_, err := db.ExecContext(ctx, `CREATE TABLE hop_pins (
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hop_pins (
 		hash   TEXT PRIMARY KEY,
 		pubkey BLOB
 	)`)
