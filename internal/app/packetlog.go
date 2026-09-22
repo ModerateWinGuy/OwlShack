@@ -92,6 +92,40 @@ func wirePacketLogger(mux *node.RadioMux, modem node.Modem, db *store.Store, srv
 	})
 }
 
+// packetPruneLoop drops packets older than the retention setting at startup and then hourly; the
+// setting is read each pass, so a Settings save needs no reload to take effect.
+func packetPruneLoop(ctx context.Context, db *store.Store) {
+	tick := time.NewTicker(time.Hour)
+	defer tick.Stop()
+	for {
+		prunePackets(ctx, db)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// prunePackets deletes in batches, each its own writer turn, so a long backlog never holds the
+// writer long enough to fill its queue and drop RX packet writes.
+func prunePackets(ctx context.Context, db *store.Store) {
+	days := store.DefaultPacketRetentionDays
+	if s, err := db.Settings.Get(ctx); err == nil && s.PacketRetentionDays != nil {
+		days = *s.PacketRetentionDays
+	}
+	cutoff := time.Now().AddDate(0, 0, -days)
+	for more := true; more && ctx.Err() == nil; {
+		more = false
+		db.WriteSync(func() {
+			var err error
+			if more, err = db.Packets.PruneBatchBefore(ctx, cutoff, 500); err != nil {
+				slog.Warn("packet prune failed", "error", err)
+			}
+		})
+	}
+}
+
 // packetTypes returns (nil, nil) when parsing failed.
 func packetTypes(pkt *meshcore.Packet, parseErr error) (routeType, payloadType *uint8) {
 	if parseErr != nil {

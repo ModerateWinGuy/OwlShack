@@ -253,3 +253,43 @@ func (r *PeerRepo) LookupByHash(ctx context.Context, hash []byte) ([]string, err
 	}
 	return names, nil
 }
+
+// HopPinRepo holds the operator's answer to which peer owns a path hash (lowercase hex, 1-3 bytes),
+// overriding the automatic pick; a nil pubkey means none of the known peers does.
+type HopPinRepo struct{ db *sql.DB }
+
+// List maps every pinned hash to its pubkey; a present key with a nil value is a "none" pin.
+func (r *HopPinRepo) List(ctx context.Context) (map[string][]byte, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT hash, pubkey FROM hop_pins")
+	if err != nil {
+		return nil, fmt.Errorf("querying hop pins: %w", err)
+	}
+	defer rows.Close()
+	pins := map[string][]byte{}
+	for rows.Next() {
+		var hash string
+		var pubkey []byte
+		if err := rows.Scan(&hash, &pubkey); err != nil {
+			return nil, fmt.Errorf("scanning hop pin: %w", err)
+		}
+		pins[hash] = pubkey
+	}
+	return pins, rows.Err()
+}
+
+func (r *HopPinRepo) Set(ctx context.Context, hash string, pubkey []byte) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO hop_pins (hash, pubkey) VALUES (?, ?)
+		ON CONFLICT(hash) DO UPDATE SET pubkey = excluded.pubkey`, hash, pubkey)
+	if err != nil {
+		return fmt.Errorf("pinning hop %s: %w", hash, err)
+	}
+	return nil
+}
+
+func (r *HopPinRepo) Delete(ctx context.Context, hash string) error {
+	if _, err := r.db.ExecContext(ctx, "DELETE FROM hop_pins WHERE hash = ?", hash); err != nil {
+		return fmt.Errorf("unpinning hop %s: %w", hash, err)
+	}
+	return nil
+}

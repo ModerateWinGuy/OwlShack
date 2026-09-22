@@ -18,6 +18,7 @@ import {
   Sun,
   Users,
   Waves,
+  Waypoints,
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -74,6 +75,12 @@ const PRIMARY: NavItem[] = [
   },
   { to: "/peers", label: "Peers", icon: Users, match: (p) => p === "/peers" },
   { to: "/map", label: "Map", icon: MapPinned, match: (p) => p === "/map" },
+  {
+    to: "/connection-web",
+    label: "Connection Web",
+    icon: Waypoints,
+    match: (p) => p === "/connection-web",
+  },
 ];
 
 const TELEMETRY: NavItem[] = [

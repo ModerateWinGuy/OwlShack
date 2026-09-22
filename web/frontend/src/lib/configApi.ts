@@ -18,6 +18,8 @@ export interface Settings {
   pathHashSize: number | null;
   // TX airtime cap as a percentage, the unit the firmware uses. null = 50%.
   dutyCycle: number | null;
+  // Days of packets the log keeps. null = 7.
+  packetRetentionDays: number | null;
   setupComplete: boolean;
 }
 
@@ -235,6 +237,7 @@ export interface SettingsInput {
   mapTileKey?: string | null; // omit = keep, "" = clear
   pathHashSize?: number | null;
   dutyCycle?: number | null;
+  packetRetentionDays?: number | null; // omit = keep
   // Only set by the first-run wizard; omit elsewhere so a radio edit never re-opens setup.
   setupComplete?: boolean;
 }

@@ -15,21 +15,22 @@ func TestSettings_RoundTripsEveryColumn(t *testing.T) {
 	ctx := t.Context()
 
 	want := &Settings{
-		LogLevel:       strPtr("debug"),
-		ConnectionType: "spi",
-		Connection:     strPtr("spi://SPI0.0"),
-		BaudRate:       intPtr2(57600),
-		SPIBoard:       strPtr("ultrapeaterzero-e22p"),
-		Freq:           fltPtr(917.375),
-		BW:             fltPtr(62.5),
-		SF:             intPtr2(7),
-		CR:             intPtr2(5),
-		TX:             intPtr2(22),
-		ListenAddr:     strPtr(":8081"),
-		MapTileKey:     strPtr("tile-key"),
-		PathHashSize:   intPtr2(2),
-		DutyCyclePct:   fltPtr(12.5),
-		SetupComplete:  true,
+		LogLevel:            strPtr("debug"),
+		ConnectionType:      "spi",
+		Connection:          strPtr("spi://SPI0.0"),
+		BaudRate:            intPtr2(57600),
+		SPIBoard:            strPtr("ultrapeaterzero-e22p"),
+		Freq:                fltPtr(917.375),
+		BW:                  fltPtr(62.5),
+		SF:                  intPtr2(7),
+		CR:                  intPtr2(5),
+		TX:                  intPtr2(22),
+		ListenAddr:          strPtr(":8081"),
+		MapTileKey:          strPtr("tile-key"),
+		PathHashSize:        intPtr2(2),
+		DutyCyclePct:        fltPtr(12.5),
+		PacketRetentionDays: intPtr2(14),
+		SetupComplete:       true,
 	}
 	if err := st.Settings.Set(ctx, want); err != nil {
 		t.Fatalf("Set: %v", err)
@@ -66,6 +67,7 @@ func TestSettings_RoundTripsEveryColumn(t *testing.T) {
 		{"cr", want.CR, got.CR},
 		{"tx", want.TX, got.TX},
 		{"pathHashSize", want.PathHashSize, got.PathHashSize},
+		{"packetRetentionDays", want.PacketRetentionDays, got.PacketRetentionDays},
 	} {
 		if c.a == nil || c.b == nil || *c.a != *c.b {
 			t.Errorf("%s: got %v, want %v", c.field, c.b, c.a)

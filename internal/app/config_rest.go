@@ -93,7 +93,9 @@ func (b *backend) SaveSettings(ctx context.Context, in api.SettingsInput) error 
 				MapTileKey:     or(in.MapTileKey, prevKey),
 				PathHashSize:   in.PathHashSize,
 				DutyCyclePct:   in.DutyCycle,
-				SetupComplete:  setup,
+				// Omitted keeps the stored value, so the setup wizard's settings save never resets it.
+				PacketRetentionDays: or(in.PacketRetentionDays, rows.settings.PacketRetentionDays),
+				SetupComplete:       setup,
 			}
 			rows.settings = &row
 		},

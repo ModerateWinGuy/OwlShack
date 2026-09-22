@@ -18,6 +18,7 @@ const writerQueueDepth = 1024
 type Store struct {
 	db             *sql.DB
 	Peers          *PeerRepo
+	HopPins        *HopPinRepo
 	Contacts       *ContactRepo
 	Packets        *PacketRepo
 	Messages       *MessageRepo
@@ -62,8 +63,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	s := &Store{
 		db:             db,
 		Peers:          &PeerRepo{db: db},
+		HopPins:        &HopPinRepo{db: db},
 		Contacts:       &ContactRepo{db: db},
-		Packets:        &PacketRepo{db: db, maxRows: DefaultMaxPackets},
+		Packets:        &PacketRepo{db: db},
 		Messages:       &MessageRepo{db: db, maxRows: DefaultMaxMessages},
 		Conversations:  &ConversationRepo{db: db},
 		Echoes:         &EchoRepo{db: db},
@@ -218,6 +220,8 @@ var migrations = []func(context.Context, dbExecer) error{
 	migrateV10,  // 12 — companions.dm_policy + dm_allow (who may DM this companion)
 	migrateV11,  // 13 — triggers.url (the feed an rss/cap trigger polls)
 	migrateV12,  // 14 — clamp triggers.path_hash_size to the 3-byte maximum the rest of the app uses
+	migrateV13,  // 15 — settings.packet_retention_days (packet log kept by age, not row count)
+	migrateV14,  // 16 — hop_pins (operator's choice of owner for an ambiguous path hash)
 }
 
 // dbExecer is the subset of *sql.DB / *sql.Tx a migration needs.
@@ -643,6 +647,21 @@ func migrateV10(ctx context.Context, db dbExecer) error {
 		}
 	}
 	return nil
+}
+
+// migrateV14 adds hop_pins: which peer the operator says owns a path hash; pubkey NULL = none of the known ones.
+func migrateV14(ctx context.Context, db dbExecer) error {
+	_, err := db.ExecContext(ctx, `CREATE TABLE hop_pins (
+		hash   TEXT PRIMARY KEY,
+		pubkey BLOB
+	)`)
+	return err
+}
+
+// migrateV13 adds settings.packet_retention_days; NULL = DefaultPacketRetentionDays.
+func migrateV13(ctx context.Context, db dbExecer) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE settings ADD COLUMN packet_retention_days INTEGER`)
+	return err
 }
 
 // migrateV12 clamps trigger path hash sizes to the 3-byte maximum every other config already used.

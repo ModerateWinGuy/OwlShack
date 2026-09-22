@@ -26,8 +26,9 @@ type settingsDTO struct {
 	MapTileKey     *string  `json:"mapTileKey"` // sent to the browser by design: it rides on tile URLs
 	PathHashSize   *int     `json:"pathHashSize"`
 	// DutyCycle is a percentage, the unit the firmware's `set dutycycle` takes; null is the default (50%).
-	DutyCycle     *float64 `json:"dutyCycle"`
-	SetupComplete bool     `json:"setupComplete"`
+	DutyCycle           *float64 `json:"dutyCycle"`
+	PacketRetentionDays *int     `json:"packetRetentionDays"` // null = 7
+	SetupComplete       bool     `json:"setupComplete"`
 }
 
 type mqttDTO struct {
@@ -141,7 +142,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		BaudRate: st.BaudRate, SPIBoard: st.SPIBoard,
 		Freq: st.Freq, BW: st.BW, SF: st.SF, CR: st.CR, TX: st.TX,
 		ListenAddr: st.ListenAddr, MapTileKey: st.MapTileKey, PathHashSize: st.PathHashSize,
-		DutyCycle: st.DutyCyclePct, SetupComplete: st.SetupComplete,
+		DutyCycle: st.DutyCyclePct, PacketRetentionDays: st.PacketRetentionDays, SetupComplete: st.SetupComplete,
 	})
 }
 
