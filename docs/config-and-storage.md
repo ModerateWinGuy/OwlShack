@@ -12,9 +12,11 @@ they need (`hooks/useApiObject` for single-row settings/mqtt, `hooks/useApiList`
 for the lists) and write through `lib/configApi.ts`. There is **no
 whole-document fetch or PUT** — the old `GET/PUT /api/config` (and
 `hooks/useConfig.ts`) were removed because the GET shipped every secret to the
-browser. Read DTOs are **secret-redacted** (`privateKeySet` / `passwordSet`
-booleans); a write **omits** a secret field to keep the stored value, sends it
-to set, sends `""` to clear.
+browser. Read DTOs are **secret-redacted** (`privateKeySet` / `passwordSet` /
+`modemTokenSet` booleans); a write **omits** a secret field to keep the stored
+value, sends it to set, sends `""` to clear. The openHop modem token is one of
+these: it lives in `settings.modem_token`, never inside the connection string,
+because `GET /api/config/settings` returns that string in full.
 
 Server-side, every write goes through `backend.configMutate`
 (`internal/app/config_rest.go`): inside one `WriteSync` it loads the current
@@ -202,22 +204,26 @@ radio/connection change still restarts everything (modem reconnect);
 
 ## SPI board registry (`internal/modem/boards.json`)
 
-One entry per radio hat, keyed by the name stored in `settings.spi_board`. Two
-of its fields drive the warnings in the picker, and only one of them is in the
-file:
+One entry per radio hat, keyed by the name stored in `settings.spi_board`.
+**Every entry is drivable** — a pin map nobody can complete or test does not go
+in the file, because a listed board reads as a supported one. 15 boards today,
+all SX1262 on a Raspberry Pi header.
 
-- **`verified`** is declared per board and required: `"hardware"` (run here on
-  the physical hat) or `"community"` (wiring transcribed from a vendor or
-  community list, never tested). The UI labels anything but `"hardware"` as
-  **unverified**. 2 of 21 are `"hardware"`.
-- **`unsupported`** is **not in the JSON at all** — `boardFile.board` derives it
-  ([boards.go](../internal/modem/boards.go)) and the UI labels those boards
-  **unsupported**. Two rules set it today: no RF-switch control (neither
-  `use_dio2_rf` nor `txen_pin`), and `gpio_chip` other than 0, which periph
-  cannot select because it resolves pins by name. 9 of 21 land here.
+**`verified`** is declared per board and required: `"hardware"` (run here on
+the physical hat) or `"community"` (wiring transcribed from a vendor or
+community list, never tested). The UI labels anything but `"hardware"` as
+**unverified**, and `modem_sx12xx.go` logs a warning at startup. 4 of 15 are
+`"hardware"`.
 
-An unsupported board stays listed rather than being hidden, because "my hat is
-missing" is a worse bug report than "my hat says why it will not work".
+Two invariants back that up, and neither is a runtime rule:
+
+- `TestBoardRegistryIsComplete` fails on an entry with no RF-switch control
+  (neither `use_dio2_rf` nor `txen_pin`), which would transmit into a
+  terminated switch and read as a quiet mesh.
+- `gpio_chip` is a hard load error: periph resolves pins by name on the default
+  chip, so a banked pin map would drive whatever header line happens to share
+  the number. It is how a hat for a LuckFox Pico or another non-Pi board fails,
+  loudly, instead of silently driving Pi pins.
 
 ## Backup & restore
 
@@ -387,7 +393,7 @@ GET|DELETE /api/companions/{name}/rooms/{pubkey}/session
 # assembled config before persisting (by surrogate id) and reload. There is NO
 # whole-document /api/config endpoint — it was removed (it leaked secrets);
 # unmatched /api/* paths 404.
-GET  /api/config/settings                                    (radio/connection/log + setupComplete)
+GET  /api/config/settings                                    (radio/connection/log + setupComplete; modemTokenSet, never the token)
 PUT  /api/config/settings
 GET  /api/config/mqtt                                        (feed settings; node by companion id)
 PUT  /api/config/mqtt

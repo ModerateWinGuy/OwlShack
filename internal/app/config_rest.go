@@ -67,9 +67,12 @@ func (b *backend) SaveSettings(ctx context.Context, in api.SettingsInput) error 
 	var row store.Settings
 	return b.configMutate(ctx,
 		func(rows *configRows) {
+			// Derived, never taken from the caller: the connection string is what Setup switches
+			// on, so a stored backend that disagreed with it would be a lie the UI reads back.
 			ct := "kiss"
-			if in.ConnectionType != nil && *in.ConnectionType != "" {
-				ct = *in.ConnectionType
+			conn := or(in.Connection, def.Connection)
+			if scheme, _, ok := config.ParseConnection(strDeref(conn)); ok && scheme != "serial" && scheme != "tcp" {
+				ct = scheme
 			}
 			// SetupComplete changes only when explicitly provided, so a radio edit never re-opens the wizard.
 			setup := rows.settings.SetupComplete
@@ -77,11 +80,12 @@ func (b *backend) SaveSettings(ctx context.Context, in api.SettingsInput) error 
 				setup = *in.SetupComplete
 			}
 			prevKey := rows.settings.MapTileKey
+			prevToken := rows.settings.ModemToken
 			prevBoard := rows.settings.SPIBoard
 			row = store.Settings{
 				LogLevel:       in.LogLevel,
 				ConnectionType: ct,
-				Connection:     or(in.Connection, def.Connection),
+				Connection:     conn,
 				BaudRate:       or(in.BaudRate, def.BaudRate),
 				SPIBoard:       or(in.SPIBoard, prevBoard),
 				Freq:           or(in.Freq, def.Freq),
@@ -91,6 +95,7 @@ func (b *backend) SaveSettings(ctx context.Context, in api.SettingsInput) error 
 				TX:             or(in.TX, u8ToIntPtr(def.TX)),
 				ListenAddr:     in.ListenAddr,
 				MapTileKey:     or(in.MapTileKey, prevKey),
+				ModemToken:     or(in.ModemToken, prevToken),
 				PathHashSize:   in.PathHashSize,
 				DutyCyclePct:   in.DutyCycle,
 				// Omitted keeps the stored value, so the setup wizard's settings save never resets it.
@@ -297,6 +302,7 @@ func (b *backend) SaveTrigger(ctx context.Context, in api.TriggerInput) (int64, 
 		CharLimitBehaviour: in.CharLimitBehaviour, MatchPatterns: in.Match, Contacts: in.Contacts,
 		RetryTimeout: in.RetryTimeout, MaxRetries: in.MaxRetries, PathHashSize: in.PathHashSize,
 		Schedule: in.Schedule, URL: in.URL, ChannelIDs: in.ChannelIDs,
+		FailoverPattern: in.FailoverPattern, FailoverTimeout: in.FailoverTimeout,
 	}
 	err := b.configMutate(ctx,
 		func(rows *configRows) {

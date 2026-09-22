@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Check,
   ChevronDown,
@@ -40,6 +41,7 @@ import { ConnectionPill, PeerTypePill } from "@/components/StatusIndicator";
 import { SignalStrength } from "@/components/SignalStrength";
 import { PeerAvatar } from "@/components/PeerAvatar";
 import { PeerDetailSheet, advertPathInfo } from "@/components/PeerDetailSheet";
+import { mapPathHref } from "@/lib/linkPath";
 import { timeAgo, truncateMid } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -99,9 +101,17 @@ function HopsBadge({ peer }: { peer: Peer }) {
     );
   }
   return (
-    <span className="font-mono text-xs tabular-nums text-muted-foreground">
+    <Link
+      to={mapPathHref({
+        path: peer.outPath ?? "",
+        hashSize: peer.outPathHashSize,
+        origin: peer.pubkey,
+      })}
+      onClick={(e) => e.stopPropagation()}
+      className="font-mono text-xs tabular-nums text-muted-foreground underline decoration-dotted decoration-muted-foreground/40 underline-offset-2 hover:text-primary hover:decoration-primary"
+    >
       {hops} hop{hops > 1 ? "s" : ""}
-    </span>
+    </Link>
   );
 }
 
@@ -167,7 +177,7 @@ export function PeersPage() {
     [setPeers],
   );
 
-  const { connected } = useWebSocket(["peers"], handleMessage);
+  const { connected, pending } = useWebSocket(["peers"], handleMessage);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -248,7 +258,7 @@ export function PeersPage() {
               <RefreshCw className={cn("size-3", loading && "animate-spin")} />
               refresh
             </Button>
-            <ConnectionPill connected={connected} />
+            <ConnectionPill connected={connected} pending={pending} />
           </>
         }
       />

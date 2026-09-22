@@ -34,11 +34,79 @@ func TestBoardRegistryIsComplete(t *testing.T) {
 			if b.Verified != "hardware" && b.Verified != "community" {
 				t.Errorf("verified = %q, want a declared provenance", b.Verified)
 			}
-			// DIO2 and a TX-enable pin are the two RF-switch mechanisms; a board with neither must be refused.
-			if !o.UseDIO2AsRfSwitch && o.TxEnPin == "" && b.Unsupported == "" {
-				t.Error("no RF switch control and not marked unsupported: transmissions would go into a terminated switch")
+			// DIO2 and a TX-enable pin are the two RF-switch mechanisms; with neither, a transmit goes into a terminated switch and reads as a quiet mesh.
+			if !o.UseDIO2AsRfSwitch && o.TxEnPin == "" {
+				t.Error("no RF switch control: this entry cannot be driven and should not ship")
 			}
 		})
+	}
+}
+
+// Both RAK6421 slots ran on the hat: each received from the live mesh, and two neighbours
+// re-flooded the advert each transmitted. The chip-select is the difference between the two
+// slots, so a swap would silence one.
+func TestRAK6421SlotsAreUsable(t *testing.T) {
+	for _, tc := range []struct {
+		name, reset, busy, dio1, port string
+	}{
+		{"rak6421-13300x-slot1", "GPIO16", "GPIO24", "GPIO22", "SPI0.0"},
+		{"rak6421-13300x-slot2", "GPIO24", "GPIO19", "GPIO18", "SPI0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := LookupBoard(tc.name)
+			if err != nil {
+				t.Fatalf("LookupBoard: %v", err)
+			}
+			if b.Verified != "hardware" {
+				t.Errorf("verified = %q, want hardware", b.Verified)
+			}
+			if b.SPIPort != tc.port {
+				t.Errorf("SPIPort = %q, want %q", b.SPIPort, tc.port)
+			}
+			o := b.Opts()
+			for _, p := range []struct{ field, got, want string }{
+				{"reset", o.ResetPin, tc.reset},
+				{"busy", o.BusyPin, tc.busy},
+				{"dio1", o.Dio1Pin, tc.dio1},
+			} {
+				if p.got != p.want {
+					t.Errorf("%s = %q, want %q", p.field, p.got, p.want)
+				}
+			}
+			if !o.UseDIO2AsRfSwitch {
+				t.Error("UseDIO2AsRfSwitch false: the module switches its own RF path and has no txen line")
+			}
+			if o.TCXOVoltage == 0 {
+				t.Error("TCXO unset: DIO3 powers the oscillator at 1.8 V, and without it the radio hears nothing")
+			}
+		})
+	}
+}
+
+// periph resolves pins by name on the default chip, so a banked pin map would drive whatever Pi
+// header line happens to share the number. Louder than a refusal: the entry is not drivable at all.
+func TestGPIOChipIsRejected(t *testing.T) {
+	const doc = `{"boards":{
+		"banked":{"gpio_chip":1,"reset_pin":25,"busy_pin":5,"irq_pin":22,"tx_power":22,"use_dio2_rf":true,"verified":"community"}
+	}}`
+	if _, err := parseBoards([]byte(doc)); err == nil {
+		t.Error("a board on gpiochip 1 loaded; its pin numbers mean something else on that chip")
+	}
+}
+
+// The same device spelled two ways must not read as a mismatch, or every SPI start warns.
+func TestSPIPortKey(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		same bool
+	}{
+		{"SPI0.1", "/dev/spidev0.1", true},
+		{"SPI0.0", "SPI0.0", true},
+		{"SPI0.0", "SPI0.1", false},
+	} {
+		if got := spiPortKey(tc.a) == spiPortKey(tc.b); got != tc.same {
+			t.Errorf("spiPortKey(%q)==spiPortKey(%q) = %v, want %v", tc.a, tc.b, got, tc.same)
+		}
 	}
 }
 
@@ -47,9 +115,6 @@ func TestVerifiedBoardIsUsable(t *testing.T) {
 	b, err := LookupBoard("ultrapeaterzero-e22p")
 	if err != nil {
 		t.Fatalf("LookupBoard: %v", err)
-	}
-	if b.Unsupported != "" {
-		t.Fatalf("the hardware-verified board is refused: %s", b.Unsupported)
 	}
 	if b.Verified != "hardware" {
 		t.Errorf("verified = %q, want hardware", b.Verified)

@@ -23,7 +23,8 @@ type settingsDTO struct {
 	CR             *int     `json:"cr"`
 	TX             *int     `json:"tx"`
 	ListenAddr     *string  `json:"listenAddr"`
-	MapTileKey     *string  `json:"mapTileKey"` // sent to the browser by design: it rides on tile URLs
+	MapTileKey     *string  `json:"mapTileKey"`    // sent to the browser by design: it rides on tile URLs
+	ModemTokenSet  bool     `json:"modemTokenSet"` // redacted
 	PathHashSize   *int     `json:"pathHashSize"`
 	// DutyCycle is a percentage, the unit the firmware's `set dutycycle` takes; null is the default (50%).
 	DutyCycle           *float64 `json:"dutyCycle"`
@@ -90,6 +91,8 @@ type triggerDTO struct {
 	Match              []string `json:"match"`
 	Contacts           []string `json:"contacts"`
 	ChannelIDs         []int64  `json:"channelIds"`
+	FailoverPattern    string   `json:"failoverPattern"`
+	FailoverTimeout    int64    `json:"failoverTimeout"`
 	RetryTimeout       *int64   `json:"retryTimeout"`
 	MaxRetries         *int     `json:"maxRetries"`
 	PathHashSize       *int     `json:"pathHashSize"`
@@ -126,6 +129,7 @@ func triggerToDTO(t store.Trigger) triggerDTO {
 		CharLimitBehaviour: t.CharLimitBehaviour, Match: t.MatchPatterns, Contacts: t.Contacts,
 		ChannelIDs: t.ChannelIDs, RetryTimeout: t.RetryTimeout, MaxRetries: t.MaxRetries,
 		PathHashSize: t.PathHashSize, Schedule: t.Schedule, URL: t.URL,
+		FailoverPattern: t.FailoverPattern, FailoverTimeout: t.FailoverTimeout,
 	}
 }
 
@@ -142,7 +146,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		BaudRate: st.BaudRate, SPIBoard: st.SPIBoard,
 		Freq: st.Freq, BW: st.BW, SF: st.SF, CR: st.CR, TX: st.TX,
 		ListenAddr: st.ListenAddr, MapTileKey: st.MapTileKey, PathHashSize: st.PathHashSize,
-		DutyCycle: st.DutyCyclePct, PacketRetentionDays: st.PacketRetentionDays, SetupComplete: st.SetupComplete,
+		ModemTokenSet: st.ModemToken != nil && *st.ModemToken != "",
+		DutyCycle:     st.DutyCyclePct, PacketRetentionDays: st.PacketRetentionDays,
+		SetupComplete: st.SetupComplete,
 	})
 }
 

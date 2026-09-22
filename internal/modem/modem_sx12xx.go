@@ -3,6 +3,7 @@ package modem
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/meshcore-go/OwlShack/internal/config"
@@ -28,6 +29,14 @@ func initPeriph() error {
 	return periphOnce.err
 }
 
+// spiPortKey reduces "SPI0.1" and "/dev/spidev0.1" to "0.1", so the same device spelled two ways
+// does not read as a mismatch.
+func spiPortKey(s string) string {
+	s = strings.TrimPrefix(s, "/dev/spidev")
+	s = strings.TrimPrefix(s, "SPI")
+	return s
+}
+
 // setupSPI drives an SX12xx wired straight to the host's SPI bus, with no MeshCore firmware in front of the chip, so this process is the radio stack.
 func setupSPI(ms *State, cfg *config.Config, connAddr string, radioConfig *hardware.RadioConfig) error {
 	if cfg.SPIBoard == nil || *cfg.SPIBoard == "" {
@@ -36,9 +45,6 @@ func setupSPI(ms *State, cfg *config.Config, connAddr string, radioConfig *hardw
 	board, err := LookupBoard(*cfg.SPIBoard)
 	if err != nil {
 		return err
-	}
-	if board.Unsupported != "" {
-		return fmt.Errorf("board %s is listed but not supported: %s", board.Name, board.Unsupported)
 	}
 	if board.Verified != "hardware" {
 		slog.Warn("board wiring has not been verified on hardware here",
@@ -60,6 +66,13 @@ func setupSPI(ms *State, cfg *config.Config, connAddr string, radioConfig *hardw
 	portName := connAddr
 	if portName == "" {
 		portName = board.SPIPort
+	}
+	// Talking to the wrong chip-select reads back as a chip that never answers, which the driver
+	// reports as bad wiring — so say plainly that the two disagree before that error appears.
+	if connAddr != "" && board.SPIPort != "" && spiPortKey(connAddr) != spiPortKey(board.SPIPort) {
+		slog.Warn("connection names a different SPI device than this board's chip-select",
+			"component", "modem", "board", board.Name,
+			"connection", connAddr, "boardExpects", board.SPIPort)
 	}
 	port, err := spireg.Open(portName)
 	if err != nil {

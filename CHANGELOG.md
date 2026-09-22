@@ -5,6 +5,266 @@ top until tagged.
 
 ## Unreleased
 
+## v1.4.2 - 2026-09-21
+
+Baseline `v1.4.1`, schema `user_version` 16, unchanged.
+
+### Added
+
+- **The RAK6421 WisBlock Pi HAT with a RAK13300 now works, in either IO slot.** Both are in the
+  board list and both have been run on the hardware here: they receive from a live mesh, and a
+  transmit from each was picked up and re-flooded by two neighbouring repeaters. Pick your slot in
+  Settings and the SPI port is filled in for you, since slot 1 and slot 2 sit on different
+  chip-selects. If the stored connection names a different one, the log now says so by name rather
+  than leaving you to read "wrong wiring" and go looking at the hat.
+
+### Changed
+
+- **Every board in the list can actually be driven.** Boards that were listed but refused at
+  startup are gone, and the BQ Voyage Station G3 has been fixed and now works. That is 15 boards,
+  4 of them verified on hardware here. A preset that nobody can complete or test is worse than no
+  preset, because a listed board reads as a supported one.
+
+### Fixed
+
+- **The chat composer on a phone.** The buttons and the text box were three different heights.
+  They now match, the icons are larger, the send button is the icon alone, and the emoji button
+  has moved inside the text box - about 20% more room to type. The character count no longer sits
+  under the box taking up a line; it appears next to send once your message reaches three lines,
+  or when you are close to the limit.
+- **Reply and More could be tapped while invisible.** Tapping a message near those buttons opened
+  the menu with nothing on screen to explain it.
+- **The More menu was cut off at the bottom of the screen.** On a message low down, the last item
+  sat behind the navigation bar. It now opens upward when there is no room below.
+- **The threads page scrolled by a pixel.** Enough for a stray scrollbar over the whole page.
+
+### Upgrading
+
+Nothing to do. If your radio hat was one of the entries that has been removed, Settings will no
+longer show it selected - those boards were refused at startup before, so nothing that was working
+has stopped.
+
+## v1.4.1 — 2026-09-18
+
+Frontend only, the same day v1.4.0 shipped. The fix worth taking: if you run two companions
+subscribed to the same channel, switching between them showed the other one's messages. The chat
+page is a single route, so changing companion never remounted it, and the message cache was keyed
+by channel name with no companion in the key — so opening a shared channel as the second companion
+found the first one's rows under that key, rendered them, then backfilled from the first one's
+highest id and merged the second's on top. You saw the same text twice, and the first companion's
+sent copy rendered as Sent in the second's thread.
+
+The rest is paths you can read. The peer sheet names the repeaters in an advert path instead of
+printing five hex bytes, and any path — a peer's advert route, or a packet's — plots on the map as
+a dashed line through each node.
+
+Everything here was verified in a browser against the bench's 374 peers and 10,000 packets, on a
+copy of the database driven by a loopback modem. Nothing in this release has been exercised on air,
+and nothing in it touches the radio: no Go changed, and the schema does not move. There are still
+no frontend tests in the repo, so none of this is guarded by CI.
+
+Baseline `v1.4.0` · schema `user_version` 16, unchanged · frontend only
+
+### Added
+
+- **The peer sheet names the hops in an advert path.** It showed `F9 88 A3 8C E8`; it now reads
+  `Teletronics Rangitumau → WR Aorangi → Remutaka → … → you`. This reuses the resolution the
+  Packets page has had since v1.4.0-rc.2, so it keeps the same honesty: a hash matching no repeater
+  stays hex, and one matching several is underlined with the count of other candidates and opens
+  them on click. A hash is a pubkey prefix, not an identity — on a 338-peer mesh 92 of 211
+  one-byte hashes match more than one node.
+- **Plot a path on the map.** An **on map** link on the peer sheet, on the Peers list's hop count,
+  and on a packet's path draws that path as a dashed line through each node, hides every peer not
+  on it, and frames the map to it. A chip in the filter bar names what is shown and restores the
+  normal map. Two rules keep the drawing as honest as the text it mirrors: a hop that cannot be
+  placed — an unresolvable hash, or a named repeater with no position — **ends the line rather than
+  bridging its neighbours**, because a leg drawn across an unknown hop asserts a link that was
+  never reported and looks identical to one that was; and a `DIRECT` route carries only the road
+  ahead, so neither end is us and no `you` is drawn. Nothing plots by selecting a marker: that
+  opens the details panel and leaves the map alone.
+
+### Fixed
+
+- **Two companions on one channel showed duplicate and mis-sided messages.** Described above. The
+  page is now keyed on the companion in the URL, which also stops the thread list, the composer,
+  the room session and the read high-water mark carrying across a switch. Reproduced before and
+  after on a copy of the database: on the old build the second companion's Public showed all 100 of
+  the first's messages plus three duplicated texts, one of them on the wrong side.
+- **Every page mount flashed the connection pill red.** `connected: false` meant both "the
+  handshake is still in flight" and "the link dropped", so arriving on any page painted a red
+  `offline` for the duration of the WebSocket handshake — one frame locally, the round trip on a
+  real deployment, and the chat fix above made it fire on a routine interaction. The pill has a
+  third state, and `pending` clears on the first open **or** the first close, so a server that is
+  genuinely unreachable still reaches `offline` instead of sitting neutral for ever. Both failure
+  states were provoked: killing the server goes red, and mounting a socket with no server reaches
+  red within 400 ms. The Repeater page's pill is unchanged — there, "off" genuinely means stopped.
+- **A short thread floated at the top of a tall message pane**, leaving a gap between it and the
+  composer. You only ever saw it once the bug above stopped filling short threads with another
+  companion's backlog.
+- **The thread list showed the raw mention syntax**, `@[MWH1]`, where the message itself renders a
+  styled `@MWH1`.
+- **A hop chain's arrows and its trailing `you` were nearly invisible**, dimmed far below the names
+  they separate.
+
+### Internal
+
+- Ten unused imports removed, and `noUnusedLocals` / `noUnusedParameters` turned on so the next one
+  fails the build rather than accumulating. Both flags were `false`, which is how these built up.
+  A branch cut before this that carries an unused import will now fail to build until it is dropped.
+
+## v1.4.0 — 2026-09-18
+
+Six candidates' worth of work since v1.3.1, which is the version most people are upgrading from.
+The headline is transports and bots: a third radio backend — **openHop Modem firmware**, over the
+network or USB — alongside MeshCore KISS and a bare SX126x on SPI; **RSS/Atom and CAP feed
+triggers**; **DM triggers** with a policy deciding who may talk to a companion; **failover replies**
+so a backup bot does not talk over the primary; **Debian packages** with a systemd unit for people
+who do not want Docker; and **`GET /api/health`** for external monitoring. Underneath: repeater
+admin that recovers from a stale route instead of going unreachable for good, ack waits computed
+from airtime rather than one flat timeout, and two MQTT status fields corrected to carry what the
+firmware says they carry.
+
+The two gaps named in every candidate since rc.2 are now one. A feed trigger has transmitted from
+real hardware: on an openHop modem over USB, with an SX1262 on SPI listening, the first poll primed
+against an existing backlog without firing, a new item went out and was heard by the other node,
+and a burst of eight was clamped to five with the other three never reaching the air — the two
+behaviours that are invisible when they work. **The room keep-alive fix from rc.1 has still never
+run against a live room server**, so that one behaviour ships unverified on air.
+
+On packaging, rc.5's "no ARM build has executed anywhere" no longer holds: the arm64 binary has run
+here, on a Pi 4, for the radio work above. **The armhf package is still the untested one** — it is
+built for ARMv6 and the guard that proves it now reads the recorded `GOARM`, but no ARMv6 machine
+has executed it. Treat the first Pi Zero install as the test.
+
+Baseline `v1.3.1` · schema `user_version` 11 → 16 · `meshcore-go` v1.5.0 · Go 1.26+
+
+### Upgrading
+
+- **Coming from v1.3.0 or earlier? You are also taking v1.3.1, which is a security fix.** A
+  repeater created through OwlShack had no admin password, and a blank one compared equal to the
+  blank a login carries, so any node in radio range could log in as admin — change settings, lock
+  the operator out, read the access list, run CLI commands. The migration sets a blank password to
+  `password`, the firmware's own default, which closes the hole without inventing a secret you
+  could not guess: **change it** on the Repeater page or with `password <new>`. Creating a repeater
+  now requires an admin password, so `POST /api/config/repeater` rejects a blank one. Your schema
+  range is `user_version` 10 → 16, not 11 → 16. Full detail under v1.3.1 below.
+- **The database migrates itself** on first start, 11 through 16 from v1.3.1 (10 through 16 from
+  v1.3.0). No manual SQL, and no step needs a downgrade path because none rewrites existing rows
+  except the repeater-password one above.
+- **`recv_errors` changes meaning on MQTT and `packet_parse_errors` is new.** A dashboard keyed on
+  `recv_errors` will see OwlShack nodes drop, usually a long way, because a radio-driver failure is
+  far rarer than a malformed packet. Nothing errors and no key disappears; read `client_version` to
+  tell the versions apart. Full detail under rc.1.
+- **Companion URLs are now `/companions/<id>-<slug>`.** Old bookmarks pointing at a bare name will
+  not resolve. The change is what stops a URL breaking when a companion is renamed.
+- **A web listen address that cannot be bound is now fatal.** A node whose port was already taken
+  used to keep running with a live radio and no web UI, reporting `active` the whole time. It now
+  exits, which is louder and is the point — but a host that got away with a clashing port will now
+  fail to start.
+- **The Debian package listens on 8860**, not 8080. The binary and the Docker image are unchanged;
+  this applies only to installs from the `.deb`.
+
+### Added
+
+Rolled up; each candidate's section below carries the detail.
+
+- **openHop Modem as a third radio backend** (rc.6, plus serial verified here) — `openhop://host:port`
+  or `openhop:///dev/tty…`. The firmware owns the radio and does its own channel-activity detection.
+  Its access token is a `modemToken` setting treated as a password, never returned by a config read.
+- **Failover replies for group bots** (new since rc.6, contributed by @Darkfish in #52) — a bot waits
+  a configurable 1–3600 seconds and stays quiet if another sender answers the request first.
+- **RSS/Atom and CAP feed triggers** (rc.2) — poll a feed and broadcast new items to channels, to
+  contacts, or both. First poll primes rather than replaying a backlog; one poll sends at most five.
+- **DM triggers and `dmPolicy`** (rc.1) — bots that answer direct messages, and a per-companion
+  policy for who is allowed to send them.
+- **Debian packages and a one-line installer** (rc.5) — amd64, arm64, armhf and i386, with a systemd
+  unit, a dedicated user and `/etc/default/owlshack`.
+- **`GET /api/health`** (rc.2) — a monitoring endpoint for Uptime Kuma and similar.
+
+### Fixed
+
+- **The installer told you to read the journal without `sudo`.** `journalctl -u owlshack` prints
+  only a permissions notice for a user outside `adm`/`systemd-journal`, and an unprivileged
+  `systemctl status` drops the recent log lines from its output without saying so, which reads as a
+  service that is running and quiet. The hint now says `sudo journalctl -u owlshack -f`.
+
+Everything else fixed since v1.3.1 is itemised under the candidates below: MQTT counter semantics
+and the KISS firmware counters that were never polled (rc.1), repeater admin against stale routes
+and airtime-based ack waits (rc.1), a dozen console defects (rc.2–rc.4), and the three the openHop
+work surfaced in code that was already wrong (rc.6).
+
+## v1.4.0-rc.6 — 2026-09-17
+
+rc.5 plus a third radio backend: **openHop Modem firmware**, over the network or USB, alongside
+MeshCore KISS and a bare SX126x on SPI. It has run against real hardware here — handshake, receive,
+transmit, reconnect and listen-before-talk — which is more than the armhf package can say.
+
+Adding a transport that reconnects itself surfaced three things that were already wrong and are
+fixed here: `/api/health` called the radio connected whenever a modem object existed, the stored
+`connectionType` could contradict the connection string it is supposed to describe, and the
+settings round-trip test only ever exercised an INSERT, so a column dropped from the upsert's
+`ON CONFLICT` list was invisible — for any column, not just the new one.
+
+Schema moves to `user_version` 15 for one new column. The two things keeping this off v1.4.0 are
+unchanged: the room keep-alive has never run against a live room, and no feed trigger has yet
+transmitted from real hardware.
+
+Baseline `v1.3.1` · schema `user_version` 15
+
+### Added
+
+- **openHop Modem support.** Set the connection to `openhop://host:port` (or `openhop:///dev/tty…`)
+  and pick "openHop Modem" as the radio backend. The firmware owns the radio and does its own
+  channel-activity detection, so OwlShack only frames packets; the driver reconnects on its own and
+  re-pushes the radio configuration afterwards, because the modem may have rebooted. The preamble is
+  derived from the spreading factor rather than taken from openHop's own default, which no MeshCore
+  node would hear.
+  Verified against an openHop Modem on WiFi: handshake and every query, receive with correct SNR and
+  RSSI, a self-advert on air, peers discovered, a reconfigure mid-run, and a dropped link recovering
+  through the full backoff schedule with re-authentication. Listen-before-talk was exercised by
+  lowering the modem's CAD threshold until a quiet channel reads busy — both the host retry loop and
+  the modem's own `ERR_CHANNEL_BUSY` refusal behave. **openHop over serial is untested**: no such
+  hardware here. **Correction (v1.4.0):** serial has since been verified on a Seeed XIAO Wio SX1262 —
+  handshake, radio configuration, receive with SNR and RSSI, and transmit. Serial clients are not
+  asked for a token, so `modemToken` stays a network-only concern.
+- **`modemToken` setting.** The openHop access token, stored in its own column and treated as a
+  password: reads return `modemTokenSet` and never the value, a write omits it to keep the stored
+  one, and the UI field is masked and write-only. It is deliberately not part of the connection
+  string, which config reads return in full.
+
+### Fixed
+
+- **`/api/health` reported a radio that was not there as connected.** `connected` meant "a modem
+  object exists", which tracks the link only for transports OwlShack tears down and rebuilds. A
+  self-reconnecting modem outlives its link, so a radio that had been unreachable for minutes still
+  read `status: ok, problems: []`. Health now asks the modem when it can answer one.
+- **The stored `connectionType` could disagree with the connection string.** Only the connection
+  string decides which driver loads, so the label is now derived from it on every write instead of
+  being taken from the caller — a config naming one backend and pointing at another no longer
+  persists the contradiction.
+- **The settings round-trip test could not see a dropped column.** It inserted once, so it only
+  covered the INSERT arm of the upsert; removing a column from the `ON CONFLICT` list — the arm
+  every save after the first one takes — left it green. It now writes twice.
+- **The armhf guard in `build-deb.sh` was inert.** See the correction under rc.5: it disassembled a
+  stripped binary, got nothing, and passed. It now reads the `GOARM` the toolchain records, which
+  survives stripping, and fails closed when it cannot read one.
+
+## v1.4.0-rc.5 — 2026-09-16
+
+rc.4 plus native packaging: a `.deb` that installs OwlShack as a systemd service, for everyone who
+does not want Docker. It brought two app changes with it — a listen address that cannot be bound
+is now fatal instead of leaving a node that reports `active` with no web UI, and `LISTEN_DEFAULT`
+seeds the stored address so a package can choose the port a fresh install starts on without taking
+that field away from the Settings page. Same schema as rc.4, same binaries otherwise.
+
+The packages install and purge cleanly on Debian 12 and 13 and on Ubuntu 22.04 and 24.04, but no
+ARM build has executed anywhere: the armhf package is built for ARMv6 and checked by disassembly,
+never run on a Pi. Treat the first Pi Zero install as the test. The two things keeping this off
+v1.4.0 are unchanged: the room keep-alive has never run against a live room, and no feed trigger
+has yet transmitted from real hardware.
+
+Baseline `v1.3.1` · schema `user_version` 14
+
 ### Added
 
 - **Debian packages and a one-line installer.** `.deb` for amd64, arm64, armhf and i386, built
@@ -21,8 +281,11 @@ top until tagged.
   `HOST` and `PORT` are unchanged and still pin the address on every start.
 - **The armhf package is ARMv6, so a Pi Zero can run it.** Raspberry Pi OS reports `armhf` on an
   ARMv6 Pi as well as an ARMv7 one, and a GOARM=7 build installs there cleanly and then dies with
-  SIGILL. `build-deb.sh` now disassembles any armhf binary and refuses it if ARMv7-only
-  instructions are present.
+  SIGILL. `build-deb.sh` refuses an armhf binary that is not ARMv6. **Correction (rc.6):** the
+  check shipped in rc.5 disassembled the binary, which cannot work on a release build — those are
+  stripped, `go tool objdump` fails, and the instruction count came back zero, so the guard passed
+  no matter what. The rc.5 armhf package is genuinely ARMv6, verified separately; the guard just
+  was not the reason. It reads the recorded `GOARM` from rc.6 on.
 
 ### Fixed
 

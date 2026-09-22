@@ -17,13 +17,13 @@ VERSION="${VERSION#v}"
 # '~' sorts below everything; a literal '-' would read as a Debian revision and sort above.
 VERSION="${VERSION//-/\~}"
 
-# armhf also means Pi Zero, whose ARMv6 core faults on these GOARM=7 instructions.
+# armhf also means Pi Zero, whose ARMv6 core faults on a GOARM=7 build. Read the setting the
+# toolchain records: it survives the release build's stripped symbols, where a disassembly does not.
 if [ "$ARCH" = armhf ]; then
-  command -v go >/dev/null || { echo "armhf needs go to prove the binary is ARMv6" >&2; exit 1; }
-  # Counted, not grep -q: an early exit SIGPIPEs objdump, and pipefail reads that as no match.
-  v7="$(go tool objdump "$BIN" | awk '{print $4}' | grep -cxE 'BFC|MLS|RBIT|SBFX|UBFX' || true)"
-  if [ "$v7" -gt 0 ]; then
-    echo "refusing: $BIN uses $v7 ARMv7-only instructions, rebuild it with GOARM=6" >&2
+  command -v go >/dev/null || { echo "armhf needs go to read the binary's GOARM" >&2; exit 1; }
+  goarm="$(go version -m "$BIN" 2>/dev/null | awk '$1 == "build" && $2 ~ /^GOARM=/ { sub(/^GOARM=/, "", $2); print $2 }')"
+  if [ "$goarm" != 6 ]; then
+    echo "refusing: $BIN reports GOARM=${goarm:-unknown}, armhf must be GOARM=6 for a Pi Zero" >&2
     exit 1
   fi
 fi

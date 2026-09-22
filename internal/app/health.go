@@ -117,7 +117,12 @@ func (b *backend) radioHealth(now time.Time, act *radioActivity) api.RadioHealth
 	if !ok {
 		return h // no modem: everything below would be a zero that reads as healthy
 	}
+	// A modem exists. On a transport that reconnects itself the object outlives the link, so ask it
+	// whether the link is actually up; the others are torn down and rebuilt, where existing is up.
 	h.Connected = true
+	if c, ok := b.stats.(interface{ Connected() bool }); ok {
+		h.Connected = c.Connected()
+	}
 	h.Transport = stats.Transport
 	h.TxQueueLen = stats.TxQueueLen
 	h.TxSent = stats.TxSent

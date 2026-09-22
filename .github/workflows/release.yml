@@ -115,7 +115,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # build-deb.sh disassembles the armhf binary to prove it is ARMv6.
+      # build-deb.sh reads the armhf binary's recorded GOARM to prove it is ARMv6.
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

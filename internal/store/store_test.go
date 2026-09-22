@@ -850,7 +850,7 @@ func TestHopPinRepo_NonePinIsPresent(t *testing.T) {
 // Bump wantVersion whenever a migration is appended to the migrations slice.
 func TestStore_MigrateUserVersion(t *testing.T) {
 	t.Parallel()
-	const wantVersion = 16 // migrateV1, 2 squashed noop slots, migrateV2..migrateV14
+	const wantVersion = 18 // migrateV1, 2 squashed noop slots, migrateV2..migrateV16
 	st := newTestStore(t)
 	var v int
 	if err := st.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&v); err != nil {

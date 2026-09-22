@@ -214,7 +214,7 @@ export function MonitoringDetailPage() {
     [pubkey],
   );
 
-  const { connected } = useWebSocket(["metrics"], onWs);
+  const { connected, pending } = useWebSocket(["metrics"], onWs);
 
   const { heroMetrics, gridMetrics } = useMemo(() => {
     const avail = new Set(displayAvailable);
@@ -270,7 +270,7 @@ export function MonitoringDetailPage() {
         }
         actions={
           <div className="flex items-center gap-2">
-            <ConnectionPill connected={connected} />
+            <ConnectionPill connected={connected} pending={pending} />
             <RangeSelector range={range} onChange={setRange} />
             <Button
               variant="outline"

@@ -454,7 +454,13 @@ function CompanionActions({ companion }: { companion: string }) {
   );
 }
 
+// Every cache below is per-companion: remount on switch, or one companion's rows leak into another's thread.
 export function CompanionDetailPage() {
+  const { ref } = useParams<{ ref: string }>();
+  return <CompanionChat key={ref ?? ""} />;
+}
+
+function CompanionChat() {
   const { ref } = useParams<{ ref: string }>();
   const {
     ref: companionRef,
@@ -1031,7 +1037,7 @@ export function CompanionDetailPage() {
     ],
   );
 
-  const { connected } = useWebSocket(["messages"], handleWsMessage);
+  const { connected, pending } = useWebSocket(["messages"], handleWsMessage);
 
   // A gap in the stream leaves this thread and the roster short of whatever arrived during it.
   // Other channels catch up on re-open, via the same backfill.
@@ -1434,9 +1440,33 @@ export function CompanionDetailPage() {
 
   const composerLen = composer.length;
   const overLimit = composerLen > charLimit;
+  // 90px is three rows: 42 for the first, 24 for each after.
+  const [composerTall, setComposerTall] = useState(false);
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (el) setComposerTall(el.getBoundingClientRect().height >= 90);
+  }, [composer]);
+  // On mobile the count only ever sits beside Send, and only once it earns the space: three rows
+  // in, or near the limit, which a long companion name can reach sooner and would disable Send.
+  const countBesideSend =
+    isMobile && (composerTall || composerLen > charLimit * 0.85);
+  const charCounter = (
+    <span
+      className={cn(
+        "font-mono text-[10px] tabular-nums",
+        overLimit
+          ? "text-destructive"
+          : composerLen > charLimit * 0.85
+            ? "text-warning"
+            : "text-muted-foreground/60",
+      )}
+    >
+      {composerLen}/{charLimit}
+    </span>
+  );
 
   return (
-    <div className={cn("h-[calc(100dvh-3.5rem-env(safe-area-inset-top,0px)-var(--bottom-nav))] -mt-6 -mb-[calc(1.5rem+var(--bottom-nav))] -mx-4 sm:-mx-6 flex flex-col overflow-hidden", activeChannel && "max-lg:*:first:hidden")}>
+    <div className={cn("h-[calc(100dvh-var(--app-header)-var(--bottom-nav))] -mt-6 -mb-[calc(1.5rem+var(--bottom-nav))] -mx-4 sm:-mx-6 flex flex-col overflow-hidden", activeChannel && "max-lg:*:first:hidden")}>
       <div className="shrink-0 px-4 sm:px-6 pt-6">
         <PageHeader
           title="Messages"
@@ -1446,7 +1476,7 @@ export function CompanionDetailPage() {
               {threadCount === 1 ? "" : "s"}
             </span>
           }
-          trailing={<ConnectionPill connected={connected} />}
+          trailing={<ConnectionPill connected={connected} pending={pending} />}
           actions={<CompanionActions companion={companionRef} />}
         />
       </div>
@@ -1637,7 +1667,7 @@ export function CompanionDetailPage() {
                 <div
                   ref={scrollContainerRef}
                   onScroll={handleMessagesScroll}
-                  className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-background/30"
+                  className="flex-1 flex flex-col justify-end-safe overflow-y-auto overflow-x-hidden px-4 py-4 space-y-4 bg-background/30"
                 >
                   {!loadingMsgs && loadingOlder && (
                     <div className="flex items-center justify-center py-2 text-muted-foreground/60">
@@ -1704,68 +1734,64 @@ export function CompanionDetailPage() {
                     ownLon={ownPos?.lon}
                     onInsert={insertAtCursor}
                   />
-                  {isMobile ? (
-                    <EmojiButton
-                      active={emojiOpen}
-                      onClick={() => setEmojiOpen((o) => !o)}
+                  <div className="relative flex-1 min-w-0">
+                    {/* min-h-9 is load-bearing: it overrides the Textarea base's min-h-16. */}
+                    <Textarea
+                      ref={composerRef}
+                      rows={1}
+                      value={composer}
+                      onChange={(e: ChangeEvent<HTMLTextAreaElement>) => {
+                        setComposer(e.target.value);
+                        const caret =
+                          e.target.selectionStart ?? e.target.value.length;
+                        emojiAC.handleChange(e.target.value, caret);
+                        mentionAC.handleChange(e.target.value, caret);
+                      }}
+                      onKeyDown={onComposerKey}
+                      onBlur={() => {
+                        emojiAC.close();
+                        mentionAC.close();
+                      }}
+                      placeholder={composerLocked ? lockedHint : "transmit…"}
+                      disabled={composerLocked}
+                      className="resize-none rounded-none border-border font-mono text-base md:text-sm leading-6 min-h-9 max-h-25 pr-11 bg-background"
                     />
-                  ) : (
-                    <EmojiPicker onSelect={insertAtCursor} />
-                  )}
-                  <Textarea
-                    ref={composerRef}
-                    rows={1}
-                    value={composer}
-                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => {
-                      setComposer(e.target.value);
-                      const caret =
-                        e.target.selectionStart ?? e.target.value.length;
-                      emojiAC.handleChange(e.target.value, caret);
-                      mentionAC.handleChange(e.target.value, caret);
-                    }}
-                    onKeyDown={onComposerKey}
-                    onBlur={() => {
-                      emojiAC.close();
-                      mentionAC.close();
-                    }}
-                    placeholder={composerLocked ? lockedHint : "transmit…"}
-                    disabled={composerLocked}
-                    className="resize-none rounded-none border-border font-mono text-base md:text-sm min-h-9 max-h-25 bg-background"
-                    style={{ height: "auto" }}
-                  />
-                  <Button
-                    onClick={send}
-                    disabled={
-                      sending || !composer.trim() || overLimit || composerLocked
-                    }
-                    size="sm"
-                    className="rounded-none h-9 font-mono text-[11px] uppercase tracking-[0.12em]"
-                  >
-                    <Send className="size-3.5" />
-                    send
-                  </Button>
-                </div>
-                <div className="px-3 pb-2 flex items-center justify-between">
-                  <span className="text-mono-xs text-muted-foreground/60 hidden sm:inline">
-                    {isSensorThread
-                      ? "alerts from this sensor — use Manage to configure it"
-                      : roomReadOnly
-                        ? "read-only access — posting disabled"
-                        : "Enter sends · Shift+Enter newline"}
-                  </span>
-                  <span
-                    className={cn(
-                      "font-mono text-[10px] tabular-nums",
-                      overLimit
-                        ? "text-destructive"
-                        : composerLen > charLimit * 0.85
-                          ? "text-warning"
-                          : "text-muted-foreground/60",
+                    {isMobile ? (
+                      <EmojiButton
+                        active={emojiOpen}
+                        onClick={() => setEmojiOpen((o) => !o)}
+                      />
+                    ) : (
+                      <EmojiPicker onSelect={insertAtCursor} />
                     )}
-                  >
-                    {composerLen}/{charLimit}
-                  </span>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    {countBesideSend ? charCounter : null}
+                    <Button
+                      onClick={send}
+                      aria-label="Send"
+                      disabled={
+                        sending || !composer.trim() || overLimit || composerLocked
+                      }
+                      size="icon"
+                      className="rounded-none size-10.5 before:-inset-x-0.5"
+                    >
+                      <Send className="size-6" />
+                    </Button>
+                  </div>
                 </div>
+                {isMobile ? null : (
+                  <div className="px-3 pb-2 flex items-center justify-between">
+                    <span className="text-mono-xs text-muted-foreground/60">
+                      {isSensorThread
+                        ? "alerts from this sensor — use Manage to configure it"
+                        : roomReadOnly
+                          ? "read-only access — posting disabled"
+                          : "Enter sends · Shift+Enter newline"}
+                    </span>
+                    {charCounter}
+                  </div>
+                )}
                 {isMobile && emojiOpen && (
                   <div className="border-t border-border">
                     <EmojiMartPanel
@@ -2041,7 +2067,7 @@ function ConversationRow({
                     me ›
                   </span>
                 )}
-                {convo.lastMessage.text}
+                {convo.lastMessage.text.replace(MENTION_RE, "@$1")}
               </>
             ) : (
               <span className="italic text-muted-foreground/50">
@@ -2414,7 +2440,10 @@ function MessageBubble({
       <div
         className={cn(
           "flex items-center gap-0.5 transition-opacity",
-          tapped ? "opacity-100" : "opacity-0 group-hover/msg:opacity-100",
+          // Hidden must also mean untappable: opacity alone still took the tap.
+          tapped
+            ? "opacity-100"
+            : "opacity-0 pointer-events-none group-hover/msg:opacity-100 group-hover/msg:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto",
           isTx ? "flex-row-reverse" : "flex-row",
         )}
       >
@@ -2658,6 +2687,18 @@ function UrlLink({ url }: { url: string }) {
   );
 }
 
+// --bottom-nav is a calc() over env(), which getPropertyValue hands back unevaluated, so let the
+// browser resolve it. 0px once the sidebar takes over, which is what the media query already says.
+function bottomNavHeight(): number {
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:absolute;visibility:hidden;height:var(--bottom-nav)";
+  document.body.appendChild(probe);
+  const px = probe.getBoundingClientRect().height;
+  probe.remove();
+  return px;
+}
+
 function ContextMenu({
   msg,
   pos,
@@ -2682,15 +2723,31 @@ function ContextMenu({
   const isRx = msg.direction === "rx";
   const showEchoes =
     !isRx && msg.repeatCount != null && msg.repeatCount > 0;
+  const ref = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState({ top: pos.y, left: pos.x });
+  // The menu is 3-6 items depending on the message, so its size is measured rather than assumed,
+  // and the bottom nav overlays the viewport — clamping to innerHeight alone hides the last item.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const gutter = 8;
+    const floor = window.innerHeight - bottomNavHeight() - gutter;
+    setPlace({
+      top:
+        pos.y + height > floor
+          ? Math.max(gutter, pos.y - height)
+          : pos.y,
+      left: Math.max(gutter, Math.min(pos.x, window.innerWidth - width - gutter)),
+    });
+  }, [pos]);
   return (
     <div
+      ref={ref}
       role="menu"
       data-context-menu
       className="fixed z-60 min-w-40 bg-popover border border-border rounded-sm shadow-md py-1 text-sm"
-      style={{
-        top: Math.min(pos.y, window.innerHeight - 240),
-        left: Math.min(pos.x, window.innerWidth - 200),
-      }}
+      style={place}
       onClick={(e) => e.stopPropagation()}
     >
       <CtxItem icon={<Copy className="size-3.5" />} onClick={onCopy}>

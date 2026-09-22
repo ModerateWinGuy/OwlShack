@@ -34,6 +34,17 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      # Actions runs this with `bash -e`, so the list form `[ -z "$out" ] && exit 0`
+      # would abort before naming the files. The point is the list, not the exit code.
+      - name: Gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "These files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+
       - name: Go vet
         run: go vet ./...
 

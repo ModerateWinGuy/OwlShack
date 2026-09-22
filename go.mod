@@ -5,8 +5,8 @@ go 1.26.7
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/gorilla/websocket v1.5.3
-	github.com/meshcore-go/meshcore-go v1.4.0
-	github.com/meshcore-go/meshcore-go/hardware/transport v1.4.0
+	github.com/meshcore-go/meshcore-go v1.5.0
+	github.com/meshcore-go/meshcore-go/hardware/transport v1.5.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/pflag v1.0.10
@@ -15,7 +15,8 @@ require (
 )
 
 require (
-	github.com/meshcore-go/meshcore-go/hardware/sx12xx v1.4.0
+	github.com/meshcore-go/meshcore-go/hardware/openhop v1.5.0
+	github.com/meshcore-go/meshcore-go/hardware/sx12xx v1.5.0
 	github.com/mmcdole/gofeed v1.4.2
 	github.com/tuzzmaniandevil/cap-go v1.0.0
 )

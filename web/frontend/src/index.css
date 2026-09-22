@@ -224,6 +224,8 @@
   :root {
     /* Height reserved for the mobile bottom nav (0 once the sidebar is visible). */
     --bottom-nav: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+    /* What AppShell's header actually occupies: h-14 box-content, so its border-b adds a pixel. */
+    --app-header: calc(3.5rem + 1px + env(safe-area-inset-top, 0px));
   }
   @media (min-width: 768px) {
     :root {

@@ -19,6 +19,7 @@ import {
   Field,
   PATH_HASH_SIZE_OPTIONS,
   SelectField,
+  SwitchRow,
   TextField,
 } from "@/components/ConfigFields";
 import { StringListField } from "@/components/StringListField";
@@ -447,6 +448,13 @@ function BotEditor({
       .filter((n): n is string => !!n),
   );
   const [match, setMatch] = useState<string[]>(trigger?.match ?? []);
+  const [failover, setFailover] = useState(!!trigger?.failoverPattern);
+  const [failoverPattern, setFailoverPattern] = useState(
+    trigger?.failoverPattern || String.raw`^@\[{{.Sender | reQuote}}\].+`,
+  );
+  const [failoverTimeout, setFailoverTimeout] = useState(
+    String(trigger?.failoverTimeout || 10),
+  );
   const [contacts, setContacts] = useState<string[]>(trigger?.contacts ?? []);
   const [schedule, setSchedule] = useState(trigger?.schedule ?? "");
   const initialPoll = parsePollInterval(trigger?.schedule);
@@ -527,6 +535,8 @@ function BotEditor({
               ? schedule
               : null,
           url: isFeedType(type) ? url.trim() : null,
+          failoverPattern: type === "group" && failover ? failoverPattern.trim() : "",
+          failoverTimeout: type === "group" && failover ? Number(failoverTimeout) : 0,
           maxRetries: parseInt(maxRetries, 10) || 3,
           retryTimeout: parseInt(retryTimeout, 10) || 5,
           pathHashSize:
@@ -545,6 +555,12 @@ function BotEditor({
 
   const valid =
     template.trim() !== "" &&
+    (type !== "group" ||
+      !failover ||
+      (failoverPattern.trim() !== "" &&
+        /^\d+$/.test(failoverTimeout) &&
+        Number(failoverTimeout) >= 1 &&
+        Number(failoverTimeout) <= 3600)) &&
     (type === "dm" ||
       selectedChannels.length > 0 ||
       (isFeedType(type) && contacts.length > 0)) &&
@@ -704,6 +720,34 @@ function BotEditor({
                 </>
               }
             />
+          )}
+
+          {type === "group" && (
+            <div className="space-y-3">
+              <SwitchRow
+                label="Failover reply"
+                hint="Wait for another sender's response on the same channel before replying."
+                checked={failover}
+                onChange={setFailover}
+              />
+              {failover && (
+                <>
+                  <TextField
+                    label="Wait before replying (seconds)"
+                    type="number"
+                    value={failoverTimeout}
+                    onChange={setFailoverTimeout}
+                    hint="1–3600 seconds. A matching response cancels this reply."
+                  />
+                  <TextField
+                    label="Suppress reply when text matches"
+                    value={failoverPattern}
+                    onChange={setFailoverPattern}
+                    hint="Regex template — {{.Sender | reQuote}} safely matches the original sender's name."
+                  />
+                </>
+              )}
+            </div>
           )}
 
           <Field

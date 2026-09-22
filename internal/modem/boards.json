@@ -19,7 +19,7 @@
       "use_dio3_tcxo": true,
       "dio3_tcxo_voltage": 1.8,
       "verified": "hardware",
-      "notes": "E22P-915M30S: 30 dBm PA with LNA and a band-pass filter, LoRa core driven at 22. openhop's independent entry agrees on every pin."
+      "notes": "E22P-915M30S: 30 dBm PA with LNA and a band-pass filter, LoRa core driven at 22."
     },
     "ultrapeaterzero-e22": {
       "label": "Zindello UltraPeaterZero (E22, 1 W)",
@@ -73,21 +73,6 @@
       "use_dio2_rf": false,
       "use_dio3_tcxo": true,
       "dio3_tcxo_voltage": 1.8,
-      "verified": "community"
-    },
-    "meshadv-mini": {
-      "label": "MeshAdv Mini",
-      "chip": "SX1262",
-      "bus_id": 0,
-      "cs_id": 0,
-      "cs_pin": 8,
-      "reset_pin": 24,
-      "busy_pin": 20,
-      "irq_pin": 16,
-      "rxen_pin": 12,
-      "tx_power": 22,
-      "use_dio2_rf": false,
-      "use_dio3_tcxo": false,
       "verified": "community"
     },
     "pimesh-1w-v1": {
@@ -197,19 +182,6 @@
       "dio3_tcxo_voltage": 1.8,
       "verified": "community"
     },
-    "uconsole-aio-v1": {
-      "label": "uConsole LoRa Module aio v1",
-      "chip": "SX1262",
-      "bus_id": 1,
-      "cs_id": 0,
-      "reset_pin": 25,
-      "busy_pin": 24,
-      "irq_pin": 26,
-      "tx_power": 22,
-      "use_dio2_rf": false,
-      "use_dio3_tcxo": false,
-      "verified": "community"
-    },
     "uconsole-aio-v2": {
       "label": "uConsole LoRa Module aio v2",
       "chip": "SX1262",
@@ -224,81 +196,6 @@
       "dio3_tcxo_voltage": 1.8,
       "verified": "community"
     },
-    "ultrapeater-e22": {
-      "label": "Zindello UltraPeater (E22)",
-      "chip": "SX1262",
-      "bus_id": 0,
-      "cs_id": 0,
-      "cs_pin": 16,
-      "reset_pin": 22,
-      "busy_pin": 11,
-      "irq_pin": 10,
-      "txen_pin": 20,
-      "rxen_pin": 21,
-      "txled_pin": 8,
-      "rxled_pin": 1,
-      "tx_power": 22,
-      "use_dio2_rf": false,
-      "use_dio3_tcxo": true,
-      "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
-      "verified": "community"
-    },
-    "ultrapeater-e22p": {
-      "label": "Zindello UltraPeater (E22P, 30 dBm)",
-      "chip": "SX1262",
-      "bus_id": 0,
-      "cs_id": 0,
-      "cs_pin": 16,
-      "reset_pin": 22,
-      "busy_pin": 11,
-      "irq_pin": 10,
-      "txen_pin": 20,
-      "en_pins": [21],
-      "txled_pin": 8,
-      "rxled_pin": 1,
-      "tx_power": 22,
-      "use_dio2_rf": false,
-      "use_dio3_tcxo": true,
-      "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
-      "verified": "community"
-    },
-    "femtofox-1w-sx": {
-      "label": "FemtoFox SX1262 (1W)",
-      "chip": "SX1262",
-      "bus_id": 0,
-      "cs_id": 0,
-      "cs_pin": 16,
-      "reset_pin": 25,
-      "busy_pin": 22,
-      "irq_pin": 23,
-      "rxen_pin": 24,
-      "tx_power": 22,
-      "use_dio2_rf": false,
-      "use_dio3_tcxo": true,
-      "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
-      "verified": "community"
-    },
-    "femtofox-2w-sx": {
-      "label": "FemtoFox SX1262 (2W)",
-      "chip": "SX1262",
-      "bus_id": 0,
-      "cs_id": 0,
-      "cs_pin": 16,
-      "reset_pin": 25,
-      "busy_pin": 22,
-      "irq_pin": 23,
-      "rxen_pin": 24,
-      "tx_power": 8,
-      "use_dio2_rf": true,
-      "use_dio3_tcxo": true,
-      "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
-      "verified": "community",
-      "notes": "8 dBm drives an external PA; not the radiated power."
-    },
     "rak6421-13300x-slot1": {
       "label": "RAK6421 with RAK1330x, IO slot 1",
       "chip": "SX1262",
@@ -312,8 +209,8 @@
       "use_dio2_rf": true,
       "use_dio3_tcxo": true,
       "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
-      "verified": "community"
+      "verified": "hardware",
+      "notes": "RAK6421 Pi HAT with a RAK13300 in IO slot 1, which is on SPI0.0."
     },
     "rak6421-13300x-slot2": {
       "label": "RAK6421 with RAK1330x, IO slot 2",
@@ -328,8 +225,8 @@
       "use_dio2_rf": true,
       "use_dio3_tcxo": true,
       "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
-      "verified": "community"
+      "verified": "hardware",
+      "notes": "RAK6421 Pi HAT with a RAK13300 in IO slot 2. Slot 2 is on SPI0.1, so the connection must name SPI0.1 or the chip never answers."
     },
     "bq-station-g3": {
       "label": "BQ Voyage Station G3",
@@ -343,7 +240,6 @@
       "use_dio2_rf": true,
       "use_dio3_tcxo": true,
       "dio3_tcxo_voltage": 1.8,
-      "gpio_chip": 1,
       "verified": "community"
     }
   }

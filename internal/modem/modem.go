@@ -1,4 +1,4 @@
-// Package modem connects to the KISS radio hardware and exposes it as a node.Modem, a stats provider and the standard mux options.
+// Package modem connects to the radio hardware — KISS or openHop firmware, or a bare SX12xx — and exposes it as a node.Modem, a stats provider and the standard mux options.
 package modem
 
 import (
@@ -146,7 +146,7 @@ func MuxOptions(ms *State) []node.MuxOption {
 	return opts
 }
 
-// Setup connects the radio: KISS firmware over serial/TCP, or a bare SX12xx on the host's SPI bus.
+// Setup connects the radio: KISS firmware over serial/TCP, openHop Modem firmware over serial/TCP, or a bare SX12xx on the host's SPI bus.
 func Setup(ctx context.Context, cfg *config.Config) (*State, error) {
 	ms := &State{
 		ParseErrors: &atomic.Uint64{},
@@ -174,6 +174,8 @@ func Setup(ctx context.Context, cfg *config.Config) (*State, error) {
 	switch connScheme {
 	case "spi":
 		err = setupSPI(ms, cfg, connAddr, radioConfig)
+	case "openhop":
+		err = setupOpenhop(ctx, ms, cfg, connAddr, radioConfig)
 	default:
 		err = setupKiss(ctx, ms, cfg, connScheme, connAddr, radioConfig)
 	}
