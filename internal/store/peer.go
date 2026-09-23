@@ -254,8 +254,7 @@ func (r *PeerRepo) LookupByHash(ctx context.Context, hash []byte) ([]string, err
 	return names, nil
 }
 
-// HopPinRepo holds the operator's answer to which peer owns a path hash (lowercase hex, 1-3 bytes),
-// overriding the automatic pick; a nil pubkey means none of the known peers does.
+// HopPinRepo maps a path hash (lowercase hex, 1-3 bytes) to the operator's chosen owner; nil pubkey = none.
 type HopPinRepo struct{ db *sql.DB }
 
 // List maps every pinned hash to its pubkey; a present key with a nil value is a "none" pin.

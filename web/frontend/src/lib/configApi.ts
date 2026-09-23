@@ -342,7 +342,7 @@ export interface TriggerInput {
 // --- request helper ---
 
 // Validation failures come back as 422 { error }; throw the server's message.
-async function request(
+export async function request(
   url: string,
   method: string,
   body?: unknown,

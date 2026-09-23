@@ -63,6 +63,14 @@ func (r *SettingsRepo) Get(ctx context.Context) (*Settings, error) {
 	return &s, nil
 }
 
+// PacketRetentionDays is the stored setting, or DefaultPacketRetentionDays when unset or unreadable.
+func (r *SettingsRepo) PacketRetentionDays(ctx context.Context) int {
+	if s, err := r.Get(ctx); err == nil && s.PacketRetentionDays != nil {
+		return *s.PacketRetentionDays
+	}
+	return DefaultPacketRetentionDays
+}
+
 func (r *SettingsRepo) Set(ctx context.Context, s *Settings) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO settings

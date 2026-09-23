@@ -124,11 +124,9 @@ func (r *PacketRepo) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// PruneBatchBefore deletes up to batch of the oldest packets received before cutoff and reports
-// whether a full batch went, so more may remain; one batch per writer closure keeps RX writes flowing.
-// ponytail: received_at is time.String() in the host's zone, so SQL date compares are off by the UTC
-// offset; the times are compared parsed, in Go, walking ids oldest first.
+// PruneBatchBefore deletes up to batch of the oldest packets received before cutoff; more = a full batch went.
 func (r *PacketRepo) PruneBatchBefore(ctx context.Context, cutoff time.Time, batch int) (more bool, err error) {
+	// ponytail: received_at is host-zone time.String(), so ages compare parsed in Go; assumes ids follow time.
 	rows, err := r.db.QueryContext(ctx, "SELECT id, received_at FROM packets ORDER BY id LIMIT ?", batch)
 	if err != nil {
 		return false, fmt.Errorf("reading oldest packets: %w", err)
@@ -160,8 +158,7 @@ func (r *PacketRepo) PruneBatchBefore(ctx context.Context, cutoff time.Time, bat
 	return n == batch, nil
 }
 
-// ScanFloodRxSince calls fn for each received flood packet other than a trace, newest first, and
-// stops at the first one received before cutoff. Only these carry a path of relays toward us.
+// ScanFloodRxSince calls fn, newest first, for each non-trace RX flood packet (the ones with a relay path) since cutoff.
 func (r *PacketRepo) ScanFloodRxSince(ctx context.Context, cutoff time.Time, fn func(*PacketRecord)) error {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, received_at, raw, route_type, payload_type, snr, rssi, packet_hash

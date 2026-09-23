@@ -652,67 +652,6 @@ func migrateV10(ctx context.Context, db dbExecer) error {
 	return nil
 }
 
-// migrateV16 adds hop_pins: which peer the operator says owns a path hash; pubkey NULL = none of the known ones.
-func migrateV16(ctx context.Context, db dbExecer) error {
-	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hop_pins (
-		hash   TEXT PRIMARY KEY,
-		pubkey BLOB
-	)`)
-	return err
-}
-
-// migrateV17 adds anything slots 15-18 left behind. Those slots were renumbered while the branch
-// was in flight, so a database stamped 16 by the earlier numbering skipped the two that moved up
-// and replayed the two that moved down: it ends up missing columns with no slot left to add them,
-// and the process dies on the first settings read. Every step here is guarded, so a database that
-// already has the lot passes straight through.
-func migrateV17(ctx context.Context, db dbExecer) error {
-	for _, c := range []struct{ table, column, ddl string }{
-		{"settings", "modem_token", `ALTER TABLE settings ADD COLUMN modem_token TEXT`},
-		{"settings", "packet_retention_days", `ALTER TABLE settings ADD COLUMN packet_retention_days INTEGER`},
-		{"triggers", "failover_pattern", `ALTER TABLE triggers ADD COLUMN failover_pattern TEXT NOT NULL DEFAULT ''`},
-		{"triggers", "failover_timeout", `ALTER TABLE triggers ADD COLUMN failover_timeout INTEGER NOT NULL DEFAULT 0`},
-	} {
-		has, err := columnExists(ctx, db, c.table, c.column)
-		if err != nil {
-			return err
-		}
-		if has {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
-			return fmt.Errorf("healing %s.%s: %w", c.table, c.column, err)
-		}
-	}
-	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hop_pins (
-		hash   TEXT PRIMARY KEY,
-		pubkey BLOB
-	)`)
-	return err
-}
-
-// migrateV15 adds settings.packet_retention_days; NULL = DefaultPacketRetentionDays.
-// This slot moved from 15 to 17 while the branch was in flight, so a database stamped by the older
-// numbering replays it; ADD COLUMN is fatal on a column that is already there, and a fatal
-// migration means the process will not start at all.
-func migrateV15(ctx context.Context, db dbExecer) error {
-	has, err := columnExists(ctx, db, "settings", "packet_retention_days")
-	if err != nil || has {
-		return err
-	}
-	_, err = db.ExecContext(ctx, `ALTER TABLE settings ADD COLUMN packet_retention_days INTEGER`)
-	return err
-}
-
-func columnExists(ctx context.Context, db dbExecer, table, column string) (bool, error) {
-	rows, err := db.QueryContext(ctx, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
-	if err != nil {
-		return false, fmt.Errorf("checking %s.%s: %w", table, column, err)
-	}
-	defer rows.Close()
-	return rows.Next(), rows.Err()
-}
-
 // migrateV12 clamps trigger path hash sizes to the 3-byte maximum every other config already used.
 // The bot form alone offered 4, and Config.Validate now rejects it — which would wall off every
 // later config save, since a save validates the whole assembled config, not just what changed.
@@ -796,4 +735,54 @@ func migrateV14(ctx context.Context, db dbExecer) error {
 		}
 	}
 	return nil
+}
+
+// migrateV15 adds settings.packet_retention_days; guarded because a pre-renumbering dev DB replays it.
+func migrateV15(ctx context.Context, db dbExecer) error {
+	has, err := columnExists(ctx, db, "settings", "packet_retention_days")
+	if err != nil || has {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE settings ADD COLUMN packet_retention_days INTEGER`)
+	return err
+}
+
+// migrateV16 adds hop_pins: the operator's owner for a path hash; pubkey NULL = none of the known peers.
+func migrateV16(ctx context.Context, db dbExecer) error {
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hop_pins (
+		hash   TEXT PRIMARY KEY,
+		pubkey BLOB
+	)`)
+	return err
+}
+
+// migrateV17 re-adds what a DB stamped while slots 15-18 were renumbered mid-branch skipped; every step is guarded.
+func migrateV17(ctx context.Context, db dbExecer) error {
+	for _, c := range []struct{ table, column, ddl string }{
+		{"settings", "modem_token", `ALTER TABLE settings ADD COLUMN modem_token TEXT`},
+		{"settings", "packet_retention_days", `ALTER TABLE settings ADD COLUMN packet_retention_days INTEGER`},
+		{"triggers", "failover_pattern", `ALTER TABLE triggers ADD COLUMN failover_pattern TEXT NOT NULL DEFAULT ''`},
+		{"triggers", "failover_timeout", `ALTER TABLE triggers ADD COLUMN failover_timeout INTEGER NOT NULL DEFAULT 0`},
+	} {
+		has, err := columnExists(ctx, db, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, c.ddl); err != nil {
+			return fmt.Errorf("healing %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return migrateV16(ctx, db)
+}
+
+func columnExists(ctx context.Context, db dbExecer, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return false, fmt.Errorf("checking %s.%s: %w", table, column, err)
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }

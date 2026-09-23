@@ -13,8 +13,7 @@ import (
 	meshcore "github.com/meshcore-go/meshcore-go"
 )
 
-// The connection web folds the flood paths in the packet log into routes toward us, so the UI can
-// show which relays carry traffic to us and how consistently.
+// The connection web folds the packet log's flood paths into routes toward us.
 
 const webSelfID = "self"
 
@@ -26,8 +25,7 @@ type webNodeJSON struct {
 	Lat  int32  `json:"lat"`
 	Lon  int32  `json:"lon"`
 	Hash string `json:"hash,omitempty"`
-	// Candidates is every repeater whose key starts with Hash, this node included when it is one;
-	// Pinned says the operator chose the owner rather than the distance pick.
+	// Candidates: every repeater whose key starts with Hash. Pinned: the operator chose, not the distance pick.
 	Candidates   []webCandidateJSON `json:"candidates"`
 	Pinned       bool               `json:"pinned"`
 	Observations int                `json:"observations"`
@@ -87,11 +85,13 @@ type webBuilder struct {
 	pins      map[string][]byte        // hash -> the operator's choice; a nil pubkey = none of the known peers
 	nodes     map[string]*webNode
 	chains    map[string]*webChain
-	// firstCopy is, per packet hash, the lowest id seen and the chain it came over.
-	firstCopy map[string]struct {
-		id  int64
-		key string
-	}
+	firstCopy map[string]webFirstCopy // per packet hash
+}
+
+// webFirstCopy is the lowest-id copy of a packet and the chain it came over.
+type webFirstCopy struct {
+	id  int64
+	key string
 }
 
 func newWebBuilder(peers []store.Peer, self *webLatLon, relay []byte, pins map[string][]byte) *webBuilder {
@@ -101,10 +101,7 @@ func newWebBuilder(peers []store.Peer, self *webLatLon, relay []byte, pins map[s
 		repByHash: map[string][]*store.Peer{},
 		nodes:     map[string]*webNode{},
 		chains:    map[string]*webChain{},
-		firstCopy: map[string]struct {
-			id  int64
-			key string
-		}{},
+		firstCopy: map[string]webFirstCopy{},
 	}
 	for i := range peers {
 		p := &peers[i]
@@ -134,8 +131,7 @@ func (b *webBuilder) add(rec *store.PacketRecord) {
 	hops := make([][]byte, 0, pkt.PathHashCount())
 	for i := 0; size > 0 && i+size <= len(pkt.Path); i += size {
 		hop := pkt.Path[i : i+size]
-		// ponytail: a path holding our repeater's hash is our own relay heard again, and the copy we
-		// heard before relaying is already counted; a foreign repeater sharing that hash is dropped too.
+		// ponytail: our repeater's hash in the path is our own relay heard back; a foreign repeater sharing it is dropped too.
 		if len(b.relay) >= size && bytes.Equal(hop, b.relay[:size]) {
 			return
 		}
@@ -201,17 +197,11 @@ func (b *webBuilder) add(rec *store.PacketRecord) {
 		n.packets[rec.PacketHash] = true
 	}
 	if fc, ok := b.firstCopy[rec.PacketHash]; !ok || rec.ID < fc.id {
-		b.firstCopy[rec.PacketHash] = struct {
-			id  int64
-			key string
-		}{rec.ID, key}
+		b.firstCopy[rec.PacketHash] = webFirstCopy{rec.ID, key}
 	}
 }
 
-// resolveHop names a hop hash. An operator's pin wins; otherwise, among colliding repeaters the one
-// nearest the next located node toward us does, and with nothing to measure from, the most recently
-// heard, as in linkPath.ts. Each pick is what the next hop out measures from, so a pin also corrects
-// the hops upstream of it.
+// resolveHop picks a hash's owner: a pin, else the candidate nearest `next`, else the most recently heard.
 func (b *webBuilder) resolveHop(hash []byte, next *webLatLon) (string, *webLatLon) {
 	h := hex.EncodeToString(hash)
 	cands := b.repByHash[h]
@@ -315,10 +305,7 @@ func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 
 func (s *Server) handleConnectionWeb(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	retention := store.DefaultPacketRetentionDays
-	if st, err := s.store.Settings.Get(ctx); err == nil && st.PacketRetentionDays != nil {
-		retention = *st.PacketRetentionDays
-	}
+	retention := s.store.Settings.PacketRetentionDays(ctx)
 	hours, _ := strconv.Atoi(r.URL.Query().Get("hours"))
 	if hours <= 0 {
 		hours = 24

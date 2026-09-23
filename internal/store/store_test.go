@@ -762,8 +762,7 @@ func TestPacketRepo_ListFilter(t *testing.T) {
 	}
 }
 
-// received_at is stored in the host's zone, so a prune that compared it as SQL text against a UTC
-// cutoff would keep or drop rows by the UTC offset; +13h is wider than any window this test spans.
+// received_at is host-zone text, so a SQL-text compare would be off by the UTC offset; +13h spans every window here.
 func TestPacketRepo_PruneBatchBeforeAcrossZones(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)
@@ -847,8 +846,7 @@ func TestHopPinRepo_NonePinIsPresent(t *testing.T) {
 	}
 }
 
-// A database stamped while slots 15-18 were being renumbered is missing whatever the slots that
-// moved up would have added, and no later slot would ever add them.
+// A DB stamped while slots 15-18 were renumbered is missing what the slots that moved up would have added.
 func TestMigrateV17_HealsShiftedSlots(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)
@@ -879,8 +877,7 @@ func TestMigrateV17_HealsShiftedSlots(t *testing.T) {
 	}
 }
 
-// migrateV15 shifted slots mid-branch, so a database stamped by the old numbering replays it.
-// Re-running must be a no-op, not the fatal "duplicate column" that stops the process booting.
+// A DB stamped by the old numbering replays migrateV15; it must no-op, not fail boot on "duplicate column".
 func TestMigrateV15_RerunIsHarmless(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)

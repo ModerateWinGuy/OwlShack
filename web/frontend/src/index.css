@@ -318,8 +318,7 @@
   }
 }
 
-/* Connection Web links: the dashes march from sender to receiver, so a still line still reads as
-   a direction. The dash period must match the stroke-dasharray the page sets, or it stutters. */
+/* Connection Web links march sender to receiver; the offset must equal LINK_DASH's period or it stutters. */
 .meshcore-web-link {
   animation: meshcore-link-flow 1.4s linear infinite;
 }

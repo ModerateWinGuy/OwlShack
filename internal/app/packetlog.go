@@ -92,8 +92,7 @@ func wirePacketLogger(mux *node.RadioMux, modem node.Modem, db *store.Store, srv
 	})
 }
 
-// packetPruneLoop drops packets older than the retention setting at startup and then hourly; the
-// setting is read each pass, so a Settings save needs no reload to take effect.
+// packetPruneLoop prunes at startup and hourly, re-reading the setting each pass so a save needs no reload.
 func packetPruneLoop(ctx context.Context, db *store.Store) {
 	tick := time.NewTicker(time.Hour)
 	defer tick.Stop()
@@ -107,14 +106,9 @@ func packetPruneLoop(ctx context.Context, db *store.Store) {
 	}
 }
 
-// prunePackets deletes in batches, each its own writer turn, so a long backlog never holds the
-// writer long enough to fill its queue and drop RX packet writes.
+// prunePackets deletes one batch per writer turn so a long backlog never fills the queue and drops RX writes.
 func prunePackets(ctx context.Context, db *store.Store) {
-	days := store.DefaultPacketRetentionDays
-	if s, err := db.Settings.Get(ctx); err == nil && s.PacketRetentionDays != nil {
-		days = *s.PacketRetentionDays
-	}
-	cutoff := time.Now().AddDate(0, 0, -days)
+	cutoff := time.Now().AddDate(0, 0, -db.Settings.PacketRetentionDays(ctx))
 	for more := true; more && ctx.Err() == nil; {
 		more = false
 		db.WriteSync(func() {

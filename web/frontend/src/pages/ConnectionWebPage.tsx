@@ -61,8 +61,7 @@ const WINDOWS = [
   { hours: 168, label: "7d" },
   { hours: 720, label: "30d" },
 ];
-// The slider hides a link carrying less than this percent of the busiest link's packets. Relative,
-// so the same setting thins a quiet hour and a busy week alike, and the busiest link always survives.
+// Slider max, as a percent of the busiest link: relative, so it thins a quiet hour and a busy week alike.
 const MAX_HIDE_PCT = 25;
 // The page reads the packet log, not the radio, so following live traffic costs no airtime.
 const REFETCH_MS = 60_000;
@@ -89,7 +88,8 @@ function dotIcon(color: string, ambiguous: boolean): L.DivIcon {
 
 const ORIGIN_ICON = originIcon();
 
-const located = (n: WebNode | undefined) => !!n && (n.lat !== 0 || n.lon !== 0);
+const located = (n: { lat: number; lon: number } | undefined) =>
+  !!n && (n.lat !== 0 || n.lon !== 0);
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 function km(a: [number, number] | null, b: [number, number] | null): string {
@@ -141,8 +141,7 @@ export function ConnectionWebPage() {
     [chains, via],
   );
 
-  // One line per node pair, drawn in the direction most of its traffic travels; a pair carries
-  // traffic both ways when routes differ, and then the busier direction wins the arrow of the dashes.
+  // One line per node pair, dashes flowing in the busier direction.
   const allPairs = useMemo(() => {
     const out = new Map<
       string,
@@ -195,23 +194,16 @@ export function ConnectionWebPage() {
     return s;
   }, [pairs]);
 
-  const unplaced = useMemo(
-    () =>
-      [...shownNodeIds]
-        .map((id) => nodes.get(id))
-        .filter((n): n is WebNode => !!n && !located(n))
-        .sort((a, b) => b.observations - a.observations),
-    [shownNodeIds, nodes],
-  );
-
-  const uncertain = useMemo(
-    () =>
-      [...shownNodeIds]
-        .map((id) => nodes.get(id))
-        .filter((n): n is WebNode => !!n && isUncertain(n))
-        .sort((a, b) => b.observations - a.observations),
-    [shownNodeIds, nodes],
-  );
+  const { unplaced, uncertain } = useMemo(() => {
+    const shown = [...shownNodeIds]
+      .map((id) => nodes.get(id))
+      .filter((n): n is WebNode => !!n)
+      .sort((a, b) => b.observations - a.observations);
+    return {
+      unplaced: shown.filter((n) => !located(n)),
+      uncertain: shown.filter(isUncertain),
+    };
+  }, [shownNodeIds, nodes]);
 
   const openNode = useCallback((id: string) => {
     // Every route ends at us, so filtering the map by "you" would hide nothing.
@@ -219,8 +211,7 @@ export function ConnectionWebPage() {
     setSelection({ kind: "node", id });
   }, []);
 
-  // pubkey: a candidate's key, null for "none of these", undefined to hand the hash back to the
-  // distance pick. The node's id changes with its owner, so the sheet and filter follow it.
+  // pubkey: a candidate, null = "none of these", undefined = automatic; the sheet and filter follow the new id.
   const repin = useCallback(
     async (oldId: string, hash: string, pubkey: string | null | undefined) => {
       try {
@@ -290,8 +281,7 @@ export function ConnectionWebPage() {
     if (!map || !layer) return;
     layer.clearLayers();
 
-    // Brightness carries volume on a log scale, because one busy link can out-count the rest of
-    // the mesh together and a linear scale would leave everything else invisible.
+    // Log-scale brightness: one busy link can out-count the rest of the mesh combined.
     const busiest = Math.max(...pairs.map((p) => p.count), 1);
     const drawn = [...pairs].sort((x, y) => x.share - y.share);
     for (const p of drawn) {
@@ -453,57 +443,22 @@ export function ConnectionWebPage() {
           className="h-[calc(100dvh-300px-var(--bottom-nav))] min-h-105 w-full"
         />
 
-        {uncertain.length > 0 && (
-          <details className="border-t border-border px-4 py-3">
-            <summary className="label-overline">
-              {uncertain.length} hop{uncertain.length === 1 ? "" : "s"} matching
-              more than one repeater (check these)
-            </summary>
-            <ul className="mt-2 divide-y divide-border">
-              {uncertain.map((n) => (
-                <li key={n.id}>
-                  <button
-                    type="button"
-                    onClick={() => openNode(n.id)}
-                    className="flex w-full items-center justify-between gap-3 py-2 text-left font-mono text-xs hover:text-primary"
-                  >
-                    <span className="truncate">
-                      {nodeName(n)} · hash {n.hash?.toUpperCase()}
-                    </span>
-                    <span className="tabular-nums text-muted-foreground">
-                      {n.candidates.length} matches · {n.observations} pkts
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
-
-        {unplaced.length > 0 && (
-          <details className="border-t border-border px-4 py-3">
-            <summary className="label-overline">
-              {unplaced.length} relay{unplaced.length === 1 ? "" : "s"} with no
-              position (not drawn)
-            </summary>
-            <ul className="mt-2 divide-y divide-border">
-              {unplaced.map((n) => (
-                <li key={n.id}>
-                  <button
-                    type="button"
-                    onClick={() => openNode(n.id)}
-                    className="flex w-full items-center justify-between gap-3 py-2 text-left font-mono text-xs hover:text-primary"
-                  >
-                    <span className="truncate">{nodeName(n)}</span>
-                    <span className="tabular-nums text-muted-foreground">
-                      {n.observations} pkts
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+        <NodeListDetails
+          nodes={uncertain}
+          summary={`${uncertain.length} hop${uncertain.length === 1 ? "" : "s"} matching more than one repeater (check these)`}
+          name={(n) => `${nodeName(n)} · hash ${n.hash?.toUpperCase()}`}
+          detail={(n) =>
+            `${n.candidates.length} matches · ${n.observations} pkts`
+          }
+          onOpen={openNode}
+        />
+        <NodeListDetails
+          nodes={unplaced}
+          summary={`${unplaced.length} relay${unplaced.length === 1 ? "" : "s"} with no position (not drawn)`}
+          name={nodeName}
+          detail={(n) => `${n.observations} pkts`}
+          onOpen={openNode}
+        />
       </section>
 
       <Sheet
@@ -549,6 +504,43 @@ function nodeName(n: WebNode | undefined, id?: string): string {
   if (id === SELF_ID) return "You";
   if (!n) return id ?? "?";
   return n.name || (n.hash ? `hash ${n.hash.toUpperCase()}` : n.id.slice(0, 8));
+}
+
+function NodeListDetails({
+  nodes,
+  summary,
+  name,
+  detail,
+  onOpen,
+}: {
+  nodes: WebNode[];
+  summary: string;
+  name: (n: WebNode) => string;
+  detail: (n: WebNode) => string;
+  onOpen: (id: string) => void;
+}) {
+  if (nodes.length === 0) return null;
+  return (
+    <details className="border-t border-border px-4 py-3">
+      <summary className="label-overline">{summary}</summary>
+      <ul className="mt-2 divide-y divide-border">
+        {nodes.map((n) => (
+          <li key={n.id}>
+            <button
+              type="button"
+              onClick={() => onOpen(n.id)}
+              className="flex w-full items-center justify-between gap-3 py-2 text-left font-mono text-xs hover:text-primary"
+            >
+              <span className="truncate">{name(n)}</span>
+              <span className="tabular-nums text-muted-foreground">
+                {detail(n)}
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 function Legend() {
@@ -786,12 +778,7 @@ function NodeDetail({
                     {c.name || c.id.slice(0, 8)}
                   </div>
                   <div className="font-mono text-[10px] text-muted-foreground">
-                    {km(
-                      self,
-                      c.lat !== 0 || c.lon !== 0
-                        ? peerLatLon(c.lat, c.lon)
-                        : null,
-                    )}{" "}
+                    {km(self, located(c) ? peerLatLon(c.lat, c.lon) : null)}{" "}
                     from you · heard {timeAgo(c.lastSeen)}
                   </div>
                 </div>
@@ -888,8 +875,7 @@ function NodeDetail({
   );
 }
 
-// One side of a node's traffic, one row per neighbour and busiest first. A row opens that
-// neighbour's own sheet, which is where the hops beyond it live.
+// One side of a node's traffic, busiest neighbour first; a row opens that neighbour's sheet.
 function NeighbourList({
   title,
   hops,
@@ -972,9 +958,7 @@ function NeighbourList({
   );
 }
 
-// One bar over the traffic through the node: the part that arrived before every other path, then
-// the repeats that came after another path brought the same packet. A mostly faded bar is a path
-// that carries many packets but always arrives second.
+// Solid = arrived first, faded = duplicates after another path; mostly faded = busy but always second.
 function RouteBar({
   share,
   firstShare,

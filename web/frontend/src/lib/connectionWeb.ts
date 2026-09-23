@@ -1,4 +1,5 @@
 // Folds the routes /api/connection-web returns into links and per-node route breakdowns.
+import { request } from "@/lib/configApi";
 
 export const SELF_ID = "self";
 
@@ -53,8 +54,7 @@ export interface WebLink {
   count: number;
   first: number;
   lastSeen: string;
-  // Of the traffic `from` passed on toward us, the part that went to `to` next: how strongly it
-  // prefers this hop over its alternatives.
+  // Of the traffic `from` passed on toward us, the part that went to `to` next.
   shareOut: number;
   // Of everything reaching `to` from a known node, the part that came over this link.
   shareIn: number;
@@ -66,52 +66,29 @@ export interface WebLink {
   rssiN: number;
 }
 
-// The traffic a node exchanged with one neighbour, in one direction. A null id on the feeding side
-// is traffic the node heard straight from a client.
+// A node's traffic with one neighbour, one direction; a null feeding id is traffic heard straight from a client.
 export interface WebNeighbour {
   id: string | null;
   count: number;
   first: number;
   // Of the copies heard through this node, the part that took this route; duplicates count.
   share: number;
-  // The part of those copies that beat every other path to us; the rest arrived as duplicates,
-  // after another path had already delivered that packet. Same denominator as share, so the two
-  // stack into one bar.
+  // The part that beat every other path to us; same denominator as share, so the two stack into one bar.
   firstShare: number;
   // Only the hop into us has a measured signal, so these stay 0 on every link further out.
   snrSum: number;
   snrN: number;
 }
 
-// chainThrough keeps a whole route when `via` is on it, or drops it. The route is kept whole, not
-// trimmed to the part after `via`: what reaches us through a relay is the question, and the hops
-// feeding it are half the answer.
-function chainThrough(chain: WebChain, via?: string): string[] | null {
-  if (!via) return chain.nodes;
-  return chain.nodes.includes(via) ? chain.nodes : null;
-}
-
 // A hop is uncertain while several repeaters share its hash and nobody has said which one it is.
 export const isUncertain = (n: WebNode) => n.candidates.length > 1 && !n.pinned;
 
-async function send(url: string, init: RequestInit): Promise<void> {
-  const res = await fetch(url, init);
-  if (!res.ok) {
-    const e = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(e.error || `HTTP ${res.status}`);
-  }
-}
-
 // pinHop says which peer owns a hash; null says none of the known repeaters does.
 export const pinHop = (hash: string, pubkey: string | null) =>
-  send(`/api/connection-web/pins/${hash}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pubkey }),
-  });
+  request(`/api/connection-web/pins/${hash}`, "PUT", { pubkey });
 
 export const unpinHop = (hash: string) =>
-  send(`/api/connection-web/pins/${hash}`, { method: "DELETE" });
+  request(`/api/connection-web/pins/${hash}`, "DELETE");
 
 export const linkKey = (from: string, to: string) => `${from}>${to}`;
 
@@ -123,8 +100,9 @@ export function foldLinks(
   const into = new Map<string, number>();
   const outOf = new Map<string, number>();
   for (const c of chains) {
-    const nodes = chainThrough(c, via);
-    if (!nodes) continue;
+    // Kept whole, not trimmed to after `via`: the hops feeding a relay are half of what it carries.
+    if (via && !c.nodes.includes(via)) continue;
+    const nodes = c.nodes;
     for (let i = 0; i + 1 < nodes.length; i++) {
       const from = nodes[i];
       const to = nodes[i + 1];
@@ -172,10 +150,7 @@ export function foldLinks(
   return links;
 }
 
-// nodeNeighbours splits the traffic through a node by the node next to it: who handed each packet
-// over, and who it went to next. Grouping by whole half-routes instead produces a row per distinct
-// combination of hops, which runs to thousands on a relay near us and answers a question nobody
-// asked; the hops further out are one click away on that neighbour's own sheet.
+// nodeNeighbours splits a node's traffic by adjacent hop; whole half-routes ran to thousands of rows near us.
 export function nodeNeighbours(
   chains: WebChain[],
   nodeId: string,
