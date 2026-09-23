@@ -66,15 +66,21 @@ export interface WebLink {
   rssiN: number;
 }
 
-export interface WebRoute {
-  nodes: string[];
+// The traffic a node exchanged with one neighbour, in one direction. A null id on the feeding side
+// is traffic the node heard straight from a client.
+export interface WebNeighbour {
+  id: string | null;
   count: number;
   first: number;
   // Of the copies heard through this node, the part that took this route; duplicates count.
   share: number;
-  // Of the packets whose first copy reached us through this node, the part that took this route.
-  // Differs from share whenever a route delivers duplicates after a faster one already arrived.
-  winShare: number;
+  // The part of those copies that beat every other path to us; the rest arrived as duplicates,
+  // after another path had already delivered that packet. Same denominator as share, so the two
+  // stack into one bar.
+  firstShare: number;
+  // Only the hop into us has a measured signal, so these stay 0 on every link further out.
+  snrSum: number;
+  snrN: number;
 }
 
 // chainThrough keeps a whole route when `via` is on it, or drops it. The route is kept whole, not
@@ -166,29 +172,60 @@ export function foldLinks(
   return links;
 }
 
-// routesThrough lists the whole routes that carried packets through a node, busiest first.
-export function routesThrough(chains: WebChain[], nodeId: string): WebRoute[] {
-  const byKey = new Map<string, WebRoute>();
+// nodeNeighbours splits the traffic through a node by the node next to it: who handed each packet
+// over, and who it went to next. Grouping by whole half-routes instead produces a row per distinct
+// combination of hops, which runs to thousands on a relay near us and answers a question nobody
+// asked; the hops further out are one click away on that neighbour's own sheet.
+export function nodeNeighbours(
+  chains: WebChain[],
+  nodeId: string,
+): { feeding: WebNeighbour[]; reaching: WebNeighbour[] } {
+  const feeding = new Map<string | null, WebNeighbour>();
+  const reaching = new Map<string | null, WebNeighbour>();
   let total = 0;
-  let firsts = 0;
-  for (const c of chains) {
-    const nodes = chainThrough(c, nodeId);
-    if (!nodes) continue;
-    const key = nodes.join(">");
-    let r = byKey.get(key);
-    if (!r) {
-      r = { nodes, count: 0, first: 0, share: 0, winShare: 0 };
-      byKey.set(key, r);
+  const add = (
+    into: Map<string | null, WebNeighbour>,
+    id: string | null,
+    c: WebChain,
+    // The chain's SNR belongs to its last link, so only that link may take it.
+    last: boolean,
+  ) => {
+    let hop = into.get(id);
+    if (!hop) {
+      hop = {
+        id,
+        count: 0,
+        first: 0,
+        share: 0,
+        firstShare: 0,
+        snrSum: 0,
+        snrN: 0,
+      };
+      into.set(id, hop);
     }
-    r.count += c.count;
-    r.first += c.first;
+    hop.count += c.count;
+    hop.first += c.first;
+    if (last) {
+      hop.snrSum += c.snrSum;
+      hop.snrN += c.snrN;
+    }
+  };
+  for (const c of chains) {
+    const at = c.nodes.indexOf(nodeId);
+    if (at < 0) continue;
+    const end = c.nodes.length - 1;
+    // A null feeder is a packet this node heard from a client: a path names repeaters only.
+    add(feeding, at > 0 ? c.nodes[at - 1] : null, c, at === end);
+    if (at < end) add(reaching, c.nodes[at + 1], c, at + 1 === end);
     total += c.count;
-    firsts += c.first;
   }
-  const routes = [...byKey.values()];
-  for (const r of routes) {
-    r.share = r.count / (total || 1);
-    r.winShare = r.first / (firsts || 1);
-  }
-  return routes.sort((a, b) => b.count - a.count);
+  const finish = (m: Map<string | null, WebNeighbour>) => {
+    const out = [...m.values()];
+    for (const hop of out) {
+      hop.share = hop.count / (total || 1);
+      hop.firstShare = hop.first / (total || 1);
+    }
+    return out.sort((a, b) => b.count - a.count);
+  };
+  return { feeding: finish(feeding), reaching: finish(reaching) };
 }

@@ -847,10 +847,55 @@ func TestHopPinRepo_NonePinIsPresent(t *testing.T) {
 	}
 }
 
+// A database stamped while slots 15-18 were being renumbered is missing whatever the slots that
+// moved up would have added, and no later slot would ever add them.
+func TestMigrateV17_HealsShiftedSlots(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := t.Context()
+	for _, q := range []string{
+		`ALTER TABLE settings DROP COLUMN modem_token`,
+		`ALTER TABLE triggers DROP COLUMN failover_timeout`,
+		`DROP TABLE hop_pins`,
+	} {
+		if _, err := st.db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := migrateV17(ctx, st.db); err != nil {
+		t.Fatalf("healing: %v", err)
+	}
+	for _, c := range [][2]string{{"settings", "modem_token"}, {"triggers", "failover_timeout"}} {
+		if has, err := columnExists(ctx, st.db, c[0], c[1]); err != nil || !has {
+			t.Errorf("%s.%s after healing: present %v, err %v", c[0], c[1], has, err)
+		}
+	}
+	if err := st.HopPins.Set(ctx, "ab", nil); err != nil {
+		t.Errorf("hop_pins after healing: %v", err)
+	}
+	// Running again on a healthy database must stay a no-op.
+	if err := migrateV17(ctx, st.db); err != nil {
+		t.Errorf("second run: %v", err)
+	}
+}
+
+// migrateV15 shifted slots mid-branch, so a database stamped by the old numbering replays it.
+// Re-running must be a no-op, not the fatal "duplicate column" that stops the process booting.
+func TestMigrateV15_RerunIsHarmless(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	if err := migrateV15(t.Context(), st.db); err != nil {
+		t.Fatalf("replaying migrateV15: %v", err)
+	}
+	if has, err := columnExists(t.Context(), st.db, "settings", "packet_retention_days"); err != nil || !has {
+		t.Fatalf("column after replay: present %v, err %v", has, err)
+	}
+}
+
 // Bump wantVersion whenever a migration is appended to the migrations slice.
 func TestStore_MigrateUserVersion(t *testing.T) {
 	t.Parallel()
-	const wantVersion = 18 // migrateV1, 2 squashed noop slots, migrateV2..migrateV16
+	const wantVersion = 19 // migrateV1, 2 squashed noop slots, migrateV2..migrateV17
 	st := newTestStore(t)
 	var v int
 	if err := st.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&v); err != nil {

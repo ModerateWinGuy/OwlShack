@@ -43,11 +43,12 @@ import {
   type ConnectionWeb,
   type WebLink,
   type WebNode,
+  type WebNeighbour,
   foldLinks,
   isUncertain,
   linkKey,
   pinHop,
-  routesThrough,
+  nodeNeighbours,
   SELF_ID,
   unpinHop,
 } from "@/lib/connectionWeb";
@@ -213,7 +214,8 @@ export function ConnectionWebPage() {
   );
 
   const openNode = useCallback((id: string) => {
-    setVia(id);
+    // Every route ends at us, so filtering the map by "you" would hide nothing.
+    setVia(id === SELF_ID ? null : id);
     setSelection({ kind: "node", id });
   }, []);
 
@@ -338,6 +340,7 @@ export function ConnectionWebPage() {
       points.push(self);
       L.marker(self, { icon: ORIGIN_ICON, zIndexOffset: 1000 })
         .bindTooltip("You")
+        .on("click", () => openNode(SELF_ID))
         .addTo(layer);
     }
 
@@ -381,8 +384,8 @@ export function ConnectionWebPage() {
       {error && <LoadErrorAlert message={error} onRetry={reload} />}
       {web && !web.self && (
         <p className="panel px-4 py-3 font-mono text-xs text-muted-foreground">
-          Set a position on your repeater or companion so links into you can be
-          drawn.
+          Set a position on your repeater or companion. The page then draws the
+          links into you.
         </p>
       )}
 
@@ -533,6 +536,7 @@ export function ConnectionWebPage() {
               nodes={nodes}
               self={posOf(SELF_ID)}
               onRepin={repin}
+              onOpenNode={openNode}
             />
           )}
         </SheetContent>
@@ -562,7 +566,7 @@ function Legend() {
     <div className="ml-auto flex flex-wrap items-center gap-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
       <span>width = how often a node picks this hop</span>
       <span>brightness = packets carried</span>
-      <span>dashes flow toward the receiver</span>
+      <span>dashes move toward the receiver</span>
       {swatch("var(--signal-strong)", "≥ 0 dB")}
       {swatch("var(--signal-weak)", "≥ −10 dB")}
       {swatch("var(--signal-dead)", "< −10 dB")}
@@ -638,7 +642,7 @@ function LinkDetail({
             >
               {isUncertain(n) && <TriangleAlert className="size-3 shrink-0" />}
               <span className="truncate">
-                {nodeName(n)} is only known by hash {n.hash?.toUpperCase()} ·{" "}
+                {nodeName(n)} · hash {n.hash?.toUpperCase()} ·{" "}
                 {n.candidates.length} match
                 {n.candidates.length === 1 ? "" : "es"}
                 {n.pinned ? " · pinned" : ""} · change
@@ -659,10 +663,10 @@ function LinkDetail({
               {name(l.from)} → {name(l.to)}
             </h3>
             <Stat label="Packets">{l.count}</Stat>
-            <Stat label={`${name(l.from)}'s traffic sent here`}>
+            <Stat label={`Share of ${name(l.from)}'s traffic`}>
               {pct(l.shareOut)}
             </Stat>
-            <Stat label={`Share of what reaches ${name(l.to)}`}>
+            <Stat label={`Share of traffic into ${name(l.to)}`}>
               {pct(l.shareIn)}
             </Stat>
             <Stat label="Arrived first">{pct(l.first / l.count)}</Stat>
@@ -686,7 +690,8 @@ function LinkDetail({
               </>
             ) : (
               <p className="py-1 font-mono text-xs text-muted-foreground">
-                No SNR: packets only carry the signal of the last hop into you.
+                A packet carries the signal of its last hop into you only. This
+                link never was that hop.
               </p>
             )}
             {feeders.length > 0 && (
@@ -720,6 +725,7 @@ function NodeDetail({
   nodes,
   self,
   onRepin,
+  onOpenNode,
 }: {
   id: string;
   web: ConnectionWeb;
@@ -730,13 +736,16 @@ function NodeDetail({
     hash: string,
     pubkey: string | null | undefined,
   ) => Promise<void>;
+  onOpenNode: (id: string) => void;
 }) {
   const n = nodes.get(id);
-  const routes = useMemo(() => routesThrough(web.chains, id), [web, id]);
+  const { feeding, reaching } = useMemo(
+    () => nodeNeighbours(web.chains, id),
+    [web, id],
+  );
   const name = (nid: string) => nodeName(nodes.get(nid), nid);
+  const isSelf = id === SELF_ID;
   const [busy, setBusy] = useState(false);
-  const [shown, setShown] = useState(ROUTES_PAGE);
-  const hidden = routes.slice(shown);
   const repin = async (pubkey: string | null | undefined) => {
     if (!n?.hash) return;
     setBusy(true);
@@ -748,8 +757,14 @@ function NodeDetail({
       <div>
         <h2 className="font-mono text-sm">{name(id)}</h2>
         <p className="font-mono text-xs text-muted-foreground">
-          {n?.type ?? "unknown type"}
-          {n?.hash && ` · hash ${n.hash.toUpperCase()}`}
+          {isSelf ? (
+            "your listener · the last hop of every route"
+          ) : (
+            <>
+              {n?.type ?? "unknown type"}
+              {n?.hash && ` · hash ${n.hash.toUpperCase()}`}
+            </>
+          )}
         </p>
       </div>
       {n?.hash && (
@@ -825,89 +840,169 @@ function NodeDetail({
           </div>
         </section>
       )}
-      {n && (
+      {isSelf && (
         <div className="border-t border-border pt-3">
-          <Stat label="Copies heard">{n.observations}</Stat>
-          <Stat label="Unique packets">{n.packets}</Stat>
-          <Stat label="Copies per packet">
-            {(n.observations / (n.packets || 1)).toFixed(2)}
+          <Stat label="Packets received">
+            {feeding.reduce((s, h) => s + h.count, 0)}
           </Stat>
-          <Stat label="Distinct routes">{routes.length}</Stat>
+          <Stat label="Nodes heard directly">{feeding.length}</Stat>
+          {(() => {
+            const sum = feeding.reduce((s, h) => s + h.snrSum, 0);
+            const n = feeding.reduce((s, h) => s + h.snrN, 0);
+            if (n === 0) return null;
+            return (
+              <Stat label="SNR avg" className={snrTextClass(sum / n)}>
+                {(sum / n).toFixed(1)} dB
+              </Stat>
+            );
+          })()}
         </div>
       )}
-      <section className="space-y-2 border-t border-border pt-3">
-        <h3 className="label-overline">Routes to you through this node</h3>
-        <p className="font-mono text-xs text-muted-foreground">
-          Copies counts every copy heard, duplicates included. First counts only
-          the copy that reached you first. A route with more copies than firsts
-          is usually a slower backup, delivering after another route already
-          did.
-        </p>
-        {routes.slice(0, shown).map((r) => (
-          <div key={r.nodes.join(">")} className="space-y-1">
-            <div className="font-mono text-xs">
-              {r.nodes.map((nid, i) => (
-                <span key={nid}>
-                  {i > 0 && <span className="text-muted-foreground"> → </span>}
-                  <span className={cn(nid === id && "text-primary")}>
-                    {name(nid)}
-                  </span>
-                </span>
-              ))}
-            </div>
-            <RouteBar
-              label="copies"
-              value={r.share}
-              detail={`${r.count} pkts`}
-              className="bg-primary"
-            />
-            <RouteBar
-              label="first"
-              value={r.winShare}
-              detail={`${r.first} pkts`}
-              className="bg-foreground/50"
-            />
-          </div>
-        ))}
-        {hidden.length > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShown((n) => n + ROUTES_PAGE)}
-            className="w-full rounded-none font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground"
-          >
-            show {Math.min(ROUTES_PAGE, hidden.length)} more · {hidden.length}{" "}
-            left, {pct(hidden.reduce((sum, r) => sum + r.share, 0))} of copies
-          </Button>
-        )}
-      </section>
+      {n && (
+        <div className="border-t border-border pt-3">
+          <Stat label="Packets received">{n.observations}</Stat>
+          <Stat label="Different packets">{n.packets}</Stat>
+          <Stat label="Times heard per packet">
+            {(n.observations / (n.packets || 1)).toFixed(2)}
+          </Stat>
+          <Stat label="Neighbours in / out">
+            {feeding.length} / {reaching.length}
+          </Stat>
+        </div>
+      )}
+      <NeighbourList
+        title={isSelf ? "Nodes you hear directly" : `Traffic into ${name(id)}`}
+        hops={feeding}
+        empty="local client traffic"
+        label={(hid) => `${name(hid)} →`}
+        onOpen={onOpenNode}
+      />
+      <NeighbourList
+        title={`Traffic from ${name(id)} to you`}
+        hops={reaching}
+        empty="local client traffic"
+        label={(hid) => `→ ${name(hid)}`}
+        onOpen={onOpenNode}
+      />
     </div>
   );
 }
 
-function RouteBar({
+// One side of a node's traffic, one row per neighbour and busiest first. A row opens that
+// neighbour's own sheet, which is where the hops beyond it live.
+function NeighbourList({
+  title,
+  hops,
+  empty,
   label,
-  value,
-  detail,
-  className,
+  onOpen,
 }: {
-  label: string;
-  value: number;
-  detail: string;
-  className: string;
+  title: string;
+  hops: WebNeighbour[];
+  empty: string;
+  label: (id: string) => string;
+  onOpen: (id: string) => void;
+}) {
+  const [shown, setShown] = useState(ROUTES_PAGE);
+  const hidden = hops.slice(shown);
+  if (hops.length === 0) return null;
+  return (
+    <section className="space-y-2 border-t border-border pt-3">
+      <h3 className="label-overline">
+        {title} · {hops.length}
+      </h3>
+      <div className="flex flex-wrap gap-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2 w-3 bg-primary" aria-hidden />
+          first to arrive
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2 w-3 bg-primary/30" aria-hidden />
+          arrived after another path
+        </span>
+      </div>
+      {hops.slice(0, shown).map((hop) => (
+        <div key={hop.id ?? "local"} className="space-y-1">
+          <div className="flex items-baseline justify-between gap-3">
+            {hop.id == null ? (
+              <span className="font-mono text-xs text-muted-foreground">
+                {empty}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onOpen(hop.id!)}
+                className="min-w-0 truncate text-left font-mono text-xs hover:text-primary"
+              >
+                {label(hop.id)}
+              </button>
+            )}
+            {hop.snrN > 0 && (
+              <span
+                className={cn(
+                  "shrink-0 font-mono text-[10px] tabular-nums",
+                  snrTextClass(hop.snrSum / hop.snrN),
+                )}
+              >
+                {(hop.snrSum / hop.snrN).toFixed(1)} dB
+              </span>
+            )}
+          </div>
+          <RouteBar
+            share={hop.share}
+            firstShare={hop.firstShare}
+            count={hop.count}
+            first={hop.first}
+          />
+        </div>
+      ))}
+      {hidden.length > 0 && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setShown((n) => n + ROUTES_PAGE)}
+          className="w-full rounded-none font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground"
+        >
+          show {Math.min(ROUTES_PAGE, hidden.length)} more · {hidden.length}{" "}
+          left, {pct(hidden.reduce((sum, hop) => sum + hop.share, 0))} of
+          traffic
+        </Button>
+      )}
+    </section>
+  );
+}
+
+// One bar over the traffic through the node: the part that arrived before every other path, then
+// the repeats that came after another path brought the same packet. A mostly faded bar is a path
+// that carries many packets but always arrives second.
+function RouteBar({
+  share,
+  firstShare,
+  count,
+  first,
+}: {
+  share: number;
+  firstShare: number;
+  count: number;
+  first: number;
 }) {
   return (
-    <div className="grid grid-cols-[3.5rem_1fr_6rem] items-center gap-2 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground tabular-nums">
-      <span>{label}</span>
-      <div className="h-1.5 bg-muted">
+    <div className="space-y-1">
+      <div className="flex h-2 w-full bg-muted">
+        <div className="bg-primary" style={{ width: pct(firstShare) }} />
         <div
-          className={cn("h-full", className)}
-          style={{ width: pct(value) }}
+          className="bg-primary/30"
+          style={{ width: pct(share - firstShare) }}
         />
       </div>
-      <span className="text-right">
-        {pct(value)} · {detail}
-      </span>
+      <div className="flex justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground tabular-nums">
+        <span>
+          {pct(share)} of traffic · {count} packets
+        </span>
+        <span>
+          {first} first · {count - first} later
+        </span>
+      </div>
     </div>
   );
 }
@@ -915,11 +1010,11 @@ function RouteBar({
 function identityNote(n: WebNode): string {
   const unknown = n.id.startsWith("h:");
   if (n.pinned && unknown)
-    return "You marked this hash as none of the known repeaters, so its links are not drawn.";
+    return "You marked this hash as an unknown repeater. The page does not draw its links.";
   if (n.pinned) return "You pinned this hash to this repeater.";
   if (n.candidates.length > 1)
-    return `${n.candidates.length} repeaters share this hash. The one nearest the next hop toward you was picked. If its links stretch impossibly far, pick the right one.`;
+    return `${n.candidates.length} repeaters share this hash. The page picked the one nearest the next hop toward you. If its links are too long to be real, select the correct repeater.`;
   if (n.candidates.length === 1)
-    return "Only one known repeater has this hash. If its links stretch impossibly far, the real relay is probably one we have never heard an advert from: choose none of these.";
-  return "No known repeater has this hash, so this relay cannot be placed.";
+    return "Only one known repeater has this hash. If its links are too long to be real, the true relay is a repeater that sent no advert we heard. Select none of these.";
+  return "No known repeater has this hash. The page cannot place this relay.";
 }

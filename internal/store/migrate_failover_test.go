@@ -55,8 +55,8 @@ func TestStore_UpgradeFailoverAndOpenHop(t *testing.T) {
 					t.Fatal(err)
 				}
 				// Bump alongside TestStore_MigrateUserVersion whenever a migration is appended.
-				if version != 18 {
-					t.Fatalf("schema version = %d, want 18", version)
+				if version != 19 {
+					t.Fatalf("schema version = %d, want 19", version)
 				}
 				settings, err := st.Settings.Get(ctx)
 				if err != nil {
