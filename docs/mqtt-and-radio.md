@@ -61,7 +61,8 @@ Our extensions, with no upstream equivalent: `tx_*`, `rx_*`, `hw_*`,
 
 ### What a status publish reads
 
-The heartbeat is every `StatusIntervalSeconds` (**300 s** default), so anything
+The heartbeat is every `StatusIntervalSeconds` (**300 s** default; the MQTT
+page saves 60 to 3600, `config.ValidateFeed`), so anything
 cached rather than read per publish is stale for up to five minutes. Per
 publish:
 
@@ -76,8 +77,9 @@ publish:
 
 `repeat` is the only one that needed handling. A CLI `set repeat` goes through
 `repeaterReconfigurer` -> `writeConfigTx`, which persists and SIGHUPs, so
-`reloadCompanions` re-applies the flag to every companion it returns — reused
-instances included, since those keep their observer. `SetRelaying` then
+`reloadMqtt` re-applies the flag to the feed, a reused one included.
+Only a repeater feed relays: a companion's feed always says `repeat:false`,
+whatever the repeater in the same process does. `SetRelaying` then
 publishes a status immediately **when the value actually changed**, so the feed
 does not carry a stale relay state for up to five minutes. It stays silent when
 the value is unchanged, because every reload re-applies it.
@@ -87,6 +89,14 @@ publishes its first `"online"` the instant a broker connects, so anything the
 status carries must be set **before** `Start`. Setting the relay flag after it
 made every restart advertise `repeat:off`, which CoreScope acts on — it drops
 the node from its path-hop disambiguator.
+
+Every connect publishes `"online"`, paho's own reconnects included (the
+`OnConnect` handler, from a client's second connect on; the first is announced
+by `retryConnect` or `refreshToken` once they adopt the client). Without it the
+retained offline will a broker publishes on a lost session stood until the next
+heartbeat. The ClientID is `meshcore_<first 16 of the key>_<host>`, with
+`_<broker name>` added only when another enabled broker shares the host, since
+two sessions on one ClientID take each other over.
 
 ### Consumer coverage
 

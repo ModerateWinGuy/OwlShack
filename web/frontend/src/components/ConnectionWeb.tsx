@@ -164,7 +164,7 @@ export function ConnectionSheet({
     >
       <SheetContent
         side="right"
-        className="w-full max-w-[100vw] overflow-y-auto border-l border-border bg-card p-0 sm:max-w-md"
+        className="w-full max-w-screen overflow-y-auto border-l border-border bg-card p-0 sm:max-w-md"
       >
         <SheetTitle className="sr-only">Connection detail</SheetTitle>
         <SheetDescription className="sr-only">
@@ -682,7 +682,7 @@ function RouteBar({
           style={{ width: pct(share - firstShare) }}
         />
       </div>
-      <div className="flex justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground tabular-nums">
+      <div className="flex flex-wrap justify-between gap-x-3 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground tabular-nums">
         <span>
           {pct(share)} of traffic · {count} packets
         </span>

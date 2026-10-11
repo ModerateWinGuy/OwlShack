@@ -29,12 +29,12 @@ func (rm *Client) SendRoomLogin(pubkeyHex, password string, syncSince uint32, ti
 	return rm.sendLogin(pubkeyHex, password, &syncSince, timeout, nil)
 }
 
-// AppLogin is the MeshCore app's login, a room's with syncSince set; sent hears the wait and whether it flooded once it is on its way.
-func (rm *Client) AppLogin(pubkeyHex, password string, syncSince *uint32, timeout time.Duration, sent func(wait time.Duration, flood bool)) (*LoginResult, error) {
-	return rm.sendLogin(pubkeyHex, password, syncSince, timeout, sent)
+// AppLogin is the MeshCore app's login, a room's with syncSince set; its tag is the node's key prefix, as the firmware's pending_login.
+func (rm *Client) AppLogin(pubkeyHex, password string, syncSince *uint32, timeout time.Duration, app AppSend) (*LoginResult, error) {
+	return rm.sendLogin(pubkeyHex, password, syncSince, timeout, &app)
 }
 
-func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, timeout time.Duration, sent func(time.Duration, bool)) (*LoginResult, error) {
+func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, timeout time.Duration, app *AppSend) (*LoginResult, error) {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
@@ -57,6 +57,8 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
 
+	// The firmware's sendLogin sends at most 15 bytes, all a node keeps of a password.
+	password = password[:min(len(password), 15)]
 	var plaintext []byte
 	if roomSyncSince != nil {
 		// Room login: [timestamp:4][sync_since:4][password:N]
@@ -117,14 +119,14 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
 
 	pub := peer.Identity.PublicKey()
-	if err := meshpath.Send(rm.node, pkt, rm.scopeFor(pub[:]), 0); err != nil {
+	if err := meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0); err != nil {
 		return nil, fmt.Errorf("sending login: %w", err)
 	}
 
 	wait := rm.replyTimeout(len(payload), outPath, hashSize, timeout)
 	rm.log.Debug("login sent", "peer", pubkeyHex[:12], "wait", wait)
-	if sent != nil {
-		sent(wait, outPath == nil)
+	if app != nil {
+		app.Sent(binary.LittleEndian.Uint32(pub[:4]), wait, outPath == nil)
 	}
 
 	select {

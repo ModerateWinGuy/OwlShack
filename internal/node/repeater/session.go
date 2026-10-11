@@ -151,7 +151,7 @@ func (r *Repeater) handleAnonSubReq(pkt *meshcore.Packet, clientPub [32]byte, se
 
 // regionsExport mirrors RegionMap::exportNamesTo(mask=DENY_FLOOD): flood-allowed names, "*" first when unscoped flood is allowed.
 func (r *Repeater) regionsExport() string {
-	return regionNames(r.cfgRegions(), false)
+	return regionNames(r.cfgRegions(), false, regionsReplyMax)
 }
 
 // handlePath learns a client's return route from a PATH packet body [pathLenByte][path][extraType][extra...]; no reciprocal path is sent, matching the firmware.

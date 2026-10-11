@@ -83,6 +83,12 @@ export function wrapLon(lon: number): number {
   return (((lon + 180) % 360) + 360) % 360 - 180;
 }
 
+// Leaflet makes every marker a keyboard button but names only an image one, so a divIcon marker is named here once it is on the map.
+export function labelMarker<T extends L.Marker>(marker: T, label: string): T {
+  marker.getElement()?.setAttribute("aria-label", label);
+  return marker;
+}
+
 // Peer coordinates are firmware fixed-point at 1e6 degrees. Passing the raw values to Leaflet puts
 // the marker nowhere at all.
 export function peerLatLon(lat: number, lon: number): [number, number] {

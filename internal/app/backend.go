@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/OwlShack/OwlShack/internal/api"
@@ -344,38 +346,97 @@ func (b *backend) PersistChannels(ctx context.Context) error {
 func persistChannels(ctx context.Context, db *store.Store, companions []*companion.Companion, strict bool) error {
 	var werr error
 	db.WriteSync(func() {
-		cfg, err := readConfigFromTables(ctx, db)
+		stored, err := db.Companions.List(ctx)
 		if err != nil {
-			werr = fmt.Errorf("reading config for persist: %w", err)
+			werr = fmt.Errorf("reading companions for persist: %w", err)
 			return
 		}
-		// By id: a companion the app just renamed still runs under its old name until the reload.
-		byID := make(map[int64]int, len(cfg.Companions))
-		for i, cc := range cfg.Companions {
-			byID[cc.ID] = i
-		}
 		for _, comp := range companions {
-			i, ok := byID[comp.ID()]
-			if !ok {
+			// By id: a companion the app just renamed still runs under its old name until the reload.
+			if !slices.ContainsFunc(stored, func(s store.Companion) bool { return s.ID == comp.ID() }) {
 				if strict {
 					werr = fmt.Errorf("companion %q is no longer configured", comp.Name())
 					return
 				}
 				continue
 			}
-			if channels := comp.StandaloneChannels(); len(channels) > 0 {
-				cl := config.ChannelList(channels)
-				cfg.Companions[i].Channels = &cl
-			} else {
-				cfg.Companions[i].Channels = nil
+			if werr = saveRunningChannels(ctx, db, comp); werr != nil {
+				return
 			}
 		}
-		werr = writeConfigToTables(ctx, db, cfg)
 	})
 	if werr != nil {
 		return werr
 	}
 	slog.Info("config persisted with channel changes")
+	return nil
+}
+
+// saveRunningChannels changes only the stored channels that differ from the running ones, so the rest keep their ids and their bots' links; a stored channel the node never let go of, such as one it had no slot for, stays.
+func saveRunningChannels(ctx context.Context, db *store.Store, comp *companion.Companion) error {
+	rows, err := db.Channels.ListByCompanion(ctx, comp.ID())
+	if err != nil {
+		return err
+	}
+	running := comp.StandaloneChannels()
+	taken := make([]bool, len(rows))
+	claim := func(match func(store.CompanionChannel) bool) int {
+		for i, r := range rows {
+			if !taken[i] && match(r) {
+				taken[i] = true
+				return i
+			}
+		}
+		return -1
+	}
+	row := make([]int, len(running))
+	for i, ref := range running {
+		row[i] = claim(func(r store.CompanionChannel) bool { return r.Name == ref.Name && *r.Slot == *ref.Slot })
+	}
+	for i, ref := range running {
+		if row[i] < 0 {
+			row[i] = claim(func(r store.CompanionChannel) bool { return r.Name == ref.Name })
+		}
+	}
+	// A rename keeps the key and slot, so the row keeps its id.
+	for i, ref := range running {
+		if row[i] < 0 {
+			key := companion.ChannelKey(ref)
+			row[i] = claim(func(r store.CompanionChannel) bool {
+				return *r.Slot == *ref.Slot && comp.Dropped(r.Name) && bytes.Equal(companion.ChannelKey(config.ChannelRef{Name: r.Name, PrivateKey: r.PrivateKey}), key)
+			})
+		}
+	}
+	held := make(map[int]bool)
+	for i, r := range rows {
+		switch {
+		case taken[i]:
+		case comp.Dropped(r.Name):
+			if err := db.Channels.Delete(ctx, r.ID); err != nil {
+				return err
+			}
+		default:
+			held[*r.Slot] = true
+		}
+	}
+	for i, ref := range running {
+		want := store.CompanionChannel{CompanionID: comp.ID(), Name: ref.Name, PrivateKey: ref.PrivateKey, FloodScope: string(ref.FloodScope), Slot: ref.Slot}
+		if held[*ref.Slot] {
+			want.Slot = nil // a stored channel not yet loaded holds it, and two in one slot would stop the next start
+		}
+		if row[i] < 0 {
+			if err := db.Channels.Create(ctx, &want); err != nil {
+				return err
+			}
+			continue
+		}
+		if r := rows[row[i]]; r.Name != want.Name || r.PrivateKey != want.PrivateKey || r.FloodScope != want.FloodScope || (want.Slot != nil && *r.Slot != *want.Slot) {
+			want.ID = r.ID
+			if err := db.Channels.Update(ctx, &want); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -468,9 +529,10 @@ func (b *backend) radioStats(poll bool) (api.RadioStatsInfo, bool) {
 		out.TxRequeued = tx.BusyRequeued
 		out.TxDroppedBusy = tx.BusyDropped
 		out.TxDroppedQueue = tx.QueueRejected
-	}
-	if r, ok := b.stats.(interface{ TxQueueLen() int }); ok {
+		// ponytail: a throwaway radio, as meshcore-go v1.7.0 gives the mux's queue length only to a radio on it; read the mux once it exports it.
+		r := b.mux.NewRadio()
 		out.TxQueueLen = r.TxQueueLen()
+		r.Close()
 	}
 	return out, true
 }

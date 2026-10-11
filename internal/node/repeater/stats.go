@@ -44,15 +44,6 @@ type NeighborInfo struct {
 	SecsAgo int64   `json:"secsAgo"`
 }
 
-// batteryReading is nil on a host with no cell; the binary STATUS reply keeps its 0, fixed firmware layout.
-func (r *Repeater) batteryReading() *int {
-	if !r.haveBattery.Load() {
-		return nil
-	}
-	batt := int(r.batteryMV.Load())
-	return &batt
-}
-
 func (r *Repeater) Stats() Stats {
 	r.mu.Lock()
 	started := r.startedAt
@@ -90,12 +81,14 @@ func (r *Repeater) Stats() Stats {
 		rssi := int(r.lastRSSI.Load())
 		s.LastSNR, s.LastRSSI = &snr, &rssi
 	}
-	if r.haveDeviceStats.Load() {
-		if v := r.noiseFloor.Load(); v != noNoiseFloor {
-			nf := int(v)
-			s.NoiseFloor = &nf
-		}
-		s.BatteryMV = r.batteryReading()
+	ds := r.deviceStats()
+	if ds.HaveNoiseFloor {
+		nf := int(ds.NoiseFloor)
+		s.NoiseFloor = &nf
+	}
+	if ds.HaveBattery { // nil on a host with no cell; the binary STATUS reply keeps its 0, fixed firmware layout
+		mv := int(ds.BatteryMV)
+		s.BatteryMV = &mv
 	}
 	if r.cfg.Latitude != nil {
 		s.Latitude = *r.cfg.Latitude

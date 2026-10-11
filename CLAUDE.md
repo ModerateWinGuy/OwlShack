@@ -35,7 +35,7 @@ regenerates `web/frontend/src/data/radio-presets.json` from it; don't hand-edit)
 
 ```bash
 ./build.sh           # from the repo root; SPA then version-stamped Go binary, mirrors CI
-go test -race ./...  # what CI runs (23 packages)
+go test -race ./...  # what CI runs (26 packages)
 screen -S meshcore -X quit; sleep 12
 screen -dmS meshcore bash -c 'exec ./OwlShack -vvv 2>&1 | tee /tmp/OwlShack2.log'
 python3 -c "import sqlite3; c=sqlite3.connect('file:meshcore.db?mode=ro', uri=True); print(c.execute('PRAGMA user_version').fetchone())"
@@ -66,7 +66,7 @@ checksums were kept is trusted as it stands. At release, record the new files wi
 `go test ./internal/store -run TestMigrations -release-migrations <tag>` and
 commit the sum before tagging; the release workflow fails on an unlisted file.
 What SQL cannot do goes in a Go step called from `migration.apply`, run after
-its file in the same transaction (004's packet backfill is the only one), and
+its file in the same transaction (004's packet backfill and 024's time rewrite), and
 it is frozen like the files. Each file runs in one transaction with its version bump, so it must
 not `BEGIN`. The store copies the DB to `meshcore.db.pre-v<from>-to-v<to>`
 before upgrading, keeps an unfinished upgrade's copy rather than copying a
@@ -121,7 +121,9 @@ region endpoints read directly.
 `?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)`,
 plus `journal_size_limit` and `synchronous(NORMAL)` (see `store.Open`).
 The mattn-style `_journal_mode=WAL` form is silently ignored, which once left
-the DB in rollback-journal mode with no busy timeout. Under NORMAL a commit is
+the DB in rollback-journal mode with no busy timeout. Each runs on every new
+pooled connection, so a DSN pragma must never write: `auto_vacuum` there lost
+writes to "database is locked". Under NORMAL a commit is
 only synced at a checkpoint, so `WriteSync` checkpoints after its closure: an
 HTTP save is on disk when it returns, and the RX path's `WriteAsync` is not.
 
@@ -234,7 +236,7 @@ is the place to look.
 - Status/Neighbors auto-fetch is once per page mount; after a long absence, hit Refresh.
 - Repeater and room sessions are in-memory — a restart drops every login.
 - Settings-section CLI `get`s run sequentially on purpose (half-duplex radio), though the client *could* correlate concurrent commands.
-- Go tests cover 23 packages; radio-facing paths are still manual. No frontend tests.
+- Go tests cover 26 packages; radio-facing paths are still manual. No frontend tests.
 - `MESHCORE_APP_FEATURES.md` is referenced by the docs but does not exist in the repo.
 
 ## Feature ideas not yet started

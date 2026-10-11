@@ -41,16 +41,13 @@ func (cl *ChannelList) UnmarshalJSON(data []byte) error {
 			result = append(result, ChannelRef{Name: s})
 			continue
 		}
-		// ChannelRef's TextUnmarshaler (for TOML strings) makes encoding/json reject the object form.
-		var ref struct {
-			Name       string     `json:"name"`
-			PrivateKey string     `json:"privateKey"`
-			FloodScope FloodScope `json:"floodScope"`
-		}
-		if err := json.Unmarshal(item, &ref); err != nil {
+		// ChannelRef's TextUnmarshaler (for TOML strings) makes encoding/json reject the object form; plainRef has its fields without it.
+		type plainRef ChannelRef
+		var ref ChannelRef
+		if err := json.Unmarshal(item, (*plainRef)(&ref)); err != nil {
 			return fmt.Errorf("channel entry must be a string or {name, privateKey} object: %w", err)
 		}
-		result = append(result, ChannelRef{Name: ref.Name, PrivateKey: ref.PrivateKey, FloodScope: ref.FloodScope})
+		result = append(result, ref)
 	}
 	*cl = result
 	return nil
@@ -327,6 +324,9 @@ func (c *Config) ApplyDefaults() {
 	for i := range c.Companions {
 		comp := &c.Companions[i]
 		comp.FloodScope = scopeOrInherit(comp.FloodScope)
+		if comp.App.QueueSize == 0 {
+			comp.App.QueueSize = AppQueueDefault
+		}
 		if comp.Channels != nil {
 			for j := range *comp.Channels {
 				(*comp.Channels)[j].FloodScope = scopeOrInherit((*comp.Channels)[j].FloodScope)

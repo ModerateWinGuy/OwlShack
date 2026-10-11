@@ -143,7 +143,7 @@ export function PeerDetailSheet({
         <SheetContent
           side="right"
           showCloseButton={false}
-          className="w-full max-w-[100vw] border-l border-border bg-card p-0 sm:max-w-md"
+          className="w-full max-w-screen border-l border-border bg-card p-0 sm:max-w-md"
         >
           <SheetTitle className="sr-only">Peer detail</SheetTitle>
           <SheetDescription className="sr-only">

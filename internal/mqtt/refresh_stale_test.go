@@ -22,7 +22,7 @@ func TestRefreshToken_FailureDropsStaleClientSoRetryCanDial(t *testing.T) {
 	bc := testBrokerClient("tok", "127.0.0.1", port, "token")
 	bc.cfg.Audience = "test"
 
-	client, err := o.connectBroker(bc.cfg, "TST")
+	client, err := o.connectBroker(bc)
 	if err != nil {
 		t.Fatalf("initial connect: %v", err)
 	}

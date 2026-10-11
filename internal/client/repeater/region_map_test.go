@@ -116,8 +116,81 @@ func TestReadRegions_WholeTree(t *testing.T) {
 	if m.Home != "nz" || !m.DefaultSupported || m.Default != "akl" || m.Partial {
 		t.Errorf("home=%q default=%q/%v partial=%v, want nz, akl, false", m.Home, m.Default, m.DefaultSupported, m.Partial)
 	}
-	if want := []string{"region", "region home", "region default"}; !slices.Equal(*asked, want) {
+	if want := []string{"region", "region home", "region default", "region list allowed", "region list denied"}; !slices.Equal(*asked, want) {
 		t.Errorf("asked %q, want only %q", *asked, want)
+	}
+}
+
+// The firmware's `region put a b` with b under a closes a loop, and printChildRegions never reaches either; the lists still name them.
+func TestReadRegions_ParentLoopIsPartial(t *testing.T) {
+	cli, _ := fakeRegionCLI(t, []string{"nz", "a", "b"}, []string{"*", "b", "a"}, nil, "", "")
+	if tree, _ := cli("region"); tree != "*^ F\n nz F\n" {
+		t.Fatalf("set-up: tree = %q, want the loop left out", tree)
+	}
+	m, err := readRegions(context.Background(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]RegionEntry{}
+	for _, r := range m.Regions {
+		got[r.Name] = r
+	}
+	if got["a"] != (RegionEntry{"a", "b", false}) || got["b"] != (RegionEntry{"b", "a", false}) || len(m.Regions) != 4 {
+		t.Errorf("regions = %+v, want nz and the looped a and b with their parents", m.Regions)
+	}
+	if !m.Partial {
+		t.Error("a map with regions no tree can show was read as whole")
+	}
+}
+
+// A lost list leaves the map partial, never fails a read that has the tree.
+func TestReadRegions_LostListIsPartial(t *testing.T) {
+	cutNames, cutParents := []string{"nz"}, []string{"*"}
+	for i := range 14 {
+		cutNames = append(cutNames, fmt.Sprintf("akl-%02d", i))
+		cutParents = append(cutParents, "nz")
+	}
+	for name, tc := range map[string]struct {
+		names, parents []string
+		lost           string
+		regions        int
+	}{
+		"whole tree, allowed lost": {[]string{"nz", "akl", "au"}, []string{"*", "nz", "*"}, "region list allowed", 4},
+		"whole tree, denied lost":  {[]string{"nz", "akl", "au"}, []string{"*", "nz", "*"}, "region list denied", 4},
+		"cut tree, allowed lost":   {cutNames, cutParents, "region list allowed", 0},
+	} {
+		cli, _ := fakeRegionCLI(t, tc.names, tc.parents, map[string]bool{"akl": true}, "", "", map[string]string{tc.lost: "LOST"})
+		m, err := readRegions(context.Background(), cli)
+		if err != nil {
+			t.Errorf("%s: the read failed: %v", name, err)
+			continue
+		}
+		if !m.Partial || tc.regions > 0 && len(m.Regions) != tc.regions || len(m.Regions) < 2 {
+			t.Errorf("%s: partial=%v with %d regions, want partial and the tree kept", name, m.Partial, len(m.Regions))
+		}
+	}
+}
+
+// A long list skips nothing a whole tree did not print, so it leaves that map whole.
+func TestReadRegions_LongListWithAWholeTree(t *testing.T) {
+	var names, parents []string
+	denied := map[string]bool{}
+	for i := range 5 {
+		n := fmt.Sprintf("region-%018d", i) // 25 bytes
+		names, parents, denied[n] = append(names, n), append(parents, "*"), true
+	}
+	cli, _ := fakeRegionCLI(t, names, parents, denied, "", "")
+	tree, _ := cli("region")
+	list, _ := cli("region list denied")
+	if len(tree) >= cliReplyMax || len(list) < listMaySkip {
+		t.Fatalf("set-up: tree %d bytes, list %d; want a whole tree and a list that may skip", len(tree), len(list))
+	}
+	m, err := readRegions(context.Background(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Partial || len(m.Regions) != len(names)+1 {
+		t.Errorf("partial=%v with %d regions, want whole with %d", m.Partial, len(m.Regions), len(names)+1)
 	}
 }
 

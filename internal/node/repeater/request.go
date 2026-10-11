@@ -114,12 +114,12 @@ func (r *Repeater) buildReqResponse(client *store.RepeaterACLEntry, reqType byte
 // selfReadings is what the radio board says about itself; one with no cell, or gone quiet, leaves the battery at 0 rather than a stale reading.
 func (r *Repeater) selfReadings() sensor.SelfReadings {
 	var out sensor.SelfReadings
-	if r.haveBattery.Load() {
-		out.BatteryVolts = float64(r.batteryMV.Load()) / 1000
+	ds := r.deviceStats()
+	if ds.HaveBattery {
+		out.BatteryVolts = float64(ds.BatteryMV) / 1000
 	}
-	if r.haveMCUTemp.Load() {
-		c := float64(r.mcuTempC.Load()) / 10
-		out.TempC = &c
+	if ds.HaveMCUTemp {
+		out.TempC = &ds.MCUTempC
 	}
 	return out
 }
@@ -136,15 +136,12 @@ func (r *Repeater) statusBody() []byte {
 	}
 
 	b := make([]byte, 56)
-	if r.haveDeviceStats.Load() { // real modem readings (poll cache)
-		if r.haveBattery.Load() {
-			binary.LittleEndian.PutUint16(b[0:2], uint16(r.batteryMV.Load())) // batt_milli_volts
-		}
-		nf := r.noiseFloor.Load()
-		if nf == noNoiseFloor {
-			nf = 0 // the firmware reports 0 until it has sampled
-		}
-		binary.LittleEndian.PutUint16(b[4:6], uint16(int16(nf))) // noise_floor (radio getNoiseFloor)
+	ds := r.deviceStats()
+	if ds.HaveBattery {
+		binary.LittleEndian.PutUint16(b[0:2], ds.BatteryMV) // batt_milli_volts
+	}
+	if ds.HaveNoiseFloor { // the firmware reports 0 until it has sampled
+		binary.LittleEndian.PutUint16(b[4:6], uint16(ds.NoiseFloor)) // noise_floor (radio getNoiseFloor)
 	}
 	if r.node != nil {
 		binary.LittleEndian.PutUint16(b[2:4], uint16(r.node.TxQueueLen())) // curr_tx_queue_len

@@ -7,14 +7,11 @@ import (
 	"fmt"
 )
 
-// AppQueueMax is the firmware WiFi build's OFFLINE_QUEUE_SIZE.
-const AppQueueMax = 256
-
 // AppQueueRepo holds the frames the MeshCore app collects with CMD_SYNC_NEXT_MESSAGE.
 type AppQueueRepo struct{ db *sql.DB }
 
-// Push queues a frame while the companion's app access is on; when full it drops the oldest channel message, or this one if none (firmware addToOfflineQueue).
-func (r *AppQueueRepo) Push(ctx context.Context, companionID int64, channel bool, frame []byte) error {
+// Push queues a frame while the companion's app access is on, holding at most size: past it the oldest channel messages go, or this one if only direct messages are left (firmware addToOfflineQueue).
+func (r *AppQueueRepo) Push(ctx context.Context, companionID int64, channel bool, frame []byte, size int) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("queueing app frame: %w", err)
@@ -26,14 +23,14 @@ func (r *AppQueueRepo) Push(ctx context.Context, companionID int64, channel bool
 			AND EXISTS (SELECT 1 FROM companions WHERE id = ?1 AND app_enabled = 1)`, companionID).Scan(&n); err != nil {
 		return fmt.Errorf("counting app queue: %w", err)
 	}
-	if n >= AppQueueMax {
+	if over := n - size + 1; over > 0 {
 		res, err := tx.ExecContext(ctx, `
-			DELETE FROM app_queue WHERE id = (SELECT min(id) FROM app_queue WHERE companion_id = ? AND channel = 1)`, companionID)
+			DELETE FROM app_queue WHERE id IN (SELECT id FROM app_queue WHERE companion_id = ? AND channel = 1 ORDER BY id LIMIT ?)`, companionID, over)
 		if err != nil {
 			return fmt.Errorf("making room in app queue: %w", err)
 		}
-		if gone, _ := res.RowsAffected(); gone == 0 {
-			return nil
+		if gone, _ := res.RowsAffected(); gone < int64(over) {
+			return tx.Commit()
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `

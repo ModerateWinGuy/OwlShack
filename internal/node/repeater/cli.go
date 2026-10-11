@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	meshcore "github.com/OwlShack/meshcore-go"
 
@@ -29,6 +30,9 @@ const (
 	neighborsTextMax = 134
 	// Firmware RegionMap::exportTo(reply, 160): the tree is cut at 159 bytes.
 	regionTreeMax = 159
+	// Firmware exportNamesTo max_len: 160 for `region list`, sizeof(reply_data)-12 for the anon REGIONS reply.
+	regionListMax   = 160
+	regionsReplyMax = meshcore.MaxPacketPayload - 12
 
 	// Firmware NodePrefs buffer sizes (StrHelper::strncpy truncates to size-1).
 	maxNameLen          = 31
@@ -66,7 +70,7 @@ func (r *Repeater) handleCLI(pkt *meshcore.Packet) {
 	}
 	isRetry := ts == client.LastTimestamp
 	flags := plain[4] >> 2
-	if flags != meshcore.TxtTypeCLIData && flags != meshcore.TxtTypePlain {
+	if flags != meshcore.TxtTypeCLIData && flags != meshcore.TxtTypePlain && flags != meshcore.TxtTypeCLICommand {
 		return
 	}
 
@@ -615,10 +619,9 @@ func (r *Repeater) cliRegion(cmd string) string {
 		}
 		name, ok := regionByPrefix(cfg.Regions, arg)
 		if !ok {
-			if !isValidRegionName(arg) {
-				return "Err - region table full" // putRegion refused it
+			if _, name, ok = putRegion(cfg.Regions, arg, config.WildcardRegion); !ok {
+				return "Err - region table full"
 			}
-			name = truncate(arg, maxRegionNameLen)
 		}
 		if name == config.WildcardRegion {
 			return "Err - region table full" // our config can't scope adverts to "*"
@@ -677,7 +680,7 @@ func (r *Repeater) cliRegion(cmd string) string {
 	case n >= 3 && sub == "list":
 		switch arg {
 		case "allowed", "denied":
-			if names := regionNames(cfg.Regions, arg == "denied"); names != "" {
+			if names := regionNames(cfg.Regions, arg == "denied", regionListMax); names != "" {
 				return names
 			}
 			return "-none-"
@@ -770,10 +773,12 @@ func regionParent(regions []config.RepeaterRegion, name string) string {
 	return ""
 }
 
-// putRegion is RegionMap::putRegion on a copy: an existing region moves under parent, a new one is added denying flood.
-// It also refuses a move into the region's own subtree, which the firmware accepts and then drops from its tree.
+// putRegion is RegionMap::putRegion on a copy, refusing a move into the region's own subtree and a name not UTF-8 once cut to 30 bytes.
 func putRegion(regions []config.RepeaterRegion, name, parent string) ([]config.RepeaterRegion, string, bool) {
 	if !isValidRegionName(name) || name == config.WildcardRegion {
+		return nil, "", false
+	}
+	if name = truncate(name, maxRegionNameLen); !utf8.ValidString(name) {
 		return nil, "", false
 	}
 	if existing, ok := regionByName(regions, name); ok {
@@ -799,7 +804,6 @@ func putRegion(regions []config.RepeaterRegion, name, parent string) ([]config.R
 	if named >= meshcore.MaxRegions {
 		return nil, "", false
 	}
-	name = truncate(name, maxRegionNameLen)
 	return append(slices.Clone(regions), config.RepeaterRegion{Name: name, Parent: parent, DenyFlood: true}), name, true
 }
 
@@ -951,18 +955,19 @@ func (r *Repeater) cfgSnapshot() config.RepeaterConfig {
 	return r.cfg
 }
 
-// regionNames renders RegionMap::exportNamesTo(mask=DENY_FLOOD): names matching `denied`, "*" first, leading "#" stripped.
-func regionNames(regions []config.RepeaterRegion, denied bool) string {
-	var names []string
+// regionNames renders RegionMap::exportNamesTo(mask=DENY_FLOOD): names matching `denied`, "*" first, leading "#" stripped, and a name that doesn't fit maxLen skipped.
+func regionNames(regions []config.RepeaterRegion, denied bool, maxLen int) string {
+	var b []byte
 	if regionDenies(regions, config.WildcardRegion) == denied {
-		names = append(names, config.WildcardRegion)
+		b = append(b, "*,"...)
 	}
 	for _, rg := range regions {
-		if rg.Name != config.WildcardRegion && rg.DenyFlood == denied {
-			names = append(names, strings.TrimPrefix(rg.Name, "#"))
+		name := strings.TrimPrefix(rg.Name, "#")
+		if rg.Name != config.WildcardRegion && rg.DenyFlood == denied && len(b)+len(name)+2 < maxLen {
+			b = append(append(b, name...), ',')
 		}
 	}
-	return strings.Join(names, ",")
+	return strings.TrimSuffix(string(b), ",")
 }
 
 // regionTree renders the firmware exportTo shape: wildcard first, children indented one space, "^" for home and " F" for flood-allowed.

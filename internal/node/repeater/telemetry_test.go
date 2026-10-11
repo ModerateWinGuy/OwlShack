@@ -32,13 +32,11 @@ func oneRow(ch, typ byte, metric sensor.Metric, v float64) func() ([]sensor.Chan
 
 func telemetryRepeater(t *testing.T, hook func() ([]sensor.ChannelEntry, []sensor.Status)) *Repeater {
 	t.Helper()
-	r := &Repeater{
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		telemetry: hook,
+	return &Repeater{
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		telemetry:  hook,
+		boardStats: func() DeviceStats { return DeviceStats{BatteryMV: 4000, HaveBattery: true} },
 	}
-	r.batteryMV.Store(4000)
-	r.haveBattery.Store(true)
-	return r
 }
 
 // params[0] is an inverse mask, so 0x00 asks for everything.

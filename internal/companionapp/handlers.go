@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,6 +40,8 @@ type Env struct {
 	// Tx is the shared radio's transmit counters, every node's sends and relays together.
 	Tx      interface{ TxStats() node.TxStats }
 	Started time.Time
+	// QueueSize is how many messages are held while the app is away.
+	QueueSize int
 }
 
 // Settings saves what the app changes on its companion, through the checks and reload the UI's saves take.
@@ -51,7 +54,12 @@ type Settings interface {
 type session struct {
 	appVer byte
 	// scope overrides the companion's own choice when the app set one; nil leaves it alone.
-	scope *config.FloodScope
+	scope *companion.SendScope
+}
+
+// appSend is how a request the app makes goes out: in the app's scope, telling sent when it leaves.
+func (c *conn) appSend(comp *companion.Companion, pub []byte, sent func(uint32, time.Duration, bool)) repeater.AppSend {
+	return repeater.AppSend{Scope: comp.AppRegion(pub, c.session.scope), Sent: sent}
 }
 
 // handle answers one command. Only what is listed is served; everything else is refused as the firmware refuses a command it lacks.
@@ -119,8 +127,9 @@ func (c *conn) handle(d []byte) {
 		c.send(okOr(comp.Repeaters().ResetPeerPath(hex.EncodeToString(d[1:33])), mc.ErrCodeNotFound))
 
 	case cmd == mc.CmdGetAdvertPath && n >= 34:
+		// Only an advert heard gives a path; a node known some other way has none, as in the firmware's table.
 		p, err := s.st.Peers.GetByPubKey(ctx, d[2:34])
-		if err != nil || p == nil {
+		if err != nil || p == nil || p.LastAdvertTS == 0 {
 			c.send(errFrame(mc.ErrCodeNotFound))
 			return
 		}
@@ -155,7 +164,7 @@ func (c *conn) handle(d []byte) {
 		var frame []byte
 		ok, err := s.st.AppQueue.Waiting(ctx, s.id)
 		if ok && err == nil {
-			s.st.WriteSync(func() { frame, ok, err = s.st.AppQueue.Pop(ctx, s.id) })
+			frame, ok, err = s.pop()
 		}
 		switch {
 		case err != nil:
@@ -176,15 +185,8 @@ func (c *conn) handle(d []byte) {
 			c.send(errFrame(mc.ErrCodeUnsupportedCmd))
 			return
 		}
-		err := comp.SendAppChannelMessage(int(d[2]), string(d[7:]), c.session.scope)
-		switch {
-		case errors.Is(err, companion.ErrUnknownChannel):
-			c.send(errFrame(mc.ErrCodeNotFound))
-		case err != nil:
-			c.send(errFrame(mc.ErrCodeTableFull))
-		default:
-			c.send(okFrame())
-		}
+		// The firmware answers NOT_FOUND for an empty slot and a post it could not send alike.
+		c.send(okOr(comp.SendAppChannelMessage(int(d[2]), string(d[7:]), c.session.scope), mc.ErrCodeNotFound))
 
 	case cmd == mc.CmdGetChannel && n >= 2:
 		if int(d[1]) >= maxChannels {
@@ -203,6 +205,14 @@ func (c *conn) handle(d []byte) {
 
 	case cmd == mc.CmdGetDeviceTime:
 		c.send(currTimeFrame(uint32(time.Now().Unix())))
+
+	case cmd == mc.CmdSetDeviceTime && n >= 5:
+		// The firmware takes a later time and refuses an earlier one; the host keeps its own clock, so a later one changes nothing here.
+		if time.Unix(int64(binary.LittleEndian.Uint32(d[1:5])), 0).Before(time.Now().Add(-clockSlack)) {
+			c.send(errFrame(mc.ErrCodeIllegalArg))
+			return
+		}
+		c.send(okFrame())
 
 	case cmd == mc.CmdGetBattAndStorage:
 		var mv uint16
@@ -245,21 +255,22 @@ func (c *conn) handle(d []byte) {
 			c.send(okFrame())
 			return
 		}
-		sc, ok := regionByKey(env.Regions, d[2:18])
+		// Any key is taken, as by the firmware, and sent with as it is; one for a region not listed is stored as an unknown region.
+		key := meshcore.RegionKey(d[2:18])
+		label, ok := regionByKey(env.Regions, key[:])
 		if !ok {
-			c.send(errFrame(mc.ErrCodeIllegalArg))
-			return
+			label = config.ScopeUnknown
 		}
-		c.session.scope = &sc
+		c.session.scope = &companion.SendScope{Label: label, Region: meshcore.NewRegionFromKey("", key)}
 		c.send(okFrame())
 
 	case cmd == mc.CmdSetFloodScopeKey && n >= 2 && d[1] == 1:
-		everywhere := config.ScopeEverywhere
-		c.session.scope = &everywhere
+		c.session.scope = &companion.SendScope{Label: config.ScopeEverywhere}
 		c.send(okFrame())
 
 	case cmd == mc.CmdSendLogin && n >= 33:
-		c.login(comp, d[1:33], string(d[33:]))
+		password, _, _ := strings.Cut(string(d[33:]), "\x00")
+		c.login(comp, d[1:33], password)
 
 	case cmd == mc.CmdSendStatusReq && n >= 33:
 		c.request(comp, d[1:33], []byte{meshcore.ReqTypeGetStatus, 0, 0, 0, 0}, func(_ uint32, pub [32]byte, data []byte) []byte {
@@ -317,7 +328,7 @@ func (c *conn) handle(d []byte) {
 				}
 				r.PathHashSize = &size
 				return nil
-			}))
+			}, func(k *companion.Companion) bool { return int(k.PathHashSize()) == size }))
 		}
 
 	case cmd == mc.CmdSetAdvertName && n >= 2:
@@ -328,7 +339,7 @@ func (c *conn) handle(d []byte) {
 			}
 			r.Name = name
 			return nil
-		}))
+		}, func(k *companion.Companion) bool { return k.AppConfig().Name == name }))
 
 	case cmd == mc.CmdSetAdvertLatLon && n >= 9:
 		lat, lon := int32(binary.LittleEndian.Uint32(d[1:5])), int32(binary.LittleEndian.Uint32(d[5:9]))
@@ -346,6 +357,9 @@ func (c *conn) handle(d []byte) {
 				r.Latitude, r.Longitude = &la, &lo
 			}
 			return nil
+		}, func(k *companion.Companion) bool {
+			curLat, curLon := latLonE6(k.AppConfig())
+			return curLat == lat && curLon == lon
 		}))
 
 	case cmd == mc.CmdSetOtherParams && n >= 2:
@@ -368,7 +382,7 @@ func (c *conn) handle(d []byte) {
 			}
 			r.FloodScope = string(scope)
 			return nil
-		}))
+		}, func(k *companion.Companion) bool { return k.AppConfig().FloodScope == scope }))
 
 	case cmd == mc.CmdSetChannel && n >= 2+32+32:
 		c.send(errFrame(mc.ErrCodeUnsupportedCmd)) // the firmware's 32-byte keys are not supported yet either
@@ -479,7 +493,7 @@ func (s *Server) contactByPrefix(prefix []byte) (*store.Contact, bool) {
 
 func (c *conn) sendText(comp *companion.Companion, d []byte) {
 	s := c.srv
-	txtType, ts, text := d[1], binary.LittleEndian.Uint32(d[3:7]), string(d[13:])
+	txtType, text := d[1], string(d[13:])
 	k, ok := s.contactByPrefix(d[7:13])
 	if !ok {
 		c.send(errFrame(mc.ErrCodeNotFound))
@@ -493,18 +507,28 @@ func (c *conn) sendText(comp *companion.Companion, d []byte) {
 	case meshcore.TxtTypePlain:
 		// The app resends after est_timeout with the same timestamp; while ours is still trying, that is the same message.
 		key := pubHex + "|" + string(d[3:7]) + "|" + text
-		if sent, ok := s.inFlight(key); ok {
-			c.send(sentFrame(sent.flood, sent.tag, uint32(time.Until(sent.until).Milliseconds())))
-			return
-		}
 		tag := s.nextTag()
-		start := time.Now()
-		res, err := comp.SendAppDM(pubHex, text, c.session.scope, func(r node.DMSendResult) {
-			s.doneFlight(key)
+		confirmed := func(r node.DMSendResult) {
+			s.endFlight(key)
 			if r.Confirmed {
 				s.push(sendConfirmedFrame(tag, uint32(r.RoundTrip.Milliseconds())))
 			}
-		})
+		}
+		f, ok := s.flight(key)
+		if ok && !f.over {
+			c.send(sentFrame(f.flood, f.tag, uint32(time.Until(f.until).Milliseconds())))
+			return
+		}
+		start := time.Now()
+		var res companion.AppDMSend
+		var err error
+		if ok {
+			// Ours are over, so this is one more attempt at the same message, as the firmware sends each the app asks for.
+			res, err = f.resend(int(d[2]), confirmed)
+			res.Resend = f.resend
+		} else {
+			res, err = comp.SendAppDM(pubHex, text, c.session.scope, confirmed)
+		}
 		if errors.Is(err, node.ErrTextTooLong) {
 			c.send(errFrame(mc.ErrCodeIllegalArg))
 			return
@@ -513,25 +537,14 @@ func (c *conn) sendText(comp *companion.Companion, d []byte) {
 			c.send(errFrame(mc.ErrCodeTableFull))
 			return
 		}
-		s.startFlight(key, flight{tag: tag, flood: res.Flood, until: start.Add(res.Timeout)})
+		s.startFlight(key, flight{tag: tag, flood: res.Flood, until: start.Add(res.Timeout), resend: res.Resend})
 		c.send(sentFrame(res.Flood, tag, uint32(res.Timeout.Milliseconds())))
 
 	case meshcore.TxtTypeCLIData, meshcore.TxtTypeCLICommand:
-		// A CLI command is answered with a CLI reply, not an ACK, so the firmware gives the app no ACK to wait for.
-		rep := comp.Repeaters()
-		if rep.Session(pubHex) == nil {
-			c.send(errFrame(mc.ErrCodeBadState))
-			return
-		}
-		c.send(sentFrame(k.OutPath == nil, 0, uint32(reqTimeout.Milliseconds())))
-		go func() {
-			reply, err := rep.SendCLI(pubHex, text, reqTimeout)
-			if err != nil {
-				s.log.Info("app CLI command got no reply", "to", pubHex[:12], "error", err)
-				return
-			}
-			s.queue(false, contactMsgFrame(0, 0xFF, pub, meshcore.TxtTypeCLIData, ts, nil, reply))
-		}()
+		// Sent as the firmware's sendCommandData: no login of ours needed, and a CLI reply, not an ACK, answers it, which reaches the app as a message whenever it comes.
+		c.async(func(sent func(uint32, time.Duration, bool)) error {
+			return comp.Repeaters().AppCLI(pubHex, text, txtType, d[2], reqTimeout, c.appSend(comp, pub[:], sent))
+		})
 
 	default:
 		c.send(errFrame(mc.ErrCodeUnsupportedCmd))
@@ -557,9 +570,8 @@ func (c *conn) login(comp *companion.Companion, pubBytes []byte, password string
 		}
 		since = &v
 	}
-	tag := binary.LittleEndian.Uint32(pubBytes[:4])
 	c.async(func(sent func(uint32, time.Duration, bool)) error {
-		res, err := comp.Repeaters().AppLogin(pubHex, password, since, reqTimeout, func(wait time.Duration, flood bool) { sent(tag, wait, flood) })
+		res, err := comp.Repeaters().AppLogin(pubHex, password, since, reqTimeout, c.appSend(comp, pubBytes, sent))
 		if err == nil {
 			s.push(loginFrame(pub, res.Reply))
 		}
@@ -578,10 +590,10 @@ func (c *conn) request(comp *companion.Companion, pubBytes, body []byte, push fu
 	copy(pub[:], pubBytes)
 	c.async(func(sent func(uint32, time.Duration, bool)) error {
 		var tag uint32
-		data, err := comp.Repeaters().AppRequest(hex.EncodeToString(pubBytes), body, reqTimeout, func(t uint32, w time.Duration, f bool) {
+		data, err := comp.Repeaters().AppRequest(hex.EncodeToString(pubBytes), body, reqTimeout, c.appSend(comp, pubBytes, func(t uint32, w time.Duration, f bool) {
 			tag = t
 			sent(t, w, f)
-		})
+		}))
 		if err == nil {
 			s.push(push(tag, pub, data))
 		}
@@ -593,10 +605,10 @@ func (c *conn) anonRequest(comp *companion.Companion, pubBytes, body []byte) {
 	s := c.srv
 	c.async(func(sent func(uint32, time.Duration, bool)) error {
 		var tag uint32
-		data, err := comp.Repeaters().AppAnonRequest(hex.EncodeToString(pubBytes), body, reqTimeout, func(t uint32, w time.Duration, f bool) {
+		data, err := comp.Repeaters().AppAnonRequest(hex.EncodeToString(pubBytes), body, reqTimeout, c.appSend(comp, pubBytes, func(t uint32, w time.Duration, f bool) {
 			tag = t
 			sent(t, w, f)
-		})
+		}))
 		if err == nil {
 			s.push(binaryPush(tag, data))
 		}
@@ -613,7 +625,7 @@ func (c *conn) pathDiscovery(comp *companion.Companion, pubBytes []byte) {
 	var pub [32]byte
 	copy(pub[:], pubBytes)
 	c.async(func(sent func(uint32, time.Duration, bool)) error {
-		out, in, err := comp.Repeaters().AppPathDiscovery(hex.EncodeToString(pubBytes), reqTimeout, sent)
+		out, in, err := comp.Repeaters().AppPathDiscovery(hex.EncodeToString(pubBytes), reqTimeout, c.appSend(comp, pubBytes, sent))
 		if err == nil {
 			s.push(pathDiscoveryPush(pub, out.Len, out.Hops, in.Len, in.Hops))
 		}
@@ -651,7 +663,7 @@ func sendErrCode(err error) byte {
 func (c *conn) trace(comp *companion.Companion, d []byte) {
 	tag, auth, flags, path := binary.LittleEndian.Uint32(d[1:5]), binary.LittleEndian.Uint32(d[5:9]), d[9], d[10:]
 	sz := flags & 0x03
-	if sz > 2 || len(path)%(1<<sz) != 0 || len(path)>>sz > 64 {
+	if len(path)%(1<<sz) != 0 || len(path)>>sz > 64 {
 		c.send(errFrame(mc.ErrCodeIllegalArg))
 		return
 	}
@@ -735,15 +747,26 @@ func (c *conn) addUpdateContact(comp *companion.Companion, d []byte) []byte {
 	if name == "" {
 		return errFrame(mc.ErrCodeIllegalArg)
 	}
+	lastAdvert := binary.LittleEndian.Uint32(d[132:136])
 	var werr error
 	s.st.WriteSync(func() {
 		if !isContact {
-			if p, _ := s.st.Peers.GetByPubKey(ctx, pub); p == nil {
+			p, _ := s.st.Peers.GetByPubKey(ctx, pub)
+			if p == nil {
 				if werr = s.st.Peers.Upsert(ctx, &store.Peer{PubKey: pub, Name: name, Type: typeName, LastSeen: time.Now()}); werr != nil {
 					return
 				}
 			}
 			if werr = s.st.Contacts.Add(ctx, s.id, pub, name, typeName); werr != nil {
+				return
+			}
+			// A node heard keeps the advert heard, as the REST add does; one never heard takes the frame's, as the firmware does.
+			if p != nil && p.LastAdvertTS != 0 {
+				werr = s.st.Contacts.SetLastAdvert(ctx, s.id, pub, p.LastSeen, p.LastAdvertTS)
+			} else if lastAdvert != 0 {
+				werr = s.st.Contacts.SetLastAdvert(ctx, s.id, pub, time.Time{}, lastAdvert)
+			}
+			if werr != nil {
 				return
 			}
 		}
@@ -789,10 +812,10 @@ func (c *conn) addUpdateContact(comp *companion.Companion, d []byte) []byte {
 	return okOr(comp.Repeaters().SetPeerPath(pubHex, path, size), mc.ErrCodeIllegalArg)
 }
 
-// isSetting is a command that writes the radio's or the host's settings, which the app may not change.
+// isSetting is a command that writes the radio's settings, which the app may not change.
 func isSetting(cmd byte) bool {
 	switch cmd {
-	case mc.CmdSetRadioParams, mc.CmdSetRadioTxPower, mc.CmdSetTuningParams, mc.CmdSetAutoAddConfig, mc.CmdSetDeviceTime:
+	case mc.CmdSetRadioParams, mc.CmdSetRadioTxPower, mc.CmdSetTuningParams, mc.CmdSetAutoAddConfig:
 		return true
 	}
 	return false
@@ -811,8 +834,6 @@ func (c *conn) unchanged(env *Env, d []byte) bool {
 		return n >= 9 && u32(1) == 0 && u32(5) == uint32(math.Round(env.AirtimeFactor*1000))
 	case mc.CmdSetAutoAddConfig:
 		return n >= 2 && d[1] == 0 && (n < 3 || d[2] == 0)
-	case mc.CmdSetDeviceTime:
-		return n >= 5 && time.Since(time.Unix(int64(u32(1)), 0)).Abs() <= clockSlack
 	}
 	return false
 }
@@ -820,15 +841,21 @@ func (c *conn) unchanged(env *Env, d []byte) bool {
 // errUnchanged ends a change that would write what is already saved: no write, no reload.
 var errUnchanged = errors.New("unchanged")
 
-// update saves a change to the companion's own settings, judged against what is saved rather than the running companion, which a reload may not have caught up with; one the checks refuse is the app's illegal argument.
-func (c *conn) update(change func(*store.Companion) error) []byte {
+// liveWait bounds how long an OK waits for the reload that puts a saved setting into the running companion.
+const liveWait = 5 * time.Second
+
+// update saves a change to the companion's settings, checked against the saved row, and answers OK once live says the running companion has it.
+func (c *conn) update(change func(*store.Companion) error, live func(*companion.Companion) bool) []byte {
 	err := c.srv.settings.UpdateCompanion(context.Background(), c.srv.id, change)
-	if errors.Is(err, errUnchanged) {
-		return okFrame()
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, errUnchanged) {
 		c.srv.log.Info("app settings change refused", "error", err)
 		return errFrame(mc.ErrCodeIllegalArg)
+	}
+	for end := time.Now().Add(liveWait); !live(c.srv.comp.Load()); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(end) {
+			c.srv.log.Warn("app settings change saved but not yet running", "after", liveWait)
+			break
+		}
 	}
 	return okFrame()
 }
@@ -861,6 +888,11 @@ func (c *conn) otherParams(d []byte) []byte {
 		}
 	}
 	share := n >= 4 && d[3] != 0 // the firmware shares for any policy but none
+	live := func(k *companion.Companion) bool {
+		cfg := k.AppConfig()
+		got := []string{config.TelemetryModeOrDefault(cfg.TelemetryBase), config.TelemetryModeOrDefault(cfg.TelemetryLocation), config.TelemetryModeOrDefault(cfg.TelemetryEnvironment)}
+		return (n < 4 || cfg.SharesLocation() == share) && (modes == nil || slices.Equal(got, modes))
+	}
 	return c.update(func(r *store.Companion) error {
 		same := n < 4 || share == r.ShareLocation
 		if modes != nil {
@@ -876,5 +908,5 @@ func (c *conn) otherParams(d []byte) []byte {
 			r.ShareLocation = share
 		}
 		return nil
-	})
+	}, live)
 }

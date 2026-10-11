@@ -39,15 +39,18 @@ type pendingKey struct {
 type Tracker struct {
 	mu      sync.Mutex
 	pending map[pendingKey]*entry
-	store   *store.Store
-	hub     *api.Hub
-	log     *slog.Logger
-	ttl     time.Duration
+	// queued is each post in the TX queue, not yet written to the modem.
+	queued map[[meshcore.PacketHashSize]byte]Sent
+	store  *store.Store
+	hub    *api.Hub
+	log    *slog.Logger
+	ttl    time.Duration
 }
 
 func NewTracker(st *store.Store, hub *api.Hub, log *slog.Logger) *Tracker {
 	return &Tracker{
 		pending: make(map[pendingKey]*entry),
+		queued:  make(map[[meshcore.PacketHashSize]byte]Sent),
 		store:   st,
 		hub:     hub,
 		log:     log,
@@ -63,6 +66,50 @@ func (t *Tracker) Track(hash [meshcore.PacketHashSize]byte, sent Sent) {
 	}
 	t.mu.Unlock()
 	t.log.Debug("echo tracked", "messageID", sent.MessageID, "hash", hash, "companion", sent.Companion, "channel", sent.Channel)
+}
+
+// TrackQueued tracks an outgoing post from when it joins the TX queue, so a reset that drops the queue can fail it.
+func (t *Tracker) TrackQueued(hash [meshcore.PacketHashSize]byte, sent Sent) {
+	t.mu.Lock()
+	t.queued[hash] = sent
+	t.mu.Unlock()
+	t.Track(hash, sent)
+}
+
+// OnAir is every frame written to the modem: a post that got that far has left the queue.
+func (t *Tracker) OnAir(data []byte) {
+	pkt, err := meshcore.PacketFromBytes(data)
+	if err != nil {
+		return
+	}
+	t.mu.Lock()
+	delete(t.queued, pkt.PacketHash())
+	t.mu.Unlock()
+}
+
+// FailQueued fails every post the modem never got, once a radio reset has thrown the TX queue away.
+func (t *Tracker) FailQueued() {
+	t.mu.Lock()
+	lost := t.queued
+	t.queued = map[[meshcore.PacketHashSize]byte]Sent{}
+	t.mu.Unlock()
+	for _, s := range lost {
+		t.store.WriteAsync(func() {
+			if err := t.store.Messages.UpdateStatus(context.Background(), s.MessageID, "failed"); err != nil {
+				t.log.Error("failed to mark a dropped post failed", "error", err, "messageID", s.MessageID)
+			}
+		})
+		if t.hub != nil {
+			t.hub.Broadcast("messages", map[string]any{
+				"action":      "status",
+				"companion":   s.Companion,
+				"companionId": s.CompanionID,
+				"channel":     s.Channel,
+				"id":          s.MessageID,
+				"status":      "failed",
+			})
+		}
+	}
 }
 
 // OnRawPacket is called by each companion for every frame it hears, so companion scopes the lookup

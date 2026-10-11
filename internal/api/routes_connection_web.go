@@ -42,7 +42,9 @@ type webCandidateJSON struct {
 
 // webChainJSON is one distinct route, source side first and ending at "self"; SNR and RSSI belong to its last link.
 type webChainJSON struct {
-	Nodes    []string `json:"nodes"`
+	Nodes []string `json:"nodes"`
+	// Origin: Nodes[0] sent the packet; otherwise it is the first relay, which heard it from the sender.
+	Origin   bool     `json:"origin"`
 	Count    int      `json:"count"`
 	First    int      `json:"first"`
 	LastSeen string   `json:"lastSeen"`
@@ -155,10 +157,11 @@ func (b *webBuilder) add(rec *store.PacketRecord) {
 			next = at
 		}
 	}
+	origin := false
 	if pkt.PayloadType() == meshcore.PayloadTypeAdvert && len(pkt.Payload) >= meshcore.PubKeySize {
 		// Stored peers came from adverts verified at ingest; an unknown key is left unnamed rather than trusted.
 		if p := b.byPubkey[hex.EncodeToString(pkt.Payload[:meshcore.PubKeySize])]; p != nil {
-			ids[0] = b.peerNode(p).ID
+			ids[0], origin = b.peerNode(p).ID, true
 		}
 	}
 
@@ -173,9 +176,12 @@ func (b *webBuilder) add(rec *store.PacketRecord) {
 	}
 
 	key := strings.Join(chainIDs, ">")
+	if origin {
+		key = "+" + key
+	}
 	c := b.chains[key]
 	if c == nil {
-		c = &webChain{webChainJSON: webChainJSON{Nodes: append([]string(nil), chainIDs...)}}
+		c = &webChain{webChainJSON: webChainJSON{Nodes: append([]string(nil), chainIDs...), Origin: origin}}
 		b.chains[key] = c
 	}
 	c.Count++
@@ -404,6 +410,15 @@ func (s *Server) handlePinHop(w http.ResponseWriter, r *http.Request) {
 		pk, err := hex.DecodeString(*body.Pubkey)
 		if err != nil || len(pk) != meshcore.PubKeySize || !strings.HasPrefix(hex.EncodeToString(pk), hash) {
 			writeError(w, http.StatusBadRequest, "pubkey must be a full key that starts with the hash")
+			return
+		}
+		p, err := s.store.Peers.GetByPubKey(r.Context(), pk)
+		if err != nil {
+			s.serverError(w, "failed to load peer", err)
+			return
+		}
+		if p == nil || p.Type != "REPEATER" {
+			writeError(w, http.StatusBadRequest, "pubkey must be a known repeater")
 			return
 		}
 		pubkey = pk

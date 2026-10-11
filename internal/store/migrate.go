@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -289,7 +290,12 @@ func (s *Store) copyBeforeUpgrade(ctx context.Context, version int) (string, err
 	}
 	var unfinished *upgradeCopy
 	for i, c := range copies {
-		if c.to > version && (unfinished == nil || c.from < unfinished.from) {
+		// Each file commits with its version, so a database still at a copy's from version ran none of that upgrade: the copy is a rollback's leftover.
+		if c.from >= version || c.to <= version {
+			continue
+		}
+		// Of two from one version, the one taken for a newer build came after a rollback left the other.
+		if unfinished == nil || c.from < unfinished.from || c.from == unfinished.from && c.to > unfinished.to {
 			unfinished = &copies[i]
 		}
 	}
@@ -299,21 +305,27 @@ func (s *Store) copyBeforeUpgrade(ctx context.Context, version int) (string, err
 	}
 
 	dst := fmt.Sprintf("%s.pre-v%d-to-v%d", s.path, version, LatestSchemaVersion())
-	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("replacing the pre-upgrade copy: %w", err)
+	// Written aside and renamed over dst, so a copy that fails keeps the one a rollback left there.
+	tmp := dst + ".partial"
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("clearing a partial pre-upgrade copy: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", dst); err != nil {
-		os.Remove(dst)
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmp); err != nil {
+		os.Remove(tmp)
 		return "", fmt.Errorf("copying the database to %s, which needs about the database's size free on disk: %w", dst, err)
 	}
 	// VACUUM INTO does not sync its output, and a power cut soon after an upgrade would truncate the one way back.
-	toSync := []string{dst}
+	if err := syncPath(tmp); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("syncing the pre-upgrade copy: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("replacing the pre-upgrade copy: %w", err)
+	}
 	// Windows refuses to flush a directory opened read-only, and NTFS journals the entry itself.
 	if runtime.GOOS != "windows" {
-		toSync = append(toSync, filepath.Dir(dst))
-	}
-	for _, p := range toSync {
-		if err := syncPath(p); err != nil {
+		if err := syncPath(filepath.Dir(dst)); err != nil {
 			return "", fmt.Errorf("syncing the pre-upgrade copy: %w", err)
 		}
 	}
@@ -353,7 +365,7 @@ func restoreHint(dbPath string) string {
 	var hint string
 	copies, _ := upgradeCopies(dbPath)
 	if len(copies) > 0 {
-		latest := slices.MaxFunc(copies, func(a, b upgradeCopy) int { return a.from - b.from })
+		latest := slices.MaxFunc(copies, func(a, b upgradeCopy) int { return cmp.Or(a.from-b.from, a.to-b.to) })
 		hint += ", or stop OwlShack and move " + latest.path + " back to " + dbPath + " (the copy taken before the last upgrade)"
 	}
 	if _, err := os.Stat(dbPath + ".replaced"); err == nil {

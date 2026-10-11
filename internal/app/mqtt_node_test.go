@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/OwlShack/OwlShack/internal/api"
@@ -182,6 +183,39 @@ func TestImport_NamesTheFirstCompanion(t *testing.T) {
 	}
 }
 
+// A file the MQTT page would refuse to save is refused at import, rather than stored and then refused at every save.
+func TestImport_RefusesAFeedTheMqttPageWould(t *testing.T) {
+	t.Parallel()
+	b := newHealthBackend(t)
+	seed, err := config.GenerateSeedHex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirty, slash := 30, "akl/nz"
+	for want, m := range map[string]*config.MqttConfig{
+		"statusInterval must be 60-3600 seconds": {StatusInterval: &thirty},
+		"iataCode may only hold":                 {IataCode: &slash},
+	} {
+		cfg := config.DefaultConfig()
+		cfg.Companions = []config.CompanionConfig{{Name: "one", PrivateKey: seed}}
+		cfg.Mqtt = m
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := importConfigFile(t.Context(), b.db, path); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("import err = %v, want %q", err, want)
+		}
+	}
+	if comps, err := b.db.Companions.List(t.Context()); err != nil || len(comps) != 0 {
+		t.Errorf("companions = %v, %v; want nothing stored from a refused file", comps, err)
+	}
+}
+
 // A legacy config blob that names no MQTT node is moved into the tables naming the first companion, as a file import is.
 func TestLegacyBlob_NamesTheFirstCompanion(t *testing.T) {
 	t.Parallel()
@@ -277,6 +311,50 @@ func TestSaveBroker_NeedsAFeedNode(t *testing.T) {
 	if _, err := b.SaveBroker(t.Context(), api.BrokerInput{Name: "three", Host: "localhost", Port: 1885}); err != nil {
 		t.Errorf("an edit that leaves the feed as it was: %v", err)
 	}
+}
+
+// The IATA code is one level of every topic, and each status polls the board, so both are bounded with a message saying how.
+func TestSaveMqtt_IataAndStatusInterval(t *testing.T) {
+	t.Parallel()
+	b, c1 := mqttBackend(t, false)
+	str := func(s string) *string { return &s }
+	num := func(n int) *int { return &n }
+	const iataMsg = "iataCode may only hold letters, digits, - and _, as it is one level of every topic"
+	const intervalMsg = "statusInterval must be 60-3600 seconds"
+	for _, tc := range []struct {
+		iata     *string
+		interval *int
+		want     string
+	}{
+		{str("AKL"), num(300), ""},
+		{str("nz-akl_2"), num(60), ""},
+		{nil, num(3600), ""},
+		{str(""), nil, ""},
+		{str("AK#L"), num(300), iataMsg},
+		{str("AK+L"), num(300), iataMsg},
+		{str("NZ/AKL"), num(300), iataMsg},
+		{str("AKL "), num(300), iataMsg},
+		{str("AKL"), num(1), intervalMsg},
+		{str("AKL"), num(59), intervalMsg},
+		{str("AKL"), num(-5), intervalMsg},
+		{str("AKL"), num(3601), intervalMsg},
+	} {
+		err := b.SaveMqtt(t.Context(), api.MqttInput{NodeKind: "companion", NodeCompanionID: &c1, IataCode: tc.iata, StatusInterval: tc.interval})
+		got := ""
+		if err != nil {
+			got = err.Error()
+		}
+		if got != tc.want || (tc.want != "" && statusOf(err) != http.StatusUnprocessableEntity) {
+			t.Errorf("iata %v interval %v: %d %q, want %q", deref(tc.iata), deref(tc.interval), statusOf(err), got, tc.want)
+		}
+	}
+}
+
+func deref[T any](p *T) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // A companion-fed MQTT with no companion would publish nothing while looking on.

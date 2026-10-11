@@ -426,7 +426,7 @@ export function PacketsPage() {
                       {p.snr != null && (
                         <span className={snrTextClass(p.snr)}>{p.snr.toFixed(1)}dB</span>
                       )}
-                      {p.route && <span className="uppercase">{routeLabel(p)}</span>}
+                      {p.route && <span>{routeLabel(p)}</span>}
                     </div>
                   </div>
                 );
@@ -525,7 +525,7 @@ export function PacketsPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <span className="font-mono text-xs uppercase tracking-[0.08em] text-muted-foreground">
+                        <span className="font-mono text-xs tracking-[0.08em] text-muted-foreground">
                           {routeLabel(p)}
                         </span>
                       </TableCell>
@@ -587,7 +587,7 @@ export function PacketsPage() {
           side="right"
           showCloseButton={false}
           className={cn(
-            "p-0 bg-card border-l border-border sm:max-w-none w-full max-w-[100vw]",
+            "p-0 bg-card border-l border-border sm:max-w-none w-full max-w-screen",
           )}
           style={{ width: sidebarWidth }}
         >
@@ -848,7 +848,7 @@ function PacketDetail({
                         {dirGlyph(o.direction)}
                       </span>
                     </TableCell>
-                    <TableCell className="align-top font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+                    <TableCell className="align-top font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
                       {routeLabel(o)}
                     </TableCell>
                     <TableCell className="text-right align-top font-mono text-xs tabular-nums pr-5">

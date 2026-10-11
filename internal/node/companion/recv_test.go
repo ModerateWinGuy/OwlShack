@@ -1,9 +1,19 @@
 package companion
 
 import (
+	"encoding/binary"
+	"encoding/hex"
+	"io"
+	"log/slog"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/gorilla/websocket"
+
+	"github.com/OwlShack/OwlShack/internal/api"
 	"github.com/OwlShack/OwlShack/internal/modem"
 )
 
@@ -176,5 +186,44 @@ func TestDMAckTimeout(t *testing.T) {
 	// A generous operator setting still wins.
 	if got := c.dmAckTimeout(20, nil, 1, 60*time.Second); got != 60*time.Second {
 		t.Errorf("configured floor ignored: got %v", got)
+	}
+}
+
+// A room server floods its posts in a region, which the live post shows as a DM or channel message does.
+func TestRoomPost_LivePostCarriesItsRegion(t *testing.T) {
+	c, _, _, room := scopeCompanion(t)
+	srv := api.NewServer(c.store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ws.Close() })
+	for _, action := range []string{"subscribe", "ping"} {
+		if err := ws.WriteJSON(map[string]string{"action": action, "topic": "messages"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var pong struct{ Topic string }
+	if err := ws.ReadJSON(&pong); err != nil || pong.Topic != "pong" {
+		t.Fatalf("subscribing: %+v, %v", pong, err)
+	}
+	c.hub = srv.Hub()
+	c.floodScopeOf = func(*meshcore.Packet) string { return "region:nz" }
+
+	body := append(binary.LittleEndian.AppendUint32(nil, uint32(time.Now().Unix())), 0, 1, 2, 3, 4)
+	pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeTxtMsg, 0)}
+	c.handleRoomPush(pkt, room.PublicKeyBytes(), hex.EncodeToString(room.PublicKeyBytes()), make([]byte, 32), append(body, "hello room"...))
+
+	var got struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := ws.ReadJSON(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Data["text"] != "hello room" || got.Data["floodScope"] != "region:nz" {
+		t.Errorf("live room post = %v, want its region region:nz", got.Data)
 	}
 }

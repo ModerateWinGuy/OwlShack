@@ -14,7 +14,7 @@ import { useResume } from "@/lib/resume";
 import { PEER_TYPE_HEX } from "@/components/StatusIndicator";
 import { snrFill } from "@/components/SignalStrength";
 import { originIcon } from "@/components/DiscoverMap";
-import { peerLatLon, wrapLon } from "@/lib/leaflet";
+import { labelMarker, peerLatLon, wrapLon } from "@/lib/leaflet";
 import {
   type ConnectionWeb,
   type WebNode,
@@ -86,7 +86,14 @@ export function useConnectionWeb(
       reload();
     }, REFETCH_MS);
   }, [reload]);
-  useEffect(() => () => window.clearTimeout(pending.current ?? undefined), []);
+  // A new window, "my packets" or leaving the mode replaces reload; a timer holding the old one would fetch the old view.
+  useEffect(
+    () => () => {
+      window.clearTimeout(pending.current ?? undefined);
+      pending.current = null;
+    },
+    [reload],
+  );
 
   const nodes = useMemo(() => {
     const m = new Map<string, WebNode>();
@@ -264,23 +271,30 @@ export function useConnectionWeb(
       const at = posOf(id);
       if (!n || !at) continue;
       points.push(at);
-      L.marker(at, {
-        icon: dotIcon(
-          PEER_TYPE_HEX[n.type ?? ""] ?? PEER_TYPE_HEX.NONE,
-          isUncertain(n),
-        ),
-      })
-        .bindTooltip(nodeName(n))
-        .on("click", () => openNode(id))
-        .addTo(layer);
+      labelMarker(
+        L.marker(at, {
+          icon: dotIcon(
+            PEER_TYPE_HEX[n.type ?? ""] ?? PEER_TYPE_HEX.NONE,
+            isUncertain(n),
+          ),
+        })
+          .bindTooltip(nodeName(n))
+          .on("click", () => openNode(id))
+          .addTo(layer),
+        nodeName(n),
+      );
     }
+    const placed = points.length;
     const self = posOf(SELF_ID);
     if (self) {
       points.push(self);
-      L.marker(self, { icon: ORIGIN_ICON, zIndexOffset: 1000 })
-        .bindTooltip("You")
-        .on("click", () => openNode(SELF_ID))
-        .addTo(layer);
+      labelMarker(
+        L.marker(self, { icon: ORIGIN_ICON, zIndexOffset: 1000 })
+          .bindTooltip("You")
+          .on("click", () => openNode(SELF_ID))
+          .addTo(layer),
+        "You",
+      );
     }
 
     // Picking or clearing "routes from" frames the routes now shown.
@@ -288,11 +302,12 @@ export function useConnectionWeb(
       fittedVia.current = via;
       fittedRef.current = false;
     }
-    if (!fittedRef.current && points.length > 0) {
+    // A repin moves "routes from" to an id only its refetch has; framing before that, or with no route placed, zooms onto you alone.
+    if (!fittedRef.current && !loading && placed > 0) {
       map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: via ? 15 : 12 });
       fittedRef.current = true;
     }
-  }, [active, mapRef, pairs, shownNodeIds, nodes, posOf, openNode, via]);
+  }, [active, mapRef, pairs, shownNodeIds, nodes, posOf, openNode, via, loading]);
 
   const windows = useMemo(() => {
     const max = (web?.retentionDays ?? 7) * 24;

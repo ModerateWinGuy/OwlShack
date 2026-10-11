@@ -653,10 +653,11 @@ type CompanionAppStatus struct {
 	Since     string `json:"since,omitempty"`
 }
 
-// CompanionAppInput is the MeshCore app's access; both fields are required.
+// CompanionAppInput is the MeshCore app's access; every field is required.
 type CompanionAppInput struct {
-	Enabled *bool `json:"enabled"`
-	Port    *int  `json:"port"`
+	Enabled   *bool `json:"enabled"`
+	Port      *int  `json:"port"`
+	QueueSize *int  `json:"queueSize"`
 }
 
 type ChannelInput struct {

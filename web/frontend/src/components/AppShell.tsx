@@ -449,7 +449,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="relative flex-1 overflow-y-auto overflow-x-hidden px-4 sm:px-6 pt-6 pb-[calc(1.5rem+var(--bottom-nav))] max-w-[100vw]">
+        <main className="relative flex-1 overflow-y-auto overflow-x-hidden px-4 sm:px-6 pt-6 pb-[calc(1.5rem+var(--bottom-nav))] max-w-screen">
           <div className="relative z-10">{children}</div>
         </main>
         <BottomNav companions={companions ?? []} pathname={pathname} />

@@ -93,11 +93,16 @@ export function RadioPage() {
 
   const onSave = async () => {
     if (!settings) return;
+    const days = Number(packetDays);
+    if (packetDays.trim() === "" || !Number.isInteger(days) || days < 1 || days > 365) {
+      toast.error("Packet history must be a whole number of days, 1-365. Nothing was saved.");
+      return;
+    }
     setSaving(true);
     try {
       // Regions first: they are the part the server is likelier to refuse, and a refusal then saves nothing.
       await configApi.putFloodRegions(floodRegions, floodScope).catch((e) => {
-        throw new Error(`Regions not saved: ${e instanceof Error ? e.message : e}`);
+        throw new Error(`Nothing was saved: ${e instanceof Error ? e.message : e}`);
       });
       await configApi.putSettings({
         // Round-trip the connection type so a radio save never resets it.
@@ -121,8 +126,10 @@ export function RadioPage() {
         pathHashSize: parseInt(pathHashSize, 10) || 1,
         dutyCycle: dutyCycle.trim() === "" ? null : Number(dutyCycle),
         logLevel: logLevel || null,
-        packetRetentionDays: Number(packetDays),
+        packetRetentionDays: days,
         // setupComplete omitted on purpose: the server keeps the stored value.
+      }).catch((e) => {
+        throw new Error(`Regions saved, but the other settings were not: ${e instanceof Error ? e.message : e}`);
       });
       toast.success("Settings saved");
       setTiles(mapProvider, mapTileKey.trim(), mapDarkStyle);

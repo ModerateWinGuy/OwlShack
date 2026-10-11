@@ -97,12 +97,13 @@ export function ChannelsPage() {
         toast.success(`Channel "${channelName}" removed`);
         setConfirmRemove(null);
         load();
+        reloadConfigChannels();
       } catch (e) {
         const msg = e instanceof Error ? e.message : "failed";
         toast.error(`Failed to remove channel: ${msg}`);
       }
     },
-    [companion, load],
+    [companion, load, reloadConfigChannels],
   );
 
   return (
@@ -226,7 +227,7 @@ function ChannelRow({
   onConfirm: () => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors">
+    <div className="flex flex-wrap items-center gap-3 px-3 py-3 hover:bg-muted/40 sm:px-4 transition-colors">
       <div className="size-9 grid place-items-center rounded-sm border border-border bg-muted/40 text-muted-foreground shrink-0">
         <Hash className="size-4" strokeWidth={1.6} />
       </div>
@@ -238,7 +239,7 @@ function ChannelRow({
         <span className="text-mono-xs text-muted-foreground">channel</span>
       </div>
 
-      {region && <div className="order-last w-full sm:order-none sm:w-56">{region}</div>}
+      {region && <div className="order-last w-full lg:order-none lg:w-80">{region}</div>}
 
       <div className="shrink-0">
         <InlineConfirm

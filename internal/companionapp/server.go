@@ -4,6 +4,7 @@ package companionapp
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	mcompanion "github.com/OwlShack/meshcore-go/companion"
+	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/node/companion"
 	"github.com/OwlShack/OwlShack/internal/store"
@@ -64,24 +66,34 @@ type Server struct {
 	}
 }
 
-// flight is an app DM still being tried, so the app's own resend of it is not sent twice.
+// flight is an app DM, so the app's own resend of it is not sent twice while ours are trying, and goes as the same message after.
 type flight struct {
 	tag   uint32
 	flood bool
 	until time.Time
+	// resend is one more attempt once ours are over.
+	resend func(attempt int, done func(node.DMSendResult)) (companion.AppDMSend, error)
+	over   bool
 }
+
+// flightKeep is how long a DM is remembered past its tries, for the app's retries after ours.
+const flightKeep = 15 * time.Minute
 
 // nextTag is the ack code the app is given for a DM; the app only matches it against the confirmation that follows.
 func (s *Server) nextTag() uint32 { return s.tags.Add(1) }
 
-func (s *Server) inFlight(key string) (flight, bool) {
+// flight is the DM the app is sending again, if it is remembered; over once ours are done.
+func (s *Server) flight(key string) (flight, bool) {
 	s.flightsMu.Lock()
 	defer s.flightsMu.Unlock()
-	f, ok := s.flights[key]
-	if ok && time.Now().After(f.until) {
-		delete(s.flights, key)
-		return f, false
+	now := time.Now()
+	for k, f := range s.flights {
+		if now.After(f.until.Add(flightKeep)) {
+			delete(s.flights, k)
+		}
 	}
+	f, ok := s.flights[key]
+	f.over = f.over || now.After(f.until)
 	return f, ok
 }
 
@@ -91,11 +103,29 @@ func (s *Server) startFlight(key string, f flight) {
 	s.flightsMu.Unlock()
 }
 
-func (s *Server) doneFlight(key string) {
+func (s *Server) endFlight(key string) {
 	s.flightsMu.Lock()
-	delete(s.flights, key)
+	if f, ok := s.flights[key]; ok {
+		f.over = true
+		s.flights[key] = f
+	}
 	s.flightsMu.Unlock()
 }
+
+// pop takes the app's next message in the writer without WriteSync's checkpoint, a disk sync per message; the firmware's queue is RAM, and a power cut here at worst delivers one again.
+func (s *Server) pop() (frame []byte, ok bool, err error) {
+	done := make(chan struct{})
+	if !s.st.WriteAsync(func() {
+		defer close(done)
+		frame, ok, err = s.st.AppQueue.Pop(context.Background(), s.id)
+	}) {
+		return nil, false, errWriterFull
+	}
+	<-done
+	return frame, ok, err
+}
+
+var errWriterFull = errors.New("the store's write queue is full")
 
 // Start opens the port and serves c; a port that cannot be opened is reported by Status, not returned.
 func Start(host string, port int, c *companion.Companion, env Env, st *store.Store, settings Settings, log *slog.Logger) *Server {
@@ -117,17 +147,27 @@ func Start(host string, port int, c *companion.Companion, env Env, st *store.Sto
 	return s
 }
 
-// Use rebinds the server to a rebuilt companion; if the rebuild moved a channel to another slot the app is dropped, so it reconnects and reads them again.
+// Use rebinds the server to a rebuilt companion; if the rebuild moved a channel to another slot or changed the key the app is dropped, so it reconnects and reads them again.
 func (s *Server) Use(c *companion.Companion) {
 	old := s.comp.Swap(c)
 	c.SetAppSink(s)
-	if old != nil && old != c && !slices.Equal(old.ChannelSlots(), c.ChannelSlots()) {
+	if old == nil || old == c {
+		return
+	}
+	s.flightsMu.Lock()
+	clear(s.flights)
+	s.flightsMu.Unlock()
+	switch {
+	case old.Node().Identity().PublicKey() != c.Node().Identity().PublicKey():
+		s.log.Info("the companion has a new key, dropping the app so it reads it again")
+		s.Disconnect()
+	case !slices.Equal(old.ChannelSlots(), c.ChannelSlots()):
 		s.log.Info("channels moved slots in a rebuild, dropping the app so it reads them again")
 		s.Disconnect()
 	}
 }
 
-// SetEnv refreshes what the handshake reports after a config reload.
+// SetEnv applies a config reload: what the handshake reports and how many messages are held.
 func (s *Server) SetEnv(env Env) { s.env.Store(&env) }
 
 func (s *Server) Port() int { return s.port }

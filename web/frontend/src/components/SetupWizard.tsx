@@ -438,7 +438,7 @@ export function SetupWizard({
         )}
 
         {/* Footer / navigation */}
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4">
           <div>
             {step !== "welcome" && (
               <Button
@@ -461,7 +461,7 @@ export function SetupWizard({
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2">
             {step === "companion" && (
               <Button
                 variant="ghost"

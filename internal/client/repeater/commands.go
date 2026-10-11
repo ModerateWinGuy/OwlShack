@@ -10,6 +10,7 @@ import (
 	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/meshpath"
 	"github.com/OwlShack/OwlShack/internal/telemetry"
@@ -203,19 +204,19 @@ func (rm *Client) SendContactTelemetryReq(pubkeyHex string, timeout time.Duratio
 }
 
 // AppRequest sends the MeshCore app's request body as its firmware does, under the contact's own shared secret, and returns the reply after its tag.
-func (rm *Client) AppRequest(pubkeyHex string, body []byte, timeout time.Duration, sent func(tag uint32, wait time.Duration, flood bool)) ([]byte, error) {
-	return rm.contactRequest(pubkeyHex, body, timeout, "app", &pendingRequest{onSent: sent})
+func (rm *Client) AppRequest(pubkeyHex string, body []byte, timeout time.Duration, app AppSend) ([]byte, error) {
+	return rm.contactRequest(pubkeyHex, body, timeout, "app", &pendingRequest{app: &app})
 }
 
 // AppPathDiscovery is the app's path discovery: a flooded base-telemetry request whose reply brings back both paths and leaves the stored route alone.
-func (rm *Client) AppPathDiscovery(pubkeyHex string, timeout time.Duration, sent func(tag uint32, wait time.Duration, flood bool)) (out, in PathBytes, err error) {
+func (rm *Client) AppPathDiscovery(pubkeyHex string, timeout time.Duration, app AppSend) (out, in PathBytes, err error) {
 	body, err := telemetryReqBody()
 	if err != nil {
 		return out, in, err
 	}
 	body[1] = ^meshcore.TelemPermBase
 	paths := make(chan [2]PathBytes, 1)
-	pr := &pendingRequest{onSent: sent, discovery: true, onPath: func(o, i PathBytes) {
+	pr := &pendingRequest{app: &app, discovery: true, onPath: func(o, i PathBytes) {
 		select {
 		case paths <- [2]PathBytes{o, i}: // a repeat of the return finds it full and is dropped, never blocking RX
 		default:
@@ -230,6 +231,44 @@ func (rm *Client) AppPathDiscovery(pubkeyHex string, timeout time.Duration, sent
 	default:
 		return out, in, ErrNoPath
 	}
+}
+
+// AppCLI sends the app's CLI text as the firmware's sendCommandData does: under the contact's own secret with no login of ours, its ACL deciding; the reply comes back as a received message.
+func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout time.Duration, app AppSend) error {
+	if len(text) > meshcore.MaxTextLen {
+		return node.ErrTextTooLong
+	}
+	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
+	}
+	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrBadPubkey, err)
+	}
+	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
+	if peer == nil {
+		return ErrUnknownPeer
+	}
+	secret, err := rm.node.SharedSecret(peerIdentity)
+	if err != nil {
+		return fmt.Errorf("deriving shared secret: %w", err)
+	}
+	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.UniqueTimestamp()), 0), txtType<<2|attempt&3, []byte(text))
+	msg, err := meshcore.NewTextMessage(rm.node.Identity(), peerIdentity, plaintext, secret)
+	if err != nil {
+		return fmt.Errorf("encrypting CLI: %w", err)
+	}
+	msgBytes, err := msg.ToBytes()
+	if err != nil {
+		return fmt.Errorf("encoding CLI: %w", err)
+	}
+	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
+	if err := meshpath.Send(rm.node, pkt, app.Scope, 0); err != nil {
+		return fmt.Errorf("sending CLI: %w", err)
+	}
+	app.Sent(0, rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout), outPath == nil)
+	return nil
 }
 
 // ErrNoPath is a path discovery answered without the path return that carries both routes.

@@ -57,7 +57,7 @@ Homepage: https://github.com/OwlShack/OwlShack
 Description: MeshCore companion, observer and repeater admin
  One static binary that speaks the MeshCore mesh protocol over a USB or SPI
  radio, optionally bridges to MQTT, persists to SQLite and serves its web UI
- on port 8080. Installed as a systemd service running as the owlshack user,
+ on port 8860. Installed as a systemd service running as the owlshack user,
  with its database in /var/lib/owlshack.
 CONTROL
 

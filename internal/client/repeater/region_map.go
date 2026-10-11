@@ -68,7 +68,8 @@ func readRegions(ctx context.Context, send func(string) (string, error)) (*Regio
 		return nil, fmt.Errorf("%w: region home: %q", ErrBadReply, reply)
 	}
 	home = strings.TrimPrefix(home, "#")
-	m, cut, homeLines := parseRegionTree(tree, home)
+	m, homeLines := parseRegionTree(tree, home)
+	cut := len(tree) >= cliReplyMax
 	m.Home = home
 	// Asked before the lists, so a node that goes quiet during them still leaves a partial map.
 	reply, err = cli("region default")
@@ -82,26 +83,48 @@ func readRegions(ctx context.Context, send func(string) (string, error)) (*Regio
 		}
 		m.Default, m.DefaultSupported = name, true
 	}
-	if cut || homeLines > 1 {
-		lists, err := readNameLists(cli, m)
-		if err != nil {
-			return nil, err
-		}
-		// Home a and a region a^ both print "a^": with two such lines, or one and the other past the cut, only `region get` says which is which.
-		if homeLines > 1 || homeLines == 1 && slices.ContainsFunc(lists, func(n listedName) bool { return n.name == home+"^" }) {
-			m.Regions = m.Regions[:1]
-		}
-		if err := fillRegions(ctx, cli, m, lists); err != nil {
-			return nil, err
-		}
+	// Read even when the tree isn't cut: it never prints a region in a parent loop, and the lists still name it.
+	lists, err := readNameLists(cli, m, cut)
+	if err != nil {
+		return nil, err
+	}
+	// Home a and a region a^ both print "a^": with two such lines, or one and the other past the cut, only `region get` says which is which.
+	if homeLines > 1 || homeLines == 1 && slices.ContainsFunc(lists, func(n listedName) bool { return n.name == home+"^" }) {
+		m.Regions = m.Regions[:1]
+	}
+	if err := fillRegions(ctx, cli, m, lists); err != nil {
+		return nil, err
+	}
+	if looped(m.Regions) { // no tree, the firmware's or ours, can show it
+		m.Partial = true
 	}
 	return m, nil
 }
 
+// looped reports a region whose parents never reach "*", which the firmware's `region put` allows.
+func looped(regions []RegionEntry) bool {
+	parent := make(map[string]string, len(regions))
+	for _, r := range regions {
+		parent[r.Name] = r.Parent
+	}
+	for _, r := range regions {
+		p := r.Parent
+		for range regions {
+			if p == "*" || p == "" {
+				break
+			}
+			p = parent[p]
+		}
+		if p != "*" && p != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // parseRegionTree reads RegionMap::printChildRegions (indent per level, "^" home, " F" flood); homeLines counts lines that read as home, as home a and region a^ both print "a^".
-func parseRegionTree(s, home string) (m *RegionMap, cut bool, homeLines int) {
+func parseRegionTree(s, home string) (m *RegionMap, homeLines int) {
 	m = &RegionMap{}
-	cut = len(s) >= cliReplyMax
 	lines := strings.Split(s, "\n")
 	lines = lines[:len(lines)-1] // after the last newline: empty, or a line the cut broke
 	var stack []string
@@ -127,7 +150,7 @@ func parseRegionTree(s, home string) (m *RegionMap, cut bool, homeLines int) {
 		stack = append(stack[:indent], name)
 		m.Regions = append(m.Regions, RegionEntry{Name: name, Parent: parent, DenyFlood: deny})
 	}
-	return m, cut, homeLines
+	return m, homeLines
 }
 
 // listedName is one name from `region list allowed|denied`.
@@ -136,15 +159,19 @@ type listedName struct {
 	denied bool
 }
 
-// readNameLists reads which regions exist and their flood; a list long enough to have skipped a name makes the map partial.
-func readNameLists(cli func(string) (string, error), m *RegionMap) ([]listedName, error) {
+// readNameLists reads which regions exist and their flood; a lost list, or one on a cut tree long enough to have skipped a name, makes the map partial.
+func readNameLists(cli func(string) (string, error), m *RegionMap, cut bool) ([]listedName, error) {
 	var names []listedName
 	for _, which := range []string{"allowed", "denied"} {
 		reply, err := cli("region list " + which)
+		if errors.Is(err, ErrNoReply) {
+			m.Partial = true
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
-		if len(reply) >= listMaySkip {
+		if cut && len(reply) >= listMaySkip {
 			m.Partial = true
 		}
 		if reply == "-none-" {

@@ -178,7 +178,8 @@ func TestKissStats_DropsReadingsOnceTheModemStopsAnswering(t *testing.T) {
 	}
 
 	// The port has gone away: the sticky flags are still set, but nothing has answered since.
-	p.lastReply.Store(time.Now().Add(-StaleReadingAfter - time.Second).UnixNano())
+	p.batteryAt = time.Now().Add(-StaleReadingAfter - time.Second)
+	p.mcuTempAt = p.batteryAt
 
 	ds := p.snapshot()
 	if ds.HaveBattery {

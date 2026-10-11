@@ -59,11 +59,25 @@ type pendingRequest struct {
 	peerPubKeyByte byte
 	peerPubKey     [32]byte
 
-	// onSent hears the tag and the wait once the request is on its way.
-	onSent func(tag uint32, wait time.Duration, flood bool)
+	// app is set for the MeshCore app's requests, nil for OwlShack's own.
+	app *AppSend
 	// discovery is the app's path discovery: always flooded, and the paths go to onPath, not into the route (firmware onContactPathRecv).
 	discovery bool
 	onPath    func(out, in PathBytes)
+}
+
+// AppSend is how a MeshCore app request goes out: a flood goes in Scope, the region the app chose (nil unscoped) rather than the contact's, and Sent hears it leave.
+type AppSend struct {
+	Scope *meshcore.Region
+	Sent  func(tag uint32, wait time.Duration, flood bool)
+}
+
+// floodScope is the region a flood to pub goes in: the app's choice for its requests, else the contact's.
+func (rm *Client) floodScope(app *AppSend, pub []byte) *meshcore.Region {
+	if app != nil {
+		return app.Scope
+	}
+	return rm.scopeFor(pub)
 }
 
 // PathBytes is a path as the firmware frames it: its length byte, which carries the hash size, then the hashes.
@@ -303,14 +317,14 @@ func (rm *Client) sendAwaitTag(tag uint32, pr *pendingRequest, pkt *meshcore.Pac
 		rm.pendingMu.Unlock()
 	}()
 
-	if err := meshpath.Send(rm.node, pkt, rm.scopeFor(peerPub[:]), 0); err != nil {
+	if err := meshpath.Send(rm.node, pkt, rm.floodScope(pr.app, peerPub[:]), 0); err != nil {
 		return nil, fmt.Errorf("sending %s req: %w", label, err)
 	}
 
 	wait := rm.replyTimeout(len(pkt.Payload), outPath, hashSize, timeout)
 	rm.log.Debug(label+" req sent", "peer", fmt.Sprintf("%x", peerPub[:6]), "tag", fmt.Sprintf("%08x", tag), "wait", wait)
-	if pr.onSent != nil {
-		pr.onSent(tag, wait, outPath == nil)
+	if pr.app != nil {
+		pr.app.Sent(tag, wait, outPath == nil)
 	}
 
 	select {
@@ -368,7 +382,7 @@ func (rm *Client) RequestRegions(pubkeyHex string, timeout time.Duration) (meshc
 }
 
 // AppAnonRequest is the MeshCore app's anonymous request: routed as the contact is, or zero-hop to a node only heard, as the firmware sends it.
-func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Duration, sent func(tag uint32, wait time.Duration, flood bool)) ([]byte, error) {
+func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Duration, app AppSend) ([]byte, error) {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
@@ -398,9 +412,11 @@ func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Dur
 		Payload:    payload,
 	}
 	outPath := []byte{}
-	if peer := rm.node.Peers().Lookup(pub); peer != nil {
-		pkt, outPath, hashSize = rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
+	if ct, err := rm.store.Contacts.Get(context.Background(), rm.companionID, pub[:]); err == nil && ct != nil {
+		if peer := rm.node.Peers().Lookup(pub); peer != nil {
+			pkt, outPath, hashSize = rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
+		}
 	}
-	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub, onSent: sent}
+	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub, app: &app}
 	return rm.sendAwaitTag(tag, pr, pkt, outPath, hashSize, pub, timeout, "app-anon")
 }

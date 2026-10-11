@@ -25,7 +25,7 @@ func (s *Server) AppMessage(m companion.AppMessage) {
 // queue holds a message frame for the app's next sync and tickles a connected app once it is stored.
 func (s *Server) queue(channel bool, frame []byte) {
 	s.st.WriteAsync(func() {
-		if err := s.st.AppQueue.Push(context.Background(), s.id, channel, frame); err != nil {
+		if err := s.st.AppQueue.Push(context.Background(), s.id, channel, frame, s.env.Load().QueueSize); err != nil {
 			s.log.Error("queueing a message for the app", "error", err)
 			return
 		}
@@ -89,26 +89,18 @@ func peerContact(p *store.Peer) contactInfo {
 	return c
 }
 
-// storedContact is a contact as RESP_CODE_CONTACT carries it; lastmod is when it was added or last heard.
+// storedContact is a contact as RESP_CODE_CONTACT carries it; lastmod is when anything in it last changed, as the firmware bumps it.
 func storedContact(k *store.Contact) contactInfo {
 	flags := k.Metadata.TelemPerms << 1
 	if k.Metadata.Favourite {
 		flags |= 1
 	}
 	c := contactInfo{advType: advTypes[k.Type], flags: flags, outPathLen: 0xFF, outPath: k.OutPath,
-		name: k.Name, lastAdvert: k.LastAdvertTS, lat: k.Lat, lon: k.Lon, lastmod: contactLastmod(k)}
+		name: k.Name, lastAdvert: k.LastAdvertTS, lat: k.Lat, lon: k.Lon, lastmod: uint32(k.ModifiedAt.Unix())}
 	copy(c.pubKey[:], k.PeerPubKey)
 	if k.OutPath != nil {
 		size := max(k.OutPathHashSize, 1)
 		c.outPathLen = meshcore.MakePathLen(size, uint8(len(k.OutPath)/int(size)))
 	}
 	return c
-}
-
-func contactLastmod(k *store.Contact) uint32 {
-	t := k.AddedAt
-	if k.LastSeen.After(t) {
-		t = k.LastSeen
-	}
-	return uint32(t.Unix())
 }

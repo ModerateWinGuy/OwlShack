@@ -10,23 +10,26 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 
+// htmlFor names the control the label and hint belong to; its hint is `${htmlFor}-hint`.
 export function Field({
   label,
   hint,
+  htmlFor,
   children,
 }: {
   label: string;
   hint?: React.ReactNode;
+  htmlFor?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="space-y-1">
-      <Label className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+      <Label htmlFor={htmlFor} className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
         {label}
       </Label>
       {children}
       {hint && (
-        <p className="font-mono text-[10px] text-muted-foreground/60">{hint}</p>
+        <p id={htmlFor && `${htmlFor}-hint`} className="font-mono text-[10px] text-muted-foreground/60">{hint}</p>
       )}
     </div>
   );
@@ -40,6 +43,7 @@ export function TextField({
   hint,
   type = "text",
   disabled,
+  invalid,
 }: {
   label: string;
   value: string;
@@ -48,10 +52,15 @@ export function TextField({
   hint?: React.ReactNode;
   type?: string;
   disabled?: boolean;
+  invalid?: boolean;
 }) {
+  const id = useId();
   return (
-    <Field label={label} hint={hint}>
+    <Field label={label} hint={hint} htmlFor={id}>
       <Input
+        id={id}
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        aria-invalid={invalid || undefined}
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -83,14 +92,19 @@ export function SelectField({
   hint?: React.ReactNode;
   disabled?: boolean;
 }) {
+  const id = useId();
   // Tolerate a device/config value outside the curated set.
   const known = options.some((o) => o.value === value);
   return (
-    <Field label={label} hint={hint}>
+    <Field label={label} hint={hint} htmlFor={id}>
       {/* Inside a form Radix adds a hidden native select; the div keeps it from being Field's last child, which takes the trigger's space-y margin. */}
       <div>
         <Select value={toSelect(value)} onValueChange={(v) => onChange(v === EMPTY ? "" : v)} disabled={disabled}>
-          <SelectTrigger className="h-9 w-full font-mono text-sm rounded-none border-border bg-background">
+          <SelectTrigger
+            id={id}
+            aria-describedby={hint ? `${id}-hint` : undefined}
+            className="h-9 w-full font-mono text-sm rounded-none border-border bg-background"
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="rounded-sm">

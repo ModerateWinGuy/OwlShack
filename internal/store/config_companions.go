@@ -29,6 +29,8 @@ type Companion struct {
 	// AppEnabled lets the MeshCore app connect on AppPort; the port is kept while access is off.
 	AppEnabled bool
 	AppPort    int
+	// AppQueueSize is how many messages are held while the app is away.
+	AppQueueSize int
 	// ShareLocation puts the position in the companion's adverts.
 	ShareLocation bool
 }
@@ -39,7 +41,7 @@ func scanCompanion(s interface{ Scan(...any) error }) (*Companion, error) {
 	var c Companion
 	var dmAllow string
 	if err := s.Scan(&c.ID, &c.Name, &c.PrivateKey, &c.PubKey, &c.Latitude, &c.Longitude, &c.AdvertInterval, &c.PathHashSize, &c.DMPolicy, &dmAllow,
-		&c.TelemBase, &c.TelemLoc, &c.TelemEnv, &c.FloodScope, &c.AppEnabled, &c.AppPort, &c.ShareLocation); err != nil {
+		&c.TelemBase, &c.TelemLoc, &c.TelemEnv, &c.FloodScope, &c.AppEnabled, &c.AppPort, &c.AppQueueSize, &c.ShareLocation); err != nil {
 		return nil, err
 	}
 	c.DMAllow = decodeList(dmAllow)
@@ -47,7 +49,7 @@ func scanCompanion(s interface{ Scan(...any) error }) (*Companion, error) {
 }
 
 const companionCols = `id, name, private_key, pubkey, latitude, longitude, advert_interval, path_hash_size, dm_policy, dm_allow,
-	telem_base, telem_loc, telem_env, flood_scope, app_enabled, app_port, share_location`
+	telem_base, telem_loc, telem_env, flood_scope, app_enabled, app_port, app_queue_size, share_location`
 
 // DMPolicyContacts is the pre-column behaviour and the value written for an unset policy.
 const DMPolicyContacts = "contacts"
@@ -68,6 +70,14 @@ func scopeOrInherit(s string) string {
 		return "inherit"
 	}
 	return s
+}
+
+// appQueueSizeOrDefault writes an unset size as the column's default, so a companion never holds nothing for the app.
+func appQueueSizeOrDefault(n int) int {
+	if n == 0 {
+		return 256
+	}
+	return n
 }
 
 func telemModeOrDefault(m string) string {
@@ -123,10 +133,10 @@ func (r *CompanionRepo) IDByName(ctx context.Context, name string) (int64, error
 func (r *CompanionRepo) Create(ctx context.Context, c *Companion) error {
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO companions (name, private_key, pubkey, latitude, longitude, advert_interval, path_hash_size, dm_policy, dm_allow,
-			telem_base, telem_loc, telem_env, flood_scope, app_enabled, app_port, share_location)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			telem_base, telem_loc, telem_env, flood_scope, app_enabled, app_port, app_queue_size, share_location)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.Name, c.PrivateKey, c.PubKey, c.Latitude, c.Longitude, c.AdvertInterval, c.PathHashSize, dmPolicyOrDefault(c.DMPolicy), encodeList(c.DMAllow),
-		telemModeOrDefault(c.TelemBase), telemModeOrDefault(c.TelemLoc), telemModeOrDefault(c.TelemEnv), scopeOrInherit(c.FloodScope), c.AppEnabled, c.AppPort, c.ShareLocation)
+		telemModeOrDefault(c.TelemBase), telemModeOrDefault(c.TelemLoc), telemModeOrDefault(c.TelemEnv), scopeOrInherit(c.FloodScope), c.AppEnabled, c.AppPort, appQueueSizeOrDefault(c.AppQueueSize), c.ShareLocation)
 	if err != nil {
 		return fmt.Errorf("inserting companion: %w", err)
 	}
@@ -140,10 +150,10 @@ func (r *CompanionRepo) Create(ctx context.Context, c *Companion) error {
 func (r *CompanionRepo) Update(ctx context.Context, c *Companion) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE companions SET name=?, private_key=?, pubkey=?, latitude=?, longitude=?, advert_interval=?, path_hash_size=?, dm_policy=?, dm_allow=?,
-			telem_base=?, telem_loc=?, telem_env=?, flood_scope=?, app_enabled=?, app_port=?, share_location=?
+			telem_base=?, telem_loc=?, telem_env=?, flood_scope=?, app_enabled=?, app_port=?, app_queue_size=?, share_location=?
 		WHERE id=?`,
 		c.Name, c.PrivateKey, c.PubKey, c.Latitude, c.Longitude, c.AdvertInterval, c.PathHashSize, dmPolicyOrDefault(c.DMPolicy), encodeList(c.DMAllow),
-		telemModeOrDefault(c.TelemBase), telemModeOrDefault(c.TelemLoc), telemModeOrDefault(c.TelemEnv), scopeOrInherit(c.FloodScope), c.AppEnabled, c.AppPort, c.ShareLocation, c.ID)
+		telemModeOrDefault(c.TelemBase), telemModeOrDefault(c.TelemLoc), telemModeOrDefault(c.TelemEnv), scopeOrInherit(c.FloodScope), c.AppEnabled, c.AppPort, appQueueSizeOrDefault(c.AppQueueSize), c.ShareLocation, c.ID)
 	if err != nil {
 		return fmt.Errorf("updating companion: %w", err)
 	}
@@ -265,10 +275,11 @@ func (r *ChannelRepo) Create(ctx context.Context, c *CompanionChannel) error {
 	return nil
 }
 
+// Update keeps the stored slot when Slot is nil.
 func (r *ChannelRepo) Update(ctx context.Context, c *CompanionChannel) error {
 	_, err := r.db.ExecContext(ctx, `
-		UPDATE companion_channels SET name=?, private_key=?, flood_scope=? WHERE id=?`,
-		c.Name, c.PrivateKey, scopeOrInherit(c.FloodScope), c.ID)
+		UPDATE companion_channels SET name=?, private_key=?, flood_scope=?, slot=coalesce(?, slot) WHERE id=?`,
+		c.Name, c.PrivateKey, scopeOrInherit(c.FloodScope), c.Slot, c.ID)
 	if err != nil {
 		return fmt.Errorf("updating channel: %w", err)
 	}

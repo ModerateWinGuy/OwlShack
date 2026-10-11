@@ -10,8 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OwlShack/meshcore-go/node"
+
 	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/config"
 	"github.com/OwlShack/OwlShack/internal/modem"
+	"github.com/OwlShack/OwlShack/internal/node/companion"
 	"github.com/OwlShack/OwlShack/internal/store"
 )
 
@@ -180,6 +184,28 @@ func TestHealth_DoesNotPollTheBoard(t *testing.T) {
 	}
 	if got := stats.polls.Load(); got != 1 {
 		t.Errorf("RadioStats polled %d times, want 1", got)
+	}
+}
+
+// The queue lives in the mux the nodes share, which the modem's stats provider knows nothing about, so it read 0 with packets waiting.
+func TestRadioStats_ReportsTheTxQueue(t *testing.T) {
+	t.Parallel()
+	b := newHealthBackend(t)
+	mux := node.NewRadioMux(silentModem{})
+	t.Cleanup(mux.Stop)
+	home, err := companion.NewCompanion(config.CompanionConfig{Name: "home", PrivateKey: strings.Repeat("11", 32)}, mux, b.db, nil, nil, nil, floodScopeOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { home.Stop() })
+	b.stats, b.mux, b.companions = &countingStats{}, mux, []*companion.Companion{home}
+	mux.NewRadio().Enqueue([]byte{0x11, 0}, node.PrioritySend, time.Hour)
+
+	if got, _ := b.radioStats(false); got.TxQueueLen != 1 {
+		t.Errorf("radio status txQueueLen = %d with one packet queued, want 1", got.TxQueueLen)
+	}
+	if got := b.health(time.Now(), &radioActivity{}, nil).Radio.TxQueueLen; got != 1 {
+		t.Errorf("health txQueueLen = %d with one packet queued, want 1", got)
 	}
 }
 

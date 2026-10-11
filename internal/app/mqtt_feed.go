@@ -55,7 +55,7 @@ func feedKey(cfg *config.Config, name string, id meshcore.LocalIdentity) string 
 
 // reloadMqtt keeps the running feed when nothing it was built from changed, so its counters and connections survive; a feed that can't start is logged, not fatal.
 func reloadMqtt(ctx context.Context, cfg *config.Config, companions []*companion.Companion, rep *repeater.Repeater, mux *node.RadioMux, ms *modem.State, running *mqttFeed) *mqttFeed {
-	relaying := cfg.Repeater != nil && !cfg.Repeater.IsFwdDisabled()
+	relaying := cfg.Mqtt.FedByRepeater() && cfg.Repeater != nil && !cfg.Repeater.IsFwdDisabled()
 	if !cfg.Mqtt.Publishes() {
 		running.stop()
 		return nil

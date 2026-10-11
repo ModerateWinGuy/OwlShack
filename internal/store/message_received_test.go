@@ -118,3 +118,43 @@ func TestMigration025_ReceivedAtFromTimestamp(t *testing.T) {
 		t.Errorf("received_at %d, want the timestamp 1715770585000", received)
 	}
 }
+
+// 025's sent times put a message from a sender whose clock ran ahead in the future, pinning its thread to the top; nothing can have arrived after the upgrade.
+func TestMigration030_NothingWasReceivedInTheFuture(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "upgrade.db")
+	db := dbAt(t, path, 24)
+	exec(t, db, `INSERT INTO companions (id, name, private_key, pubkey) VALUES (1, 'c', 'aa', 'k1')`)
+	const past, future = int64(1715770585000), int64(1940000000000)
+	exec(t, db, `INSERT INTO messages (companion_id, channel, channel_hash, direction, timestamp) VALUES
+		(1, 'Public', 0, 'rx', ?), (1, 'Public', 0, 'rx', ?)`, past, future)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Truncate(time.Second).UnixMilli()
+	st, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	after := time.Now().UnixMilli()
+	got := map[int64]int64{}
+	rows, err := st.db.Query(`SELECT timestamp, received_at FROM messages`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sent, received int64
+		if err := rows.Scan(&sent, &received); err != nil {
+			t.Fatal(err)
+		}
+		got[sent] = received
+	}
+	if got[past] != past {
+		t.Errorf("a past message's received_at %d, want its timestamp %d", got[past], past)
+	}
+	if r := got[future]; r < before || r > after {
+		t.Errorf("a future message's received_at %d, want the upgrade's time, between %d and %d", r, before, after)
+	}
+}

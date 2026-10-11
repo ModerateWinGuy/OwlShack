@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import L from "leaflet";
-import { themeTileLayer, useThemeTiles } from "@/lib/leaflet";
+import { labelMarker, themeTileLayer, useThemeTiles } from "@/lib/leaflet";
 import { cn } from "@/lib/utils";
 
 export interface TrackPoint {
@@ -101,9 +101,9 @@ export function TrackMap({
     const last = valid[valid.length - 1];
     L.marker([first.lat, first.lon], {
       icon: dotIcon("var(--muted-foreground)", 8),
+      keyboard: false,
     }).addTo(layer);
-    L.marker([last.lat, last.lon], { icon: dotIcon("var(--primary)", 12) })
-      .addTo(layer)
+    labelMarker(L.marker([last.lat, last.lon], { icon: dotIcon("var(--primary)", 12) }).addTo(layer), "Last position")
       .bindPopup(
         `${last.lat.toFixed(5)}, ${last.lon.toFixed(5)}` +
           (last.alt !== undefined ? ` · ${last.alt.toFixed(0)} m` : ""),

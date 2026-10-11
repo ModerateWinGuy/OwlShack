@@ -47,6 +47,8 @@ export interface WebNode {
 // One distinct route, source side first and ending at "self"; the SNR/RSSI belong to its last link.
 export interface WebChain {
   nodes: string[];
+  // nodes[0] sent the packet; otherwise it is the first relay, which heard it from the sender.
+  origin: boolean;
   count: number;
   first: number;
   lastSeen: string;
@@ -209,8 +211,8 @@ export function nodeNeighbours(
     const at = c.nodes.indexOf(nodeId);
     if (at < 0) continue;
     const end = c.nodes.length - 1;
-    // A null feeder is a packet this node heard from a client: a path names repeaters only.
-    add(feeding, at > 0 ? c.nodes[at - 1] : null, c, at === end);
+    // A null feeder is a packet this node heard straight from its sender, which a path never names.
+    if (at > 0 || !c.origin) add(feeding, at > 0 ? c.nodes[at - 1] : null, c, at === end);
     if (at < end) add(reaching, c.nodes[at + 1], c, at + 1 === end);
     total += c.count;
   }

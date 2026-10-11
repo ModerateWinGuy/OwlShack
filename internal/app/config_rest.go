@@ -234,6 +234,9 @@ func (b *backend) SaveMqtt(ctx context.Context, in api.MqttInput) error {
 	if in.NodeKind == config.MqttNodeRepeater && in.NodeCompanionID != nil {
 		return api.Invalid(errors.New("nodeCompanionId names a companion; leave it out when the repeater feeds MQTT"))
 	}
+	if err := config.ValidateFeed(in.IataCode, in.StatusInterval); err != nil {
+		return api.Invalid(err)
+	}
 	row := store.MqttSettings{
 		Enabled:         in.Enabled,
 		NodeKind:        in.NodeKind,
@@ -393,7 +396,7 @@ func (b *backend) SaveCompanion(ctx context.Context, in api.CompanionInput) (int
 					row.PrivateKey = c.PrivateKey
 				}
 				row.TelemBase, row.TelemLoc, row.TelemEnv = c.TelemBase, c.TelemLoc, c.TelemEnv
-				row.AppEnabled, row.AppPort = c.AppEnabled, c.AppPort
+				row.AppEnabled, row.AppPort, row.AppQueueSize = c.AppEnabled, c.AppPort, c.AppQueueSize
 			}
 			row.PubKey, _ = config.PubKeyHexFromSeed(row.PrivateKey)
 
@@ -461,8 +464,11 @@ func (b *backend) SetCompanionTelemetry(ctx context.Context, id int64, in api.Co
 
 // SetCompanionApp is its own endpoint so that access is only ever turned on deliberately, never by saving another form.
 func (b *backend) SetCompanionApp(ctx context.Context, id int64, in api.CompanionAppInput) error {
-	if in.Enabled == nil || in.Port == nil {
-		return api.Invalid(errors.New("enabled and port are both required"))
+	if in.Enabled == nil || in.Port == nil || in.QueueSize == nil {
+		return api.Invalid(errors.New("enabled, port and queueSize are all required"))
+	}
+	if err := config.CheckAppQueueSize(*in.QueueSize); err != nil {
+		return api.Invalid(err)
 	}
 	var row store.Companion
 	return b.configMutate(ctx,
@@ -472,7 +478,7 @@ func (b *backend) SetCompanionApp(ctx context.Context, id int64, in api.Companio
 			}
 			for i := range rows.companions {
 				if rows.companions[i].ID == id {
-					rows.companions[i].AppEnabled, rows.companions[i].AppPort = *in.Enabled, *in.Port
+					rows.companions[i].AppEnabled, rows.companions[i].AppPort, rows.companions[i].AppQueueSize = *in.Enabled, *in.Port, *in.QueueSize
 					row = rows.companions[i]
 				}
 			}

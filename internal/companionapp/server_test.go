@@ -31,6 +31,67 @@ func (silentModem) SendData([]byte) error                            { return ni
 func (silentModem) SetDataHandler(func([]byte, float32, int8, bool)) {}
 func (silentModem) AddOutboundHandler(func([]byte))                  {}
 
+// tapModem hands a test what the companion sends, and lets it play packets in as if heard.
+type tapModem struct {
+	sent chan []byte
+	mu   sync.Mutex
+	rx   func([]byte, float32, int8, bool)
+	// stuck, while set, holds every send until it is closed: a radio that takes nothing more.
+	stuck chan struct{}
+}
+
+func (m *tapModem) SendData(b []byte) error {
+	m.mu.Lock()
+	stuck := m.stuck
+	m.mu.Unlock()
+	if stuck != nil {
+		<-stuck
+	}
+	select {
+	case m.sent <- bytes.Clone(b):
+	default:
+	}
+	return nil
+}
+func (m *tapModem) SetDataHandler(h func([]byte, float32, int8, bool)) {
+	m.mu.Lock()
+	m.rx = h
+	m.mu.Unlock()
+}
+func (m *tapModem) AddOutboundHandler(func([]byte)) {}
+
+func (m *tapModem) hear(t *testing.T, pkt *meshcore.Packet) {
+	t.Helper()
+	raw, err := pkt.ToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	rx := m.rx
+	m.mu.Unlock()
+	rx(raw, 6, -60, true)
+}
+
+// next is the next packet sent, skipping what skip says is not the one wanted.
+func (m *tapModem) next(t *testing.T, skip func(*meshcore.Packet) bool) *meshcore.Packet {
+	t.Helper()
+	for {
+		select {
+		case raw := <-m.sent:
+			pkt, err := meshcore.PacketFromBytes(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if skip == nil || !skip(pkt) {
+				return pkt
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("nothing sent")
+			return nil
+		}
+	}
+}
+
 type fakeStats struct{}
 
 func (fakeStats) Transport() string { return "kiss" }
@@ -51,9 +112,11 @@ func (fakeTx) TxStats() node.TxStats {
 	return node.TxStats{Sent: 7, SentFlood: 5, SentDirect: 2, AirtimeMs: 9000}
 }
 
-// savedSettings applies the app's changes to the store as the real saver does, without the reload.
+// savedSettings applies the app's changes to the store as the real saver does, and to the running companion lag later, as the reload does.
 type savedSettings struct {
 	st       *store.Store
+	comp     *companion.Companion
+	lag      time.Duration
 	mu       sync.Mutex
 	changes  int
 	channels int
@@ -70,7 +133,24 @@ func (s *savedSettings) UpdateCompanion(ctx context.Context, id int64, change fu
 		return err
 	}
 	s.changes++
-	return s.st.Companions.Update(ctx, c)
+	if err := s.st.Companions.Update(ctx, c); err != nil {
+		return err
+	}
+	live := s.comp.AppConfig()
+	live.Name, live.Latitude, live.Longitude, live.ShareLocation = c.Name, c.Latitude, c.Longitude, &c.ShareLocation
+	live.TelemetryBase, live.TelemetryLocation, live.TelemetryEnvironment = &c.TelemBase, &c.TelemLoc, &c.TelemEnv
+	if c.FloodScope != string(config.ScopeInherit) {
+		live.FloodScope = config.FloodScope(c.FloodScope)
+	}
+	if c.PathHashSize != nil {
+		live.PathHashSize = c.PathHashSize
+	}
+	if s.lag == 0 {
+		s.comp.ApplySettings(live)
+	} else {
+		time.AfterFunc(s.lag, func() { s.comp.ApplySettings(live) })
+	}
+	return nil
 }
 
 func (s *savedSettings) SaveChannels(context.Context, *companion.Companion) error {
@@ -85,11 +165,12 @@ type rig struct {
 	st    *store.Store
 	comp  *companion.Companion
 	srv   *Server
+	modem *tapModem
 	addr  string
 	id    int64
 }
 
-func newRig(t *testing.T) *rig {
+func newRig(t *testing.T, muxOpts ...node.MuxOption) *rig {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
@@ -104,19 +185,20 @@ func newRig(t *testing.T) *rig {
 	}
 	lat, lon := -36.8485, 174.7633
 	channels := config.ChannelList{{Name: "Public"}}
+	modem := &tapModem{sent: make(chan []byte, 64)}
 	comp, err := companion.NewCompanion(config.CompanionConfig{ID: row.ID, Name: "home", PrivateKey: strings.Repeat("11", 32), Latitude: &lat, Longitude: &lon, Channels: &channels},
-		node.NewRadioMux(silentModem{}), st, nil, nil, nil, func(*meshcore.Packet) string { return "everywhere" })
+		node.NewRadioMux(modem, muxOpts...), st, nil, nil, nil, func(*meshcore.Packet) string { return "everywhere" })
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := Env{Radio: fakeStats{}.RadioConfig(), AirtimeFactor: 1, Regions: []string{"nz"}, Stats: fakeStats{}, Tx: fakeTx{}, Started: time.Now()}
-	saved := &savedSettings{st: st}
+	env := Env{Radio: fakeStats{}.RadioConfig(), AirtimeFactor: 1, Regions: []string{"nz"}, Stats: fakeStats{}, Tx: fakeTx{}, Started: time.Now(), QueueSize: 256}
+	saved := &savedSettings{st: st, comp: comp}
 	srv := Start("127.0.0.1", 0, comp, env, st, saved, slog.Default())
 	t.Cleanup(srv.Stop)
 	if srv.ln == nil {
 		t.Fatal(srv.err)
 	}
-	return &rig{saved: saved, st: st, comp: comp, srv: srv, addr: srv.ln.Addr().String(), id: row.ID}
+	return &rig{saved: saved, st: st, comp: comp, srv: srv, modem: modem, addr: srv.ln.Addr().String(), id: row.ID}
 }
 
 // raw is an app speaking frames by hand, for what the library client will not send or cannot read.
@@ -299,13 +381,15 @@ func TestSettingsWrites(t *testing.T) {
 	a.ask(ok, mc.CmdSetRadioTxPower, 22)
 	a.ask(refused, mc.CmdSetRadioTxPower, 10)
 
+	// As the firmware: a later time is taken, an earlier one refused.
 	a.ask(ok, le32([]byte{mc.CmdSetDeviceTime}, uint32(time.Now().Unix())+5)...)
-	a.ask(refused, le32([]byte{mc.CmdSetDeviceTime}, uint32(time.Now().Unix())+3600)...)
+	a.ask(ok, le32([]byte{mc.CmdSetDeviceTime}, uint32(time.Now().Unix())+3600)...)
+	a.ask([]byte{mc.RespErr, mc.ErrCodeIllegalArg}, le32([]byte{mc.CmdSetDeviceTime}, uint32(time.Now().Unix())-3600)...)
 
 	nz := meshcore.NewRegion("nz").Key
 	a.ask(ok, append([]byte{mc.CmdSetFloodScopeKey, 0}, nz[:]...)...)
 	a.ask(ok, append([]byte{mc.CmdSetFloodScopeKey, 0}, make([]byte, 16)...)...) // the firmware's null key
-	a.ask([]byte{mc.RespErr, mc.ErrCodeIllegalArg}, append([]byte{mc.CmdSetFloodScopeKey, 0}, bytes.Repeat([]byte{7}, 16)...)...)
+	a.ask(ok, append([]byte{mc.CmdSetFloodScopeKey, 0}, bytes.Repeat([]byte{7}, 16)...)...)
 }
 
 func TestContacts(t *testing.T) {
@@ -624,16 +708,20 @@ func TestSetChannel(t *testing.T) {
 	if got := a.next(); !bytes.Equal(got, channelInfoFrame(3, "Club", priv)) {
 		t.Errorf("slot 3 reads % x", got)
 	}
-	a.ask(illegal, set(4, "Club", priv)...)    // a second channel by that name
-	a.ask(illegal, set(3, "Renamed", priv)...) // only Public is renamed in place
+	a.ask(illegal, set(4, "Club", priv)...) // a second channel by that name
+	a.ask(ok, set(3, "Renamed", priv)...)   // the same key under a new name is a rename, as on the firmware
+	a.send(mc.CmdGetChannel, 3)
+	if got := a.next(); !bytes.Equal(got, channelInfoFrame(3, "Renamed", priv)) {
+		t.Errorf("slot 3 after the rename reads % x", got)
+	}
 	a.ask([]byte{mc.RespErr, mc.ErrCodeNotFound}, set(99, "x", priv)...)
 	a.ask(ok, set(3, "", make([]byte, 16))...)
 	if r.comp.Node().Channel(3) != nil {
 		t.Error("slot 3 not cleared")
 	}
 	a.ask(ok, set(0, "Public", meshcore.PublicChannel().PSK)...) // unchanged
-	if r.saved.channels != 4 {
-		t.Errorf("channels saved %d times, want 4", r.saved.channels)
+	if r.saved.channels != 5 {
+		t.Errorf("channels saved %d times, want 5", r.saved.channels)
 	}
 }
 

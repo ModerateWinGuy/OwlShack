@@ -990,6 +990,7 @@ function CompanionChat() {
         hops: payload.hops,
         pathHashSize: payload.pathHashSize,
         status: (payload as { status?: string }).status,
+        floodScope: payload.floodScope,
       };
       if (!incoming.channel || !incoming.receivedAt) return;
 

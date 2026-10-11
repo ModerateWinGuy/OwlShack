@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -197,6 +198,65 @@ func TestStageRestore_AndAdopt(t *testing.T) {
 	}
 }
 
+// A crash leaves the last writes in the WAL, which a restore deleted rather than keeping them with the database it set aside.
+func TestAdoptPendingRestore_TheSetAsideDatabaseKeepsItsLastWrites(t *testing.T) {
+	for _, foldable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("foldable %v", foldable), func(t *testing.T) {
+			if !foldable && os.Getuid() == 0 {
+				t.Skip("root reads a file whatever its mode")
+			}
+			dir := t.TempDir()
+			running := filepath.Join(dir, "running.db")
+			st, err := Open(t.Context(), running)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exec(t, st.db, `INSERT INTO companions (id, name, private_key, pubkey) VALUES (1, 'last write', 'aa', 'k1')`)
+			// Copying the files while the store still holds them open is what a kill -9 leaves on disk.
+			live := filepath.Join(dir, "meshcore.db")
+			for _, sfx := range []string{"", "-wal"} {
+				data, err := os.ReadFile(running + sfx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(live+sfx, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st.Close()
+			if fileSize(t, live+"-wal") == 0 {
+				t.Fatal("the crashed database has an empty WAL, so this tests nothing")
+			}
+			markedDB(t, RestorePath(live), LatestSchemaVersion(), "restored")
+			// An unreadable WAL cannot be folded in, so it has to move with the database instead.
+			if !foldable {
+				if err := os.Chmod(live+"-wal", 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := AdoptPendingRestore(live); err != nil {
+				t.Fatal(err)
+			}
+			_, err = os.Stat(live + ".replaced-wal")
+			if foldable && err == nil {
+				t.Error("the set-aside database needs a WAL beside it, so moving it back alone loses its last writes")
+			}
+			if !foldable {
+				if err := os.Chmod(live+".replaced-wal", 0o600); err != nil {
+					t.Fatalf("the WAL did not move with the database: %v", err)
+				}
+			}
+			if got := markedName(t, live+".replaced"); got != "last write" {
+				t.Errorf("the set-aside database holds %q, want its last write", got)
+			}
+			if got := markedName(t, live); got != "restored" {
+				t.Errorf("the live database holds %q, want the restore", got)
+			}
+		})
+	}
+}
+
 // seedForPrune returns a backup copy of a DB with two companions and mixed fresh/stale history.
 func seedForPrune(t *testing.T, opts PruneOptions) *sql.DB {
 	t.Helper()
@@ -221,6 +281,7 @@ func seedForPrune(t *testing.T, opts PruneOptions) *sql.DB {
 		(1,'Public',0,'rx', unixepoch('now','-1 days') * 1000, unixepoch('now','-1 days') * 1000),
 		(1,'Public',0,'rx', unixepoch('now','-40 days') * 1000, unixepoch('now','-40 days') * 1000),
 		(2,'Public',0,'rx', unixepoch('now','-1 days') * 1000, unixepoch('now','-1 days') * 1000)`)
+	exec(`INSERT INTO message_echoes (message_id, received_at) VALUES (1, unixepoch() * 1000), (2, unixepoch() * 1000), (3, unixepoch() * 1000)`)
 	exec(`INSERT INTO packets (direction, raw, received_at) VALUES
 		('rx','00', unixepoch('now','-1 days') * 1000),
 		('rx','01', unixepoch('now','-40 days') * 1000)`)
@@ -303,6 +364,28 @@ func TestPruneBackup_SelectsCompanionsAndWindows(t *testing.T) {
 	}
 	if n := count(t, db, "SELECT count(*) FROM repeater WHERE private_key <> ''"); n != 0 {
 		t.Error("repeater identity key was not stripped")
+	}
+}
+
+// An echo goes with its message, so a day window kept no echoes at all, even those of the messages it kept.
+func TestPruneBackup_EchoesFollowTheirMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		days int
+		want string
+	}{
+		{"7 days", 7, "1"},
+		{"none", DaysNone, ""},
+		{"all", DaysAll, "1,2"},
+	} {
+		db := seedForPrune(t, PruneOptions{CompanionIDs: []int64{1}, MessageDays: tc.days})
+		var got string
+		if err := db.QueryRow(`SELECT coalesce(group_concat(message_id), '') FROM (SELECT message_id FROM message_echoes ORDER BY message_id)`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: echoes kept for messages %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
