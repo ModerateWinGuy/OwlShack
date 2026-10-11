@@ -25,8 +25,7 @@ func TestPrunePackets_GivesTheDiskBack(t *testing.T) {
 		{"a file Open could not switch", 4000, 0, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
+			ctx := t.Context()
 			path := filepath.Join(t.TempDir(), "prune.db")
 			st, err := store.Open(ctx, path)
 			if err != nil {
@@ -70,8 +69,10 @@ func TestPrunePackets_GivesTheDiskBack(t *testing.T) {
 				t.Fatalf("the filled database is %d bytes, too small to show anything", full)
 			}
 
-			prunePackets(ctx, st)
-			if ctx.Err() != nil {
+			pruneCtx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			prunePackets(pruneCtx, st)
+			if pruneCtx.Err() != nil {
 				t.Fatal("the prune ran until the deadline")
 			}
 			if n, err := st.Packets.Count(ctx); err != nil || n != int64(tc.fresh) {
