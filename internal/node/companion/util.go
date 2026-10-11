@@ -29,6 +29,15 @@ func channelFromRef(ref config.ChannelRef) (*meshcore.ChannelEntry, error) {
 	return meshcore.NewChannelFromHashtag(nCh), nil
 }
 
+// ChannelKey is the key a channel ref stands for, a hashtag's or Public's taken from its name; nil for a bad key.
+func ChannelKey(ref config.ChannelRef) []byte {
+	ch, err := channelFromRef(ref)
+	if err != nil {
+		return nil
+	}
+	return ch.PSK
+}
+
 func resolvePathHashSize(configured *uint8, evt trigger.Event, def uint8) uint8 {
 	if configured == nil {
 		return def

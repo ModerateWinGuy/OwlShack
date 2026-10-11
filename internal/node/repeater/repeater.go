@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,16 +59,9 @@ type Repeater struct {
 	airtime     func(packetLen int) uint32
 	logging     atomic.Bool // `log start/stop` — per-packet trace to the bot log
 
-	// Cached modem readings, refreshed by deviceStatsLoop.
-	noiseFloor      atomic.Int32 // noNoiseFloor until the radio has measured one
-	batteryMV       atomic.Uint32
-	haveBattery     atomic.Bool
-	haveDeviceStats atomic.Bool
-	pollStats       func(ctx context.Context) DeviceStats
+	boardStats func() DeviceStats
 	// telemetry is the operator's channel map and the readings behind it; nil publishes no sensors.
-	telemetry   func() ([]sensor.ChannelEntry, []sensor.Status)
-	mcuTempC    atomic.Int32 // tenths of a degree C
-	haveMCUTemp atomic.Bool
+	telemetry func() ([]sensor.ChannelEntry, []sensor.Status)
 
 	// reconfigure persists + validates + reloads a config change; nil disables config writes, and it restarts this node so it must stay off the dispatch path.
 	reconfigure func(mutate func(*config.RepeaterConfig)) error
@@ -140,8 +132,8 @@ func reverseHops(path []byte, hashSize uint8) []byte {
 type Hooks struct {
 	// Reconfigure persists + validates + reloads a config change; nil disables config writes.
 	Reconfigure func(mutate func(*config.RepeaterConfig)) error
-	// PollStats reads the shared modem's device stats; nil leaves those fields 0.
-	PollStats func(ctx context.Context) DeviceStats
+	// BoardStats is the shared modem's readings as it vouches for them now, read per reply so it must not query the board; nil leaves those fields 0.
+	BoardStats func() DeviceStats
 	// Telemetry is the operator's channel map and the readings behind it; nil publishes no sensors.
 	Telemetry func() ([]sensor.ChannelEntry, []sensor.Status)
 }
@@ -167,7 +159,7 @@ func NewRepeater(cfg config.RepeaterConfig, mux *node.RadioMux, st *store.Store,
 		store:       st,
 		hub:         hub,
 		reconfigure: hooks.Reconfigure,
-		pollStats:   hooks.PollStats,
+		boardStats:  hooks.BoardStats,
 		telemetry:   hooks.Telemetry,
 	}
 	r.neighbors.m = make(map[[32]byte]*neighbor)
@@ -242,49 +234,17 @@ func (r *Repeater) Start(ctx context.Context) error {
 	r.mu.Unlock()
 
 	go r.advertLoop(ctx)
-	if r.pollStats != nil {
-		go r.deviceStatsLoop(ctx)
-	}
 
 	r.log.Info("repeater started", "pubkey", hex.EncodeToString(r.node.Identity().PublicKeyBytes()[:8]))
 	return nil
 }
 
-// cacheDeviceStats keeps the latest board readings for the stats API and the over-mesh STATUS reply.
-func (r *Repeater) cacheDeviceStats(ds DeviceStats) {
-	nf := int32(noNoiseFloor)
-	if ds.HaveNoiseFloor {
-		nf = int32(ds.NoiseFloor)
+// deviceStats is read per reply, never kept: the provider drops a reading once the board goes quiet, so a stale one can't go out.
+func (r *Repeater) deviceStats() DeviceStats {
+	if r.boardStats == nil {
+		return DeviceStats{}
 	}
-	r.noiseFloor.Store(nf)
-	r.batteryMV.Store(uint32(ds.BatteryMV))
-	r.haveBattery.Store(ds.HaveBattery)
-	r.mcuTempC.Store(int32(ds.MCUTempC * 10))
-	r.haveMCUTemp.Store(ds.HaveMCUTemp)
-	r.haveDeviceStats.Store(true)
-}
-
-// deviceStatsLoop refreshes the cached readings because pollStats blocks ~500ms and can't run on the packet path.
-func (r *Repeater) deviceStatsLoop(ctx context.Context) {
-	const interval = 60 * time.Second
-	refresh := func() {
-		ds := r.pollStats(ctx)
-		if ctx.Err() != nil {
-			return
-		}
-		r.cacheDeviceStats(ds)
-	}
-	refresh()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			refresh()
-		}
-	}
+	return r.boardStats()
 }
 
 func (r *Repeater) Stop() error {
@@ -384,12 +344,7 @@ func (l *rateLimiter) allow() bool {
 	return true
 }
 
-// noNoiseFloor marks a noise floor not yet measured, kept in the same atomic so a reader never pairs a value with the wrong flag.
-const noNoiseFloor = math.MinInt32
-
-// DeviceStats are the shared modem's board readings, polled for the over-mesh
-// STATUS and telemetry replies. HaveMCUTemp is false when the board can't
-// measure one, and HaveBattery false when there is no cell, so 0 is never mistaken for a reading.
+// DeviceStats are the shared modem's board readings for STATUS and telemetry replies; a false Have flag means no reading, never 0.
 type DeviceStats struct {
 	NoiseFloor     int16
 	HaveNoiseFloor bool

@@ -2,7 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +160,94 @@ func TestConnectionWeb_Builder(t *testing.T) {
 	}
 	if n := nodes["h:33"]; !n.Pinned || len(n.Candidates) != 1 {
 		t.Errorf("h:33: pinned %v with %d candidates, want pinned with R3 still offered", n.Pinned, len(n.Candidates))
+	}
+}
+
+// A repeater's own advert starts at it, so its first node had no feeder; the same nodes from a relayed text did.
+func TestConnectionWeb_OriginMarksTheSender(t *testing.T) {
+	t.Parallel()
+	peers := []store.Peer{
+		{PubKey: webKey(0x22), Name: "R2", Type: "REPEATER"},
+		{PubKey: webKey(0x44), Name: "R4", Type: "REPEATER"},
+	}
+	flood := meshcore.RouteTypeFlood
+	advertFromR4 := append(webKey(0x44), make([]byte, 4+64)...)
+	advertFromStranger := append(webKey(0x77), make([]byte, 4+64)...)
+	text := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	b := newWebBuilder(peers, nil, nil, nil, nil)
+	b.add(webPacket(1, "a1", flood, meshcore.PayloadTypeAdvert, "rx", advertFromR4, 0x22))
+	b.add(webPacket(2, "t1", flood, meshcore.PayloadTypeGrpTxt, "rx", text, 0x44, 0x22))
+	b.add(webPacket(3, "a2", flood, meshcore.PayloadTypeAdvert, "rx", advertFromStranger, 0x44, 0x22))
+
+	r2, r4 := hex.EncodeToString(webKey(0x22)), hex.EncodeToString(webKey(0x44))
+	type route struct {
+		nodes  string
+		origin bool
+	}
+	got := map[route]int{}
+	for _, c := range b.result().Chains {
+		got[route{strings.Join(c.Nodes, ">"), c.Origin}] = c.Count
+	}
+	want := map[route]int{
+		{r4 + ">" + r2 + ">self", true}:  1,
+		{r4 + ">" + r2 + ">self", false}: 2,
+	}
+	if len(got) != len(want) {
+		t.Errorf("got routes %v, want %v", got, want)
+	}
+	for r, n := range want {
+		if got[r] != n {
+			t.Errorf("route %s origin %v: count %d, want %d", r.nodes, r.origin, got[r], n)
+		}
+	}
+}
+
+// A pin names one of the repeaters the sheet offers for that hash, or none of them; any other key is refused.
+func TestPinHop_OnlyARepeaterCandidate(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "pins.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	rep := append([]byte{0x55, 0x01}, webKey(1)[2:]...)
+	chat := append([]byte{0x55, 0x02}, webKey(2)[2:]...)
+	unknown := append([]byte{0x55, 0x03}, webKey(3)[2:]...)
+	st.WriteSync(func() {
+		if err = st.Peers.Upsert(ctx, &store.Peer{PubKey: rep, Name: "R", Type: "REPEATER"}); err == nil {
+			err = st.Peers.Upsert(ctx, &store.Peer{PubKey: chat, Name: "Bob", Type: "CHAT"})
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, tc := range []struct {
+		name, body string
+		want       int
+	}{
+		{"repeater", `{"pubkey":"` + hex.EncodeToString(rep) + `"}`, http.StatusNoContent},
+		{"none of these", `{"pubkey":null}`, http.StatusNoContent},
+		{"chat node", `{"pubkey":"` + hex.EncodeToString(chat) + `"}`, http.StatusBadRequest},
+		{"unknown key", `{"pubkey":"` + hex.EncodeToString(unknown) + `"}`, http.StatusBadRequest},
+		{"other hash", `{"pubkey":"` + hex.EncodeToString(rep) + `"}`, http.StatusBadRequest},
+	} {
+		hash := "55"
+		if tc.name == "other hash" {
+			hash = "56"
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/connection-web/pins/"+hash, strings.NewReader(tc.body)))
+		if rec.Code != tc.want {
+			t.Errorf("%s: %d %s, want %d", tc.name, rec.Code, rec.Body, tc.want)
+		}
+	}
+	pins, err := st.HopPins.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin, ok := pins["55"]; !ok || pin != nil || len(pins) != 1 {
+		t.Errorf("pins %v, want only 55 as none of these", pins)
 	}
 }
 

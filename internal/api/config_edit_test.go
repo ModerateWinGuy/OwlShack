@@ -2,12 +2,17 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	meshcore "github.com/OwlShack/meshcore-go"
+
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 type editBackend struct {
@@ -97,5 +102,18 @@ func TestDeleteRepeater_KeepsTheRefusalStatus(t *testing.T) {
 	b := &editBackend{editErr: Failed(http.StatusConflict, errors.New("the repeater feeds MQTT"))}
 	if got := serve(b, http.MethodDelete, "/api/config/repeater", ""); got != http.StatusConflict {
 		t.Errorf("DELETE /api/config/repeater = %d, want 409", got)
+	}
+}
+
+// Public renamed keeps the mesh's shared key, which is no secret, so the channel still reads as public.
+func TestChannelDTO_PublicKeyIsNotPrivate(t *testing.T) {
+	for key, want := range map[string]bool{
+		"": false,
+		hex.EncodeToString(meshcore.PublicChannel().PSK): false,
+		strings.Repeat("5a", 16):                         true,
+	} {
+		if got := channelToDTO(store.CompanionChannel{Name: "Town", PrivateKey: key}).PrivateKeySet; got != want {
+			t.Errorf("key %q: privateKeySet = %v, want %v", key, got, want)
+		}
 	}
 }

@@ -57,17 +57,6 @@ func (r *companionRegistry) set(companions []*companion.Companion) {
 	r.mu.Unlock()
 }
 
-// all returns the CURRENT set, which a reload replaces wholesale.
-func (r *companionRegistry) all() []*companion.Companion {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]*companion.Companion, 0, len(r.byName))
-	for _, c := range r.byName {
-		out = append(out, c)
-	}
-	return out
-}
-
 func (r *companionRegistry) find(name string) (*companion.Companion, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

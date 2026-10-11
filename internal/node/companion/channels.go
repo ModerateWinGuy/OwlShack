@@ -82,6 +82,7 @@ func (c *Companion) removeChannel(name string) error {
 			c.node.RemoveChannel(i)
 			c.chanScopesMu.Lock()
 			delete(c.chanScopes, name)
+			c.letGo(name)
 			c.chanScopesMu.Unlock()
 			c.log.Info("channel removed", "channel", name, "index", i)
 			return nil
@@ -90,21 +91,40 @@ func (c *Companion) removeChannel(name string) error {
 	return api.Failed(http.StatusNotFound, fmt.Errorf("channel %q not found", name))
 }
 
+// letGo records a channel the node no longer holds; the caller holds chanScopesMu.
+func (c *Companion) letGo(name string) {
+	if c.dropped == nil {
+		c.dropped = make(map[string]bool)
+	}
+	c.dropped[name] = true
+}
+
+// Dropped reports whether the node removed or renamed away a channel by this name since it was built.
+func (c *Companion) Dropped(name string) bool {
+	c.chanScopesMu.Lock()
+	defer c.chanScopesMu.Unlock()
+	return c.dropped[name]
+}
+
 func (c *Companion) RenameChannel(oldName, newName string) error {
 	c.chanEditMu.Lock()
 	defer c.chanEditMu.Unlock()
+	if ch := c.findChannel(oldName); ch != nil && oldName != newName && !bytes.Equal(ch.PSK, meshcore.PublicChannel().PSK) {
+		return api.Invalid(fmt.Errorf("only the Public channel can be renamed; %q would keep its old key under the new name", oldName))
+	}
 	return c.renameChannel(oldName, newName)
 }
 
+// renameChannel relabels any channel, as the firmware's setChannel does given the same key.
 func (c *Companion) renameChannel(oldName, newName string) error {
 	if oldName == newName {
 		return nil // a save with nothing changed; the scope swap below would delete the scope
 	}
+	if c.findChannel(oldName) == nil {
+		return api.Failed(http.StatusNotFound, fmt.Errorf("channel %q not found", oldName))
+	}
 	if err := config.CheckChannelName(newName); err != nil {
 		return api.Invalid(err)
-	}
-	if ch := c.findChannel(oldName); ch != nil && !bytes.Equal(ch.PSK, meshcore.PublicChannel().PSK) {
-		return api.Invalid(fmt.Errorf("only the Public channel can be renamed; %q would keep its old key under the new name", oldName))
 	}
 	if used := c.channelTriggerUsage(oldName); used != "" {
 		return fmt.Errorf("channel %q is in use by the %s; remove that trigger usage first", oldName, used)
@@ -117,10 +137,13 @@ func (c *Companion) renameChannel(oldName, newName string) error {
 	for i := range node.DefaultMaxChannels {
 		ch := c.node.Channel(i)
 		if ch != nil && ch.Name == oldName {
-			ch.Name = newName
+			renamed := *ch
+			renamed.Name = newName
 			c.chanScopesMu.Lock()
+			c.node.SetChannel(i, &renamed)
 			c.chanScopes[newName] = c.chanScopes[oldName]
 			delete(c.chanScopes, oldName)
+			c.letGo(oldName)
 			c.chanScopesMu.Unlock()
 			c.log.Info("channel renamed", "old", oldName, "new", newName, "index", i)
 			return nil

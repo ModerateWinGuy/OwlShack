@@ -1015,7 +1015,7 @@ function SettingsTab({ rep, reload }: { rep: ConfigRepeater; reload: () => void 
             <SelectField
               label="Path hash size"
               value={pathHashSize}
-              options={[{ value: "", label: "Inherit from Settings" }, ...PATH_HASH_SIZE_OPTIONS]}
+              options={[{ value: "", label: "Same as Settings" }, ...PATH_HASH_SIZE_OPTIONS]}
               onChange={setPathHashSize}
               hint="width of each hop hash in our flood packets"
             />

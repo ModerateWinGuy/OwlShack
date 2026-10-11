@@ -101,6 +101,8 @@ type answeringFeed struct {
 	// sensorsAnswer is how many sensor queries get an answer; zero is all of them.
 	sensorsAnswer int
 	sensorsAsked  int
+	// refuse is a query the board answers with HW_RESP_ERROR.
+	refuse byte
 }
 
 func (f *answeringFeed) Send(b []byte) error {
@@ -110,6 +112,10 @@ func (f *answeringFeed) Send(b []byte) error {
 	noise := f.noise
 	if noise == nil {
 		noise = []byte{0x9c, 0xff} // -100
+	}
+	if f.refuse != 0 && b[2] == f.refuse {
+		go f.handler(&hardware.KissFrame{Command: hardware.KISS_CMD_SETHARDWARE, Data: []byte{hardware.HW_RESP_ERROR, hardware.HW_ERR_NO_CALLBACK}})
+		return nil
 	}
 	if b[2] == hardware.HW_CMD_GET_SENSORS {
 		f.sensorsAsked++
@@ -235,5 +241,34 @@ func TestKissStatsProvider_BoardSensorsGoStaleOnTheirOwn(t *testing.T) {
 	}
 	if ds.HaveSensors {
 		t.Errorf("sensor readings from a minute ago still read as current: %+v", ds.Sensors)
+	}
+}
+
+// Any answer, an error included, kept every reading current, so a battery that stopped answering read as fresh while the board answered anything else.
+func TestKissStatsProvider_EachReadingGoesStaleOnItsOwn(t *testing.T) {
+	feed := &answeringFeed{frameFeed: frameFeed{dead: make(chan struct{})}}
+	km := hardware.NewKissModem(feed)
+	if err := km.Connect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer km.Close()
+	p := NewKissStatsProvider(km, RadioInfo{})
+	// Handlers run in order after the query returns, so this one running means the provider's own has.
+	handled := make(chan struct{}, 1)
+	km.OnHwResponse(hardware.HwResp(hardware.HW_CMD_GET_BATTERY), func(byte, []byte) { handled <- struct{}{} })
+	if ds := p.Stats(t.Context()); !ds.HaveBattery || !ds.HaveMCUTemp {
+		t.Fatalf("the first poll = %+v, want a battery and an MCU temperature", ds)
+	}
+	<-handled
+	feed.refuse = hardware.HW_CMD_GET_BATTERY
+	p.mu.Lock()
+	p.batteryAt = p.batteryAt.Add(-time.Minute)
+	p.mu.Unlock()
+	ds := p.Stats(t.Context())
+	if !ds.HaveMCUTemp || !ds.HaveNoiseFloor {
+		t.Fatal("the rest of the poll stopped answering too, so this doesn't test the battery alone")
+	}
+	if ds.HaveBattery {
+		t.Errorf("a battery last read a minute ago still reads as current at %d mV", ds.BatteryMV)
 	}
 }

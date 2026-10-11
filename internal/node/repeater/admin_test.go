@@ -245,9 +245,8 @@ func TestClearStats(t *testing.T) {
 
 // Pins the neighbours layout the client decodes, and the telemetry order (voltage then temperature, temperature only when measurable).
 func TestTelemetryBody(t *testing.T) {
-	r := &Repeater{}
-	r.batteryMV.Store(4168)
-	r.haveBattery.Store(true)
+	ds := DeviceStats{BatteryMV: 4168, HaveBattery: true}
+	r := &Repeater{boardStats: func() DeviceStats { return ds }}
 
 	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
 	if !ok {
@@ -265,8 +264,7 @@ func TestTelemetryBody(t *testing.T) {
 		t.Errorf("voltage = ch%d %v, want ch%d 4.17", readings[0].Channel, readings[0].Value, telemChannelSelf)
 	}
 
-	r.mcuTempC.Store(227)
-	r.haveMCUTemp.Store(true)
+	ds.MCUTempC, ds.HaveMCUTemp = 22.7, true
 	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
 	readings, err = meshcore.LPPDecode(body)
 	if err != nil {
@@ -340,6 +338,25 @@ func TestRegionsExport(t *testing.T) {
 	r.cfg.Regions = nil // no "*" entry ⇒ the wildcard allows flood, as on firmware
 	if got := r.regionsExport(); got != "*" {
 		t.Errorf("empty export = %q, want %q", got, "*")
+	}
+}
+
+// exportNamesTo skips a name that doesn't fit and carries on: `region list` gets 160 bytes, the anon REGIONS reply sizeof(reply_data)-12.
+func TestRegionNames_CappedAsFirmware(t *testing.T) {
+	a, b, c, d, e := strings.Repeat("a", 30), strings.Repeat("b", 30), strings.Repeat("c", 30), strings.Repeat("d", 30), strings.Repeat("e", 30)
+	r := newRegionRepeater(t, config.RepeaterRegion{Name: "*"})
+	for _, n := range []string{a, b, c, d, "abcdefghijkl", e, "#nz", "denied"} {
+		r.cfg.Regions = append(r.cfg.Regions, config.RepeaterRegion{Name: n, Parent: "*", DenyFlood: n == "denied"})
+	}
+	// After "*,", four 30-byte names and a 12-byte one, 139 bytes are written: e needs 171 < max, "nz" 143.
+	if got, want := r.runCLI("region list allowed"), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,nz"; got != want {
+		t.Errorf("list allowed = %q\nwant           %q", got, want)
+	}
+	if got, want := r.regionsExport(), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,"+e; got != want {
+		t.Errorf("anon export = %q\nwant          %q", got, want)
+	}
+	if got := r.runCLI("region list denied"); got != "denied" {
+		t.Errorf("list denied = %q", got)
 	}
 }
 
@@ -896,12 +913,9 @@ func TestRegionPrefixLookup(t *testing.T) {
 // A guest is answered too, payload[0] is an INVERSE mask, and base goes out whatever it says (firmware handleRequest).
 func TestTelemetryHonoursTheRequestersInverseMask(t *testing.T) {
 	newRepeater := func() *Repeater {
-		r := &Repeater{}
-		r.batteryMV.Store(4168)
-		r.haveBattery.Store(true)
-		r.mcuTempC.Store(215)
-		r.haveMCUTemp.Store(true)
-		return r
+		return &Repeater{boardStats: func() DeviceStats {
+			return DeviceStats{BatteryMV: 4168, HaveBattery: true, MCUTempC: 21.5, HaveMCUTemp: true}
+		}}
 	}
 
 	for _, tc := range []struct {
@@ -939,9 +953,8 @@ func TestTelemetryHonoursTheRequestersInverseMask(t *testing.T) {
 
 // A host with no battery still sends one at 0 V, as every firmware node does.
 func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
-	r := &Repeater{} // batteryMV left at 0, as on a Raspberry Pi
-	r.mcuTempC.Store(352)
-	r.haveMCUTemp.Store(true)
+	ds := DeviceStats{MCUTempC: 35.2, HaveMCUTemp: true} // no battery, as on a Raspberry Pi
+	r := &Repeater{boardStats: func() DeviceStats { return ds }}
 
 	body, _ := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
 	readings, err := meshcore.LPPDecode(body)
@@ -954,8 +967,7 @@ func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
 	}
 
 	// A board that does report a battery still publishes it.
-	r.batteryMV.Store(4168)
-	r.haveBattery.Store(true)
+	ds.BatteryMV, ds.HaveBattery = 4168, true
 	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
 	readings, _ = meshcore.LPPDecode(body)
 	// LPP voltage has 0.01 V resolution and the encoder rounds, so 4168 mV comes back as 4.17.

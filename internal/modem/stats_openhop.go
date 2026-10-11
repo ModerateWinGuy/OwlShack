@@ -80,6 +80,7 @@ func (p *openhopStatsProvider) snapshot() DeviceStats {
 	ds.NoiseFloor, ds.HaveNoiseFloor = int16(st.NoiseFloor), true
 	ds.BatteryMV, ds.HaveBattery = st.BatteryMV, st.BatteryValid
 	ds.MCUTempC, ds.HaveMCUTemp = float64(st.TempC), st.TempValid
+	ds.BatteryAt, ds.MCUTempAt = at, at
 	return ds
 }
 

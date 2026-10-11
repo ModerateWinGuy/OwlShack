@@ -196,6 +196,7 @@ func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, room
 				"timestamp":   msg.Timestamp.UTC().Format(time.RFC3339),
 				"receivedAt":  msg.ReceivedAt.UTC().Format(time.RFC3339),
 				"id":          msg.ID,
+				"floodScope":  msg.FloodScope,
 			}
 			if pkt.HasSignalInfo {
 				wsMsg["snr"] = pkt.SNR
@@ -312,7 +313,7 @@ func (c *Companion) registerPacketHandlers() {
 		if msgID == 0 {
 			return
 		}
-		c.echoTracker.Track(pkt.PacketHash(), echo.Sent{
+		c.echoTracker.TrackQueued(pkt.PacketHash(), echo.Sent{
 			MessageID:   msgID,
 			CompanionID: c.conf().ID,
 			Companion:   c.conf().Name,
@@ -502,7 +503,10 @@ func (c *Companion) registerPacketHandlers() {
 		case meshcore.TxtTypeCLIData:
 			var senderKey [32]byte
 			copy(senderKey[:], senderPubKey)
-			c.repeaters.HandleCLIResponse(senderKey, text) // firmware sends no ACK or path return for a CLI reply
+			// The firmware sends no ACK or path return for a CLI reply; one none of ours waits for is the app's, which it queues as it comes (onCommandDataRecv).
+			if a := c.app(); !c.repeaters.HandleCLIResponse(senderKey, text) && a != nil && senderIsContact {
+				a.AppMessage(AppMessage{Channel: -1, From: senderKey, TxtType: meshcore.TxtTypeCLIData, Timestamp: binary.LittleEndian.Uint32(plaintext[:4]), Text: text, Packet: pkt})
+			}
 			return
 		case meshcore.TxtTypeSignedPlain:
 			c.handleRoomPush(pkt, senderPubKey, senderPubKeyHex, sharedSecret, plaintext)

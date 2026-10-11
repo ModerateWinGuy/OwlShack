@@ -1,8 +1,12 @@
 package api
 
 import (
+	"encoding/hex"
 	"net/http"
 	"strconv"
+	"strings"
+
+	meshcore "github.com/OwlShack/meshcore-go"
 
 	"github.com/OwlShack/OwlShack/internal/store"
 )
@@ -88,8 +92,9 @@ type companionDTO struct {
 }
 
 type appDTO struct {
-	Enabled bool `json:"enabled"`
-	Port    int  `json:"port"`
+	Enabled   bool `json:"enabled"`
+	Port      int  `json:"port"`
+	QueueSize int  `json:"queueSize"`
 }
 
 type channelDTO struct {
@@ -139,12 +144,14 @@ func companionToDTO(c store.Companion) companionDTO {
 		DMPolicy:     c.DMPolicy, DMAllow: c.DMAllow,
 		TelemetryBase: c.TelemBase, TelemetryLocation: c.TelemLoc, TelemetryEnvironment: c.TelemEnv,
 		FloodScope: c.FloodScope,
-		App:        appDTO{Enabled: c.AppEnabled, Port: c.AppPort}, ShareLocation: c.ShareLocation,
+		App:        appDTO{Enabled: c.AppEnabled, Port: c.AppPort, QueueSize: c.AppQueueSize}, ShareLocation: c.ShareLocation,
 	}
 }
 
+// channelToDTO counts Public's key, which a renamed Public keeps, as no secret.
 func channelToDTO(c store.CompanionChannel) channelDTO {
-	return channelDTO{ID: c.ID, CompanionID: c.CompanionID, Name: c.Name, PrivateKeySet: c.PrivateKey != "", FloodScope: c.FloodScope}
+	private := c.PrivateKey != "" && !strings.EqualFold(c.PrivateKey, hex.EncodeToString(meshcore.PublicChannel().PSK))
+	return channelDTO{ID: c.ID, CompanionID: c.CompanionID, Name: c.Name, PrivateKeySet: private, FloodScope: c.FloodScope}
 }
 
 func triggerToDTO(t store.Trigger) triggerDTO {

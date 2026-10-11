@@ -27,7 +27,7 @@ const airQualityPeriod = 3 * time.Second
 // startSensors runs the hub for the life of the process, outside the radio lifecycle.
 func startSensors(ctx context.Context, db *store.Store, hub *api.Hub, log *slog.Logger) (*sensor.Hub, error) {
 	i2c := sensor.I2CProvider{Period: airQualityPeriod, State: sensorState{db: db}}
-	board := sensor.RadioBoardProvider{Board: boardReadings, MaxAge: modem.StaleReadingAfter}
+	board := sensor.RadioBoardProvider{Board: boardReadings, MaxAge: modem.StaleReadingAfter, State: sensorState{db: db}}
 	sh := sensor.NewHub(log, i2c, sensor.PiSugarProvider{}, board, &sensor.VirtualProvider{}, sensor.HTTPProvider{})
 	if err := loadSensors(ctx, db, sh); err != nil {
 		return nil, err
@@ -63,6 +63,9 @@ func boardReadings() (sensor.BoardReadings, error) {
 		HaveSensors: ds.HaveSensors,
 		At:          last,
 		SilentSince: silentFrom,
+		BatteryAt:   ds.BatteryAt,
+		MCUTempAt:   ds.MCUTempAt,
+		SensorsAt:   ds.SensorsAt,
 	}, nil
 }
 
@@ -299,7 +302,14 @@ func (b *backend) keepSecrets(id int64, in *api.SensorInput) error {
 
 // checkDependents refuses an edit that would leave a published channel or a derived sensor reading something this one stops reporting.
 func (b *backend) checkDependents(ctx context.Context, spec sensor.Spec) error {
-	reports := b.sensors.Reports(spec)
+	reports, had := b.sensors.Reports(spec), map[sensor.Metric]bool{}
+	for _, s := range b.sensors.Snapshot() {
+		if s.Spec.ID == spec.ID {
+			had = b.sensors.Reports(s.Spec)
+		}
+	}
+	// Only what the edit takes away: a board that renumbered its channels has already taken the rest, and refusing would not return it.
+	lost := func(m sensor.Metric) bool { return had[m] && !reports[m] }
 	nodes, err := b.telemetryNodes(ctx)
 	if err != nil {
 		return err
@@ -310,7 +320,7 @@ func (b *backend) checkDependents(ctx context.Context, spec sensor.Spec) error {
 	}
 	for node, entries := range b.telemetry.All() {
 		for _, e := range entries {
-			if e.SensorID == spec.ID && !reports[e.Metric] {
+			if e.SensorID == spec.ID && lost(e.Metric) {
 				return api.Invalid(fmt.Errorf("channel %d of %s publishes %s from this sensor, which it would no longer report; take it off that map first",
 					e.Channel, names[api.TelemetryNode{Kind: node.Kind, ID: node.ID}], e.Metric))
 			}
@@ -318,7 +328,7 @@ func (b *backend) checkDependents(ctx context.Context, spec sensor.Spec) error {
 	}
 	for _, s := range b.sensors.Snapshot() {
 		for _, bd := range s.Spec.Bindings {
-			if bd.SensorID == spec.ID && !reports[bd.Metric] {
+			if bd.SensorID == spec.ID && lost(bd.Metric) {
 				return api.Invalid(fmt.Errorf("%s reads %s from this sensor, which it would no longer report", s.Spec.Name, bd.Metric))
 			}
 		}

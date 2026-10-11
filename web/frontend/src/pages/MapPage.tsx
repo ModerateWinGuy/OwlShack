@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PeerDetailSheet } from "@/components/PeerDetailSheet";
 import { deletePeers, deletedPeersMessage } from "@/lib/peerApi";
-import { peerLatLon, useThemeTiles, type BaseLayer } from "@/lib/leaflet";
+import { labelMarker, peerLatLon, useThemeTiles, type BaseLayer } from "@/lib/leaflet";
 import { pathEnds, resolveHops } from "@/lib/linkPath";
 import { useOwnPosition } from "@/hooks/useOwnPosition";
 import { useConnectionWeb } from "@/hooks/useConnectionWeb";
@@ -267,14 +267,15 @@ export function MapPage() {
     if (focusMarkerRef.current) {
       focusMarkerRef.current.setLatLng([focus.lat, focus.lon]);
     } else {
-      focusMarkerRef.current = L.marker([focus.lat, focus.lon], {
-        icon: FOCUS_ICON,
-        zIndexOffset: 1000,
-      })
-        .addTo(map)
-        .bindPopup(
-          `<div style="font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;">shared location</div><div style="font-family: var(--font-mono); font-size: 11px; color: var(--muted-foreground);">${focus.lat}, ${focus.lon}</div>`,
-        );
+      focusMarkerRef.current = labelMarker(
+        L.marker([focus.lat, focus.lon], {
+          icon: FOCUS_ICON,
+          zIndexOffset: 1000,
+        }).addTo(map),
+        "Shared location",
+      ).bindPopup(
+        `<div style="font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;">shared location</div><div style="font-family: var(--font-mono); font-size: 11px; color: var(--muted-foreground);">${focus.lat}, ${focus.lon}</div>`,
+      );
     }
     focusMarkerRef.current.openPopup();
   }, [focus]);
@@ -421,17 +422,18 @@ export function MapPage() {
     for (const p of plotted) {
       const [lat, lon] = peerLatLon(p.lat, p.lon);
       const icon = PEER_ICONS[p.type] || PEER_ICONS.NONE;
-      const existing = markers.get(p.pubkey);
-      if (existing) {
-        existing.setLatLng([lat, lon]);
+      let marker = markers.get(p.pubkey);
+      if (marker) {
+        marker.setLatLng([lat, lon]);
         // setIcon rebuilds the marker's DOM element — skip when unchanged.
-        if (existing.getIcon() !== icon) existing.setIcon(icon);
+        if (marker.getIcon() !== icon) marker.setIcon(icon);
       } else {
-        const marker = L.marker([lat, lon], { icon }).addTo(map);
+        marker = L.marker([lat, lon], { icon }).addTo(map);
         // pubkey is stable for a marker, so this closure never goes stale.
         marker.on("click", () => selectPeer(p.pubkey));
         markers.set(p.pubkey, marker);
       }
+      labelMarker(marker, p.name || p.pubkey.slice(0, 8));
     }
 
     if (!fittedRef.current && plotted.length > 0) {

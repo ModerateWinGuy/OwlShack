@@ -81,6 +81,32 @@ func TestMqttFeed_SpeaksAsThePickedNode(t *testing.T) {
 	}
 }
 
+// Only the repeater relays, so a companion's feed says it doesn't even with a relaying repeater in the process.
+func TestMqttFeed_CompanionFeedDoesNotRelay(t *testing.T) {
+	mux := node.NewRadioMux(silentModem{})
+	home, err := companion.NewCompanion(config.CompanionConfig{Name: "home", PrivateKey: strings.Repeat("11", 32)}, mux, newHealthBackend(t).db, nil, nil, nil, floodScopeOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	homeName := "home"
+	cfg := &config.Config{
+		Repeater: &config.RepeaterConfig{},
+		Mqtt:     &config.MqttConfig{Node: &homeName, Brokers: []config.BrokerConfig{{Name: "x", Enabled: true, Host: "127.0.0.1", Port: 1}}},
+	}
+	ms := &modem.State{ParseErrors: new(atomic.Uint64)}
+	feed := reloadMqtt(t.Context(), cfg, []*companion.Companion{home}, nil, mux, ms, nil)
+	t.Cleanup(func() { feed.stop() })
+	if feed == nil {
+		t.Fatal("no feed started for the companion")
+	}
+	if feed.obs.Relaying() {
+		t.Error("the companion's feed says it relays because a repeater does")
+	}
+	if again := reloadMqtt(t.Context(), cfg, []*companion.Companion{home}, nil, mux, ms, feed); again != feed || feed.obs.Relaying() {
+		t.Error("a reload of the companion's feed set it relaying")
+	}
+}
+
 // Most installs have no MQTT settings at all; that must start no feed, not crash the startup.
 func TestMqttFeed_NoMqttSettings(t *testing.T) {
 	mux := node.NewRadioMux(silentModem{})

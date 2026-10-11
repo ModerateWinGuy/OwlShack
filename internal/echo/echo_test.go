@@ -3,11 +3,70 @@ package echo
 import (
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
+
+	"github.com/OwlShack/OwlShack/internal/store"
 )
+
+// A radio reset throws the TX queue away, so a post still in it never went out and must not read as sent.
+func TestFailQueued_FailsOnlyWhatNeverReachedTheModem(t *testing.T) {
+	ctx := t.Context()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "echo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := store.Companion{Name: "home"}
+	db.WriteSync(func() { err = db.Companions.Create(ctx, &c) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := NewTracker(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	frame := func(b byte) ([]byte, [meshcore.PacketHashSize]byte) {
+		pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0), Payload: []byte{b, 1, 2, 3}}
+		data, err := pkt.ToBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data, pkt.PacketHash()
+	}
+	ids := map[string]int64{}
+	for _, name := range []string{"went out", "still queued", "received"} {
+		m := store.Message{CompanionID: c.ID, Channel: "Public", Sender: "home", Text: name, Direction: "tx", Timestamp: time.Now(), ReceivedAt: time.Now(), FloodScope: "everywhere"}
+		db.WriteSync(func() { err = db.Messages.Insert(ctx, &m) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = m.ID
+	}
+	sentData, sentHash := frame(1)
+	_, queuedHash := frame(2)
+	_, heardHash := frame(3)
+	tr.TrackQueued(sentHash, Sent{MessageID: ids["went out"], CompanionID: c.ID, Companion: "home", Channel: "Public"})
+	tr.TrackQueued(queuedHash, Sent{MessageID: ids["still queued"], CompanionID: c.ID, Companion: "home", Channel: "Public"})
+	tr.Track(heardHash, Sent{MessageID: ids["received"], CompanionID: c.ID, Companion: "home", Channel: "Public"})
+	tr.OnAir(sentData)
+	tr.FailQueued()
+	db.WriteSync(func() {})
+
+	for name, want := range map[string]string{"went out": "", "still queued": "failed", "received": ""} {
+		m, err := db.Messages.GetByID(ctx, ids[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		if m.Status != nil {
+			got = *m.Status
+		}
+		if got != want {
+			t.Errorf("%s: status %q, want %q", name, got, want)
+		}
+	}
+}
 
 // TestPrune: entries past ttl are dropped, fresh ones kept.
 func TestPrune(t *testing.T) {

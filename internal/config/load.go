@@ -210,6 +210,11 @@ func (c *Config) Validate() error {
 		if p := comp.App.Port; (comp.App.Enabled || p != 0) && (p < AppPortFirst || p > AppPortLast) {
 			return fmt.Errorf("companion %q: the app port must be %d-%d", comp.Name, AppPortFirst, AppPortLast)
 		}
+		if q := comp.App.QueueSize; comp.App.Enabled || q != 0 {
+			if err := CheckAppQueueSize(q); err != nil {
+				return fmt.Errorf("companion %q: %w", comp.Name, err)
+			}
+		}
 		if comp.App.Enabled {
 			if other, dup := appPorts[comp.App.Port]; dup {
 				return fmt.Errorf("companions %q and %q both let the app in on port %d", other, comp.Name, comp.App.Port)

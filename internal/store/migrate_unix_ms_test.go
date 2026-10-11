@@ -126,6 +126,7 @@ func TestTimeColumnsHoldUnixMS(t *testing.T) {
 		{"discovered_peers", "last_seen"},
 		{"companion_contacts", "last_seen"},
 		{"companion_contacts", "added_at"},
+		{"companion_contacts", "modified_at"},
 		{"messages", "timestamp"},
 		{"messages", "received_at"},
 		{"message_echoes", "received_at"},

@@ -122,7 +122,7 @@ func packetPruneLoop(ctx context.Context, db *store.Store) {
 	}
 }
 
-// prunePackets deletes one batch per writer turn so a long backlog never fills the queue and drops RX writes.
+// prunePackets deletes one batch per writer turn so a long backlog never fills the queue and drops RX writes, then gives a big prune's space back to the disk.
 func prunePackets(ctx context.Context, db *store.Store) {
 	days, err := db.Settings.PacketRetentionDays(ctx)
 	if err != nil {
@@ -140,9 +140,33 @@ func prunePackets(ctx context.Context, db *store.Store) {
 			}
 		})
 		if n < batch {
-			return
+			break
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
+	// Later writes reuse free pages, so only a quarter of the file free is worth giving back, a batch per writer turn like the prune.
+	free, total, err := db.FreePages(ctx)
+	if err != nil {
+		slog.Warn("could not count the database's free space", "error", err)
+		return
+	}
+	if free*4 < total {
+		return
+	}
+	start := free
+	for was := free; free > 0 && ctx.Err() == nil; was = free {
+		db.WriteSync(func() { free, err = db.ReleaseFreePages(ctx, 1024) })
+		if err != nil {
+			slog.Warn("could not give the database's free space back to the disk", "error", err)
+			return
+		}
+		if free >= was {
+			return // the file is not yet switched to incremental vacuum, and Open has said so
+		}
+	}
+	slog.Info("gave the database's free space back to the disk", "pages", start-free, "left", free)
 }
 
 // packetTypes returns (nil, nil) when parsing failed.

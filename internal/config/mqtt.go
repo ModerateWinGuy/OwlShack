@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -130,6 +131,25 @@ func (b *BrokerConfig) migrateTopicPrefix() {
 		b.StatusTopic = b.TopicPrefix + "/{iata}/{pubkey}/status"
 	}
 	b.TopicPrefix = ""
+}
+
+// Each status polls the board, and one rarer than hourly is no heartbeat.
+const (
+	MinStatusInterval = 60
+	MaxStatusInterval = 3600
+)
+
+var iataRe = regexp.MustCompile(`^[A-Za-z0-9_-]*$`)
+
+// ValidateFeed checks what the MQTT page saves beside the node; it isn't in Validate, so a database storing an older value still loads.
+func ValidateFeed(iata *string, statusInterval *int) error {
+	if iata != nil && !iataRe.MatchString(*iata) {
+		return errors.New("iataCode may only hold letters, digits, - and _, as it is one level of every topic")
+	}
+	if statusInterval != nil && (*statusInterval < MinStatusInterval || *statusInterval > MaxStatusInterval) {
+		return fmt.Errorf("statusInterval must be %d-%d seconds", MinStatusInterval, MaxStatusInterval)
+	}
+	return nil
 }
 
 func (c *MqttConfig) StatusIntervalSeconds() int {

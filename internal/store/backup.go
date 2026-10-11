@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,12 +98,20 @@ func AdoptPendingRestore(dbPath string) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("listing the set-aside database's copies: %w", err)
 		}
-		_ = os.Remove(prev)
+		for _, p := range []string{prev, prev + "-wal", prev + "-shm"} {
+			_ = os.Remove(p)
+		}
 		for _, c := range old {
 			_ = os.Remove(c.path)
 		}
+		// A crash leaves the last writes in the WAL: folded in, the set-aside file holds them on its own.
+		folded := foldWAL(dbPath)
 		if err := os.Rename(dbPath, prev); err != nil {
 			return false, fmt.Errorf("setting aside current database: %w", err)
+		}
+		if folded != nil {
+			slog.Warn("could not fold the outgoing database's WAL in, so it is kept beside it", "error", folded, "wal", prev+"-wal")
+			_ = os.Rename(dbPath+"-wal", prev+"-wal")
 		}
 	}
 	if err := moveUpgradeCopies(dbPath, prev); err != nil {
@@ -115,6 +125,23 @@ func AdoptPendingRestore(dbPath string) (bool, error) {
 		return false, fmt.Errorf("adopting restored database: %w", err)
 	}
 	return true, nil
+}
+
+// foldWAL checkpoints path's WAL into it; closing the last connection then deletes the WAL.
+func foldWAL(path string) error {
+	db, err := openWritableDB(path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var busy, frames, done int
+	if err := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &frames, &done); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return errors.New("the database is in use")
+	}
+	return nil
 }
 
 // moveUpgradeCopies hands dbPath's pre-upgrade copies to the database set aside as prev, refusing before any move rather than overwrite one.
@@ -250,7 +277,6 @@ func PruneBackup(ctx context.Context, path string, opts PruneOptions) error {
 	}{
 		{"packets", "received_at", opts.PacketDays, sinceMS},
 		{"messages", "received_at", opts.MessageDays, sinceMS},
-		{"message_echoes", "", opts.MessageDays, ""}, // no timestamp; tied to messages
 		{"node_metrics", "ts", opts.MetricDays, sinceSecs},
 		{"node_neighbors", "ts", opts.MetricDays, sinceSecs},
 	}
@@ -258,7 +284,7 @@ func PruneBackup(ctx context.Context, path string, opts PruneOptions) error {
 		if w.days == DaysAll {
 			continue
 		}
-		if w.days == DaysNone || w.col == "" {
+		if w.days == DaysNone {
 			if _, err := db.ExecContext(ctx, "DELETE FROM "+w.table); err != nil {
 				return fmt.Errorf("clearing %s: %w", w.table, err)
 			}

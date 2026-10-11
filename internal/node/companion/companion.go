@@ -80,6 +80,8 @@ type Companion struct {
 	// chanScopes is each channel's own region choice, keyed by the node's channel name; channel edits run beside sends.
 	chanScopesMu sync.Mutex
 	chanScopes   map[string]config.FloodScope
+	// dropped names the channels removed or renamed away here, under chanScopesMu, so a save deletes only stored channels the node let go of.
+	dropped map[string]bool
 	// chanEditMu makes each channel edit whole, so two that pick the same free slot cannot both win.
 	chanEditMu sync.Mutex
 
@@ -107,6 +109,15 @@ func (c *Companion) conf() *config.CompanionConfig {
 func (c *Companion) ApplySettings(block config.CompanionConfig) {
 	next := block
 	c.live.Store(&next)
+	if block.Channels != nil {
+		c.chanScopesMu.Lock()
+		for _, ref := range *block.Channels {
+			if _, ok := c.chanScopes[ref.Name]; ok {
+				c.chanScopes[ref.Name] = ownScope(ref.FloodScope)
+			}
+		}
+		c.chanScopesMu.Unlock()
+	}
 	c.log.Info("settings applied in place")
 }
 
@@ -157,10 +168,11 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 
 	// The companion's channels are the only ones this node listens on; triggers reference them by name and register none of their own.
 	if cfg.Channels != nil {
-		// Each in its own slot, as the MeshCore app numbers them; one without a slot takes the first free.
+		// Each in its own slot, as the MeshCore app numbers them; one without a slot, or past the node's last as v1.5.0 kept them, takes the first free.
 		for _, pass := range []bool{true, false} {
 			for _, chRef := range *cfg.Channels {
-				if (chRef.Slot != nil) != pass {
+				fixed := chRef.Slot != nil && *chRef.Slot < node.DefaultMaxChannels
+				if fixed != pass {
 					continue
 				}
 				ch, err := channelFromRef(chRef)
@@ -168,11 +180,11 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 					return nil, fmt.Errorf("channel %q: %w", chRef.Name, err)
 				}
 				slot := companion.nextFreeChannelIndex()
-				if chRef.Slot != nil {
+				if fixed {
 					slot = *chRef.Slot
 				}
 				if slot < 0 || !n.SetChannel(slot, ch) {
-					log.Error("channel not joined: the node has no room for it", "channel", chRef.Name, "slot", slot)
+					log.Error("channel not joined: the node has no room for it", "channel", chRef.Name, "slots", node.DefaultMaxChannels)
 					continue
 				}
 				companion.chanScopes[ch.Name] = ownScope(chRef.FloodScope)

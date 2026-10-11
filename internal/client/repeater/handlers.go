@@ -257,9 +257,10 @@ func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
 	}
 }
 
-func (rm *Client) HandleCLIResponse(senderPubKey [32]byte, text string) {
+// HandleCLIResponse delivers a reply to the CLI command of ours it answers, reporting whether there was one.
+func (rm *Client) HandleCLIResponse(senderPubKey [32]byte, text string) bool {
 	if len(text) < cliPrefixLen || text[2] != '|' {
-		return
+		return false
 	}
 	prefix := text[:2]
 	response := text[3:]
@@ -274,6 +275,7 @@ func (rm *Client) HandleCLIResponse(senderPubKey [32]byte, text string) {
 		default:
 		}
 	}
+	return ok
 }
 
 func (rm *Client) HandleTextPacket(pkt *meshcore.Packet) bool {
@@ -306,9 +308,8 @@ func (rm *Client) HandleTextPacket(pkt *meshcore.Packet) bool {
 			continue
 		}
 
-		text := strings.TrimRight(string(plaintext[5:]), "\x00")
-		rm.HandleCLIResponse([32]byte{}, text)
-		return true
+		// A reply none of our commands is waiting for answers the app's, which the companion hands on.
+		return rm.HandleCLIResponse([32]byte{}, strings.TrimRight(string(plaintext[5:]), "\x00"))
 	}
 	return false
 }

@@ -114,7 +114,7 @@ func (b *backend) SetTelemetryMap(ctx context.Context, node api.TelemetryNode, i
 	if err := sensor.ValidateChannelMap(entries); err != nil {
 		return api.Invalid(err)
 	}
-	if err := b.checkRowsResolve(entries); err != nil {
+	if err := b.checkRowsResolve(b.telemetry.Entries(target), entries); err != nil {
 		return api.Invalid(err)
 	}
 
@@ -132,13 +132,16 @@ func (b *backend) SetTelemetryMap(ctx context.Context, node api.TelemetryNode, i
 	return b.telemetry.Load(context.WithoutCancel(ctx), b.db)
 }
 
-// checkRowsResolve refuses a row naming a sensor or reading that is gone, which encoding would skip in silence.
-func (b *backend) checkRowsResolve(entries []sensor.ChannelEntry) error {
+// checkRowsResolve refuses a new row naming a sensor or reading that is gone, which encoding would skip in silence; a saved row is not held to a board that renumbered its channels since.
+func (b *backend) checkRowsResolve(saved, entries []sensor.ChannelEntry) error {
 	specs := map[int64]sensor.Spec{}
 	for _, s := range b.sensors.Snapshot() {
 		specs[s.Spec.ID] = s.Spec
 	}
 	for _, e := range entries {
+		if slices.ContainsFunc(saved, func(s sensor.ChannelEntry) bool { s.ID = 0; return s == e }) {
+			continue
+		}
 		spec, ok := specs[e.SensorID]
 		if !ok {
 			return fmt.Errorf("channel %d reads sensor %d, which is not configured", e.Channel, e.SensorID)

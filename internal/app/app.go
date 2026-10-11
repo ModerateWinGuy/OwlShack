@@ -226,15 +226,16 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 		if err != nil {
 			return err
 		}
+		newMs.Modem.AddOutboundHandler(echoTracker.OnAir)
 		newComps, err := startCompanions(ctx, c, newMs, newMux, db, srv.Hub(), echoTracker, telemetry)
 		if err != nil {
-			newMs.Close()
+			closeRadio(newMux, newMs)
 			return fmt.Errorf("%w: %w", errCompanionStart, err)
 		}
 		newRep, err := startRepeater(ctx, c, newMux, db, srv.Hub(), newMs.Stats, reload, telemetry)
 		if err != nil {
 			stopCompanions(newComps)
-			newMs.Close()
+			closeRadio(newMux, newMs)
 			return fmt.Errorf("%w: %w", errRepeaterStart, err)
 		}
 		ms, mux, companions, rep = newMs, newMux, newComps, newRep
@@ -266,7 +267,9 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 		if ms != nil {
 			liveRadio.Store(nil)
 			radioSeen.keepReply(ms.Stats)
-			ms.Close()
+			closeRadio(mux, ms)
+			// After the close, so nothing more can reach the modem: a post that had not went with the queue.
+			echoTracker.FailQueued()
 		}
 		ms, mux, companions, rep, disc, feed = nil, nil, nil, nil, nil, nil
 	}
@@ -345,13 +348,13 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 				companions, stats, err = reloadCompanions(ctx, cfg, newCfg, companions, ms, mux, db, srv.Hub(), echoTracker, telemetry)
 				if err != nil {
 					feed.stop()
-					ms.Close()
+					closeRadio(mux, ms)
 					return fmt.Errorf("companion restart after reload: %w", err)
 				}
 				rep, err = reloadRepeater(ctx, cfg, newCfg, rep, mux, db, srv.Hub(), ms.Stats, reload, telemetry)
 				if err != nil {
 					feed.stop()
-					ms.Close()
+					closeRadio(mux, ms)
 					return fmt.Errorf("repeater restart after reload: %w", err)
 				}
 				feed = reloadMqtt(ctx, newCfg, companions, rep, mux, ms, feed)
@@ -437,14 +440,17 @@ func reloadCompanions(ctx context.Context, oldCfg, newCfg *config.Config, runnin
 	for _, nb := range newBlocks {
 		inst, isRunning := runningByID[nb.ID]
 		ob, hadOld := oldBlocks[nb.ID]
-		if isRunning && hadOld && channelsRunning(inst, nb) {
-			// The node already runs these channels, saved from the Channels page or the app.
-			ob.Channels = nb.Channels
+		rescope := false
+		if isRunning && hadOld {
+			if same, scopesSame := channelsRunning(inst, nb); same {
+				// The node already runs these channels, saved from the Channels page or the app; a new region applies in place.
+				ob.Channels, rescope = nb.Channels, !scopesSame
+			}
 		}
 		switch {
-		case isRunning && hadOld && blocksEqual(ob, nb):
+		case isRunning && hadOld && blocksEqual(ob, nb) && !rescope:
 			plans = append(plans, plan{block: nb, reuse: inst})
-		case isRunning && hadOld && triggersOnlyChange(ob, nb):
+		case isRunning && hadOld && triggersOnlyChange(ob, nb) && !rescope:
 			plans = append(plans, plan{block: nb, reuse: inst, reloadTrig: true})
 		case isRunning && hadOld && liveOnlyChange(ob, nb):
 			// Triggers take the companion's name when built, so a rename rebuilds them too.
@@ -563,16 +569,24 @@ func liveOnlyChange(a, b config.CompanionConfig) bool {
 	return blocksEqual(a, b)
 }
 
-// channelsRunning reports whether the node already runs exactly the block's channels, in their slots.
-func channelsRunning(c *companion.Companion, b config.CompanionConfig) bool {
+// channelsRunning reports whether the node already runs the block's channels in their slots, and whether each keeps its region too.
+func channelsRunning(c *companion.Companion, b config.CompanionConfig) (same, scopesSame bool) {
 	want, got := config.ChannelList{}, config.ChannelList(c.StandaloneChannels())
 	if b.Channels != nil {
 		want = *b.Channels
 	}
-	if got == nil {
-		got = config.ChannelList{}
+	equal := func(a, b config.ChannelList) bool {
+		return blocksEqual(config.CompanionConfig{Channels: &a}, config.CompanionConfig{Channels: &b})
 	}
-	return blocksEqual(config.CompanionConfig{Channels: &want}, config.CompanionConfig{Channels: &got})
+	unscoped := func(l config.ChannelList) config.ChannelList {
+		out := make(config.ChannelList, len(l))
+		for i, ref := range l {
+			ref.FloodScope = ""
+			out[i] = ref
+		}
+		return out
+	}
+	return equal(unscoped(want), unscoped(got)), equal(want, got)
 }
 
 func stopCompanions(companions []*companion.Companion) {
@@ -642,6 +656,12 @@ func hydratePeerTables(ctx context.Context, db *store.Store, companions []*compa
 		}
 		slog.Info("hydrated peer table from database", "companion", c.Name(), "peers", len(peers), "contacts", len(contacts), "routes", routes)
 	}
+}
+
+// closeRadio ends one radio generation: the mux first, as Node.Stop leaves its transmit engine running and holding every node it carried, then the modem under it.
+func closeRadio(mux *node.RadioMux, ms *modem.State) {
+	mux.Stop()
+	ms.Close()
 }
 
 // reconnectModem performs a single modem.Setup attempt and rebuilds the mux, dead-watcher and packet logger.

@@ -1151,3 +1151,34 @@ func TestConfig_MapProviderOr(t *testing.T) {
 		}
 	}
 }
+
+// A JSON import keeps each channel's slot, as YAML and TOML do.
+func TestChannelList_JSONKeepsSlot(t *testing.T) {
+	var cl ChannelList
+	if err := json.Unmarshal([]byte(`["Public", {"name": "#x", "privateKey": "", "floodScope": "everywhere", "slot": 5}]`), &cl); err != nil {
+		t.Fatal(err)
+	}
+	if len(cl) != 2 || cl[0].Name != "Public" || cl[0].Slot != nil {
+		t.Fatalf("got %+v", cl)
+	}
+	if got := cl[1]; got.Name != "#x" || got.FloodScope != ScopeEverywhere || got.Slot == nil || *got.Slot != 5 {
+		t.Errorf("object entry = %+v (slot %v), want #x everywhere in slot 5", got, got.Slot)
+	}
+}
+
+// An import that names no queue size holds what the firmware's offline queue holds; one out of range is refused.
+func TestAppQueueSize_ImportDefaultAndRange(t *testing.T) {
+	cfg, err := UnmarshalConfigJson([]byte(`{"companions": [{"name": "home", "app": {"enabled": true, "port": 5000}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Companions[0].App.QueueSize; got != 256 {
+		t.Fatalf("queue size %d, want 256", got)
+	}
+	for _, n := range []int{15, 10001} {
+		cfg.Companions[0].App.QueueSize = n
+		if err := cfg.Validate(); err == nil || err.Error() != `companion "home": the messages held for the app must be 16-10000` {
+			t.Errorf("%d: %v", n, err)
+		}
+	}
+}

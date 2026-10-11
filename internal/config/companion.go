@@ -60,10 +60,27 @@ const (
 	AppPortLast  = 5015
 )
 
+// AppQueueMin and AppQueueMax bound how many messages are held for the app; AppQueueDefault is most firmware builds' OFFLINE_QUEUE_SIZE.
+const (
+	AppQueueMin     = 16
+	AppQueueMax     = 10000
+	AppQueueDefault = 256
+)
+
 // AppAccess is the MeshCore app's TCP access, which has no password; Port is kept while access is off.
 type AppAccess struct {
 	Enabled bool `json:"enabled" yaml:"enabled" toml:"enabled"`
 	Port    int  `json:"port,omitempty" yaml:"port,omitempty" toml:"port,omitempty"`
+	// QueueSize is how many messages are held while the app is away.
+	QueueSize int `json:"queueSize,omitempty" yaml:"queueSize,omitempty" toml:"queueSize,omitempty"`
+}
+
+// CheckAppQueueSize refuses a queue size outside AppQueueMin-AppQueueMax.
+func CheckAppQueueSize(n int) error {
+	if n < AppQueueMin || n > AppQueueMax {
+		return fmt.Errorf("the messages held for the app must be %d-%d", AppQueueMin, AppQueueMax)
+	}
+	return nil
 }
 
 // SharesLocation reports whether adverts carry the position.

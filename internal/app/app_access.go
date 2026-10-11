@@ -38,10 +38,10 @@ func (a *appServers) sync(cfg *config.Config, companions []*companion.Companion,
 		regions = append(regions, r.Name)
 	}
 	env := companionapp.Env{Radio: ms.Stats.RadioConfig(), AirtimeFactor: cfg.AirtimeFactorOr(), Regions: regions, Stats: ms.Stats, Tx: mux, Started: a.started}
-	ports := map[int64]int{}
+	access := map[int64]config.AppAccess{}
 	for _, cc := range cfg.Companions {
 		if cc.App.Enabled {
-			ports[cc.ID] = cc.App.Port
+			access[cc.ID] = cc.App
 		}
 	}
 	running := map[int64]*companion.Companion{}
@@ -53,22 +53,23 @@ func (a *appServers) sync(cfg *config.Config, companions []*companion.Companion,
 	defer a.mu.Unlock()
 	for id, s := range a.byID {
 		// A port that failed to open is tried again on every reload.
-		if port, ok := ports[id]; !ok || port != s.Port() || running[id] == nil || s.Status().Error != "" {
+		if acc, ok := access[id]; !ok || acc.Port != s.Port() || running[id] == nil || s.Status().Error != "" {
 			s.Stop()
 			delete(a.byID, id)
 		}
 	}
-	for id, port := range ports {
+	for id, acc := range access {
 		c := running[id]
 		if c == nil {
 			continue
 		}
+		env.QueueSize = acc.QueueSize
 		if s, ok := a.byID[id]; ok {
 			s.SetEnv(env)
 			s.Use(c)
 			continue
 		}
-		a.byID[id] = companionapp.Start(a.host, port, c, env, a.st, a.settings, slog.Default())
+		a.byID[id] = companionapp.Start(a.host, acc.Port, c, env, a.st, a.settings, slog.Default())
 	}
 }
 

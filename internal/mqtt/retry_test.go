@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -397,7 +398,7 @@ func TestRefreshToken_SwapsClient(t *testing.T) {
 	bc := testBrokerClient("tok", "127.0.0.1", port, "token")
 	bc.cfg.Audience = "test"
 
-	first, err := o.connectBroker(bc.cfg, "TST")
+	first, err := o.connectBroker(bc)
 	if err != nil {
 		t.Fatalf("initial connect to fake broker: %v", err)
 	}
@@ -459,7 +460,7 @@ func TestRefreshToken_NoTakeover(t *testing.T) {
 	bc := testBrokerClient("tok", "127.0.0.1", port, "token")
 	bc.cfg.Audience = "test"
 	registered(o, bc)
-	first, err := o.connectBroker(bc.cfg, "TST")
+	first, err := o.connectBroker(bc)
 	if err != nil {
 		t.Fatalf("initial connect to fake broker: %v", err)
 	}
@@ -493,7 +494,7 @@ func TestRefreshToken_PublishesWaitForTheNewClient(t *testing.T) {
 	bc := testBrokerClient("tok", "127.0.0.1", port, "token")
 	bc.cfg.Audience = "test"
 	registered(o, bc)
-	first, err := o.connectBroker(bc.cfg, "TST")
+	first, err := o.connectBroker(bc)
 	if err != nil {
 		t.Fatalf("initial connect to fake broker: %v", err)
 	}
@@ -556,7 +557,7 @@ func TestBrokerStatus_DownWhileReconnecting(t *testing.T) {
 	o := testObserver(t)
 	bc := testBrokerClient("b", "127.0.0.1", port, "none")
 	registered(o, bc)
-	c, err := o.connectBroker(bc.cfg, "TST")
+	c, err := o.connectBroker(bc)
 	if err != nil {
 		t.Fatalf("connect to fake broker: %v", err)
 	}
@@ -571,9 +572,8 @@ func TestBrokerStatus_DownWhileReconnecting(t *testing.T) {
 
 	listenFakeBroker(t, addr)
 	waitFor(t, "paho to reconnect", 10*time.Second, func() bool { return o.BrokerStatuses()[0].Connected })
-	if got := brokerError(o); got != "" {
-		t.Errorf("reconnected but the error still reads %q", got)
-	}
+	// paho runs OnConnect, which clears the error, on its own goroutine after the session opens.
+	waitFor(t, "the error to clear once reconnected", time.Second, func() bool { return brokerError(o) == "" })
 }
 
 // While paho reconnects it takes a QoS 0 publish and discards it, and holds a QoS 1 one until the link is back, so both must count as dropped at once.
@@ -583,7 +583,7 @@ func TestDoPublish_DropsWhileReconnecting(t *testing.T) {
 	o := testObserver(t)
 	bc := testBrokerClient("b", "127.0.0.1", port, "none")
 	registered(o, bc)
-	c, err := o.connectBroker(bc.cfg, "TST")
+	c, err := o.connectBroker(bc)
 	if err != nil {
 		t.Fatalf("connect to fake broker: %v", err)
 	}
@@ -600,5 +600,213 @@ func TestDoPublish_DropsWhileReconnecting(t *testing.T) {
 	}
 	if p, d := bc.published.Load(), bc.dropped.Load(); p != 0 || d != 2 {
 		t.Errorf("published %d dropped %d, want 0 and 2", p, d)
+	}
+}
+
+// open is how many sessions the broker holds.
+func (f *fakeBroker) open() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.live)
+}
+
+// kick closes every session but keeps listening, as a broker that drops clients does.
+func (f *fakeBroker) kick() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for c := range f.live {
+		c.Close()
+		delete(f.live, c)
+	}
+}
+
+// A refresh while paho is reconnecting would cancel that reconnect and leave nothing dialling once the broker is back.
+func TestRefreshToken_LeavesAReconnectingSessionToPaho(t *testing.T) {
+	addr, port := freePort(t)
+	fb := listenFakeBroker(t, addr)
+	o := testObserver(t)
+	bc := testBrokerClient("tok", "127.0.0.1", port, "token")
+	bc.cfg.Audience = "test"
+	registered(o, bc)
+	c, err := o.connectBroker(bc)
+	if err != nil {
+		t.Fatalf("connect to fake broker: %v", err)
+	}
+	bc.swapClient(c)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		close(bc.stop)
+		waitFor(t, "any retry loop to exit", 3*time.Second, func() bool { return !bc.retrying.Load() })
+		if c := bc.currentClient(); c != nil {
+			c.Disconnect(0)
+		}
+	})
+
+	fb.drop()
+	waitFor(t, "the loss to be seen", 3*time.Second, func() bool { return brokerError(o) != "" })
+	if o.refreshToken(ctx, bc) {
+		t.Error("refreshed a session paho is reconnecting")
+	}
+	back := listenFakeBroker(t, addr)
+	waitFor(t, "the broker to be reconnected", 10*time.Second, func() bool { return o.BrokerStatuses()[0].Connected })
+	if n, k := back.accepts.Load(), back.takeovers.Load(); n != 1 || k != 0 {
+		t.Errorf("%d connects and %d takeovers once the broker was back, want 1 and 0", n, k)
+	}
+}
+
+// lockedLog is a log the paho goroutines can write while the test reads it.
+type lockedLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func (l *lockedLog) count(s string) int { return strings.Count(l.String(), s) }
+
+// paho's own reconnect must publish online, or the retained offline will stands until the next heartbeat; the log says it is back after saying it was lost.
+func TestReconnect_PublishesOnline(t *testing.T) {
+	addr, port := freePort(t)
+	fb := listenFakeBroker(t, addr)
+	o := testObserver(t)
+	logs := &lockedLog{}
+	o.log = slog.New(slog.NewTextHandler(logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.runCtx = ctx
+	bc := testBrokerClient("b", "127.0.0.1", port, "none")
+	registered(o, bc)
+	c, err := o.connectBroker(bc)
+	if err != nil {
+		t.Fatalf("connect to fake broker: %v", err)
+	}
+	defer c.Disconnect(0)
+	bc.swapClient(c)
+	time.Sleep(200 * time.Millisecond)
+	if n := len(bc.publishCh); n != 0 {
+		t.Fatalf("the first connect queued %d publishes; whoever adopts the client announces it", n)
+	}
+	if n := logs.count("broker reconnected"); n != 0 {
+		t.Fatalf("the first connect logged %d reconnects", n)
+	}
+
+	fb.drop()
+	waitFor(t, "the loss to be seen", 3*time.Second, func() bool { return brokerError(o) != "" })
+	listenFakeBroker(t, addr)
+	waitFor(t, "paho to reconnect", 10*time.Second, func() bool { return o.BrokerStatuses()[0].Connected })
+	waitFor(t, "a status after the reconnect", 2*time.Second, func() bool { return len(bc.publishCh) > 0 })
+	job := <-bc.publishCh
+	if job.topic != bc.statusTopic() || !strings.Contains(string(job.payload), `"status":"online"`) {
+		t.Errorf("after the reconnect published %s on %q, want online on %q", job.payload, job.topic, bc.statusTopic())
+	}
+	if n := logs.count("level=INFO msg=\"broker reconnected\" broker=b"); n != 1 {
+		t.Errorf("logged %d reconnects at INFO, want 1:\n%s", n, logs)
+	}
+}
+
+// Stop while a refresh is dialling: the client it gets afterwards must be closed, not adopted with nothing left to stop it.
+func TestStop_DuringRefreshDialLeavesNoSession(t *testing.T) {
+	addr, port := freePort(t)
+	fb := listenFakeBroker(t, addr)
+	o := testObserver(t)
+	bc := testBrokerClient("tok", "127.0.0.1", port, "token")
+	bc.cfg.Audience = "test"
+	registered(o, bc)
+	first, err := o.connectBroker(bc)
+	if err != nil {
+		t.Fatalf("connect to fake broker: %v", err)
+	}
+	bc.swapClient(first)
+	close(bc.workerDone) // no worker, so Stop returns while the refresh still dials
+
+	fb.connackDelay = time.Second
+	done := make(chan bool)
+	go func() { done <- o.refreshToken(context.Background(), bc) }()
+	waitFor(t, "the refresh to dial", 3*time.Second, func() bool { return fb.accepts.Load() == 2 })
+	o.Stop()
+	if <-done {
+		t.Error("the refresh reported success after Stop")
+	}
+	waitFor(t, "every session to close", 3*time.Second, func() bool { return fb.open() == 0 })
+}
+
+// Stop while paho sleeps before a reconnect: the stopped client must never dial again, or it takes over the next observer's session.
+func TestStop_InPahoBackoffNeverDialsAgain(t *testing.T) {
+	addr, port := freePort(t)
+	fb := listenFakeBroker(t, addr)
+	o := testObserver(t)
+	bc := testBrokerClient("b", "127.0.0.1", port, "none")
+	registered(o, bc)
+	c, err := o.connectBroker(bc)
+	if err != nil {
+		t.Fatalf("connect to fake broker: %v", err)
+	}
+	bc.swapClient(c)
+	go o.publishWorker(bc)
+	fb.kick()
+	waitFor(t, "the first reconnect", 3*time.Second, func() bool { return fb.accepts.Load() == 2 && c.IsConnectionOpen() })
+	fb.kick() // lost again within 3 s, so paho sleeps before its next attempt
+	time.Sleep(200 * time.Millisecond)
+	o.Stop()
+	before := fb.accepts.Load()
+	time.Sleep(2500 * time.Millisecond)
+	if n := fb.accepts.Load() - before; n != 0 {
+		t.Errorf("the stopped observer's client connected %d more time(s)", n)
+	}
+}
+
+// Once Stop has run no transport may open a connection.
+func TestConnectBroker_StoppedNeverDials(t *testing.T) {
+	addr, port := freePort(t)
+	fb := listenFakeBroker(t, addr)
+	o := testObserver(t)
+	for _, tc := range []struct {
+		transport string
+		tls       bool
+	}{{"tcp", false}, {"tcp", true}, {"websockets", false}, {"websockets", true}} {
+		bc := testBrokerClient("b", "127.0.0.1", port, "none")
+		bc.cfg.Transport, bc.cfg.TlsEnabled = tc.transport, tc.tls
+		close(bc.stop)
+		if c, err := o.connectBroker(bc); !errors.Is(err, errStopped) {
+			if c != nil {
+				c.Disconnect(0)
+			}
+			t.Errorf("%s tls=%v after Stop: %v, want %v", tc.transport, tc.tls, err, errStopped)
+		}
+	}
+	if n := fb.accepts.Load(); n != 0 {
+		t.Errorf("%d connections opened after Stop", n)
+	}
+}
+
+// Two brokers on one host need their own ClientIDs, or each takes the other over; a lone broker keeps the ID it always had.
+func TestClientID_UniquePerBroker(t *testing.T) {
+	o := testObserver(t)
+	o.cfg.Brokers = []config.BrokerConfig{
+		{Name: "tcp", Host: "mqtt.example", Port: 1883, Enabled: true},
+		{Name: "ws", Host: "mqtt.example", Port: 443, Enabled: true},
+		{Name: "off", Host: "solo.example", Port: 443},
+		{Name: "solo", Host: "solo.example", Port: 1883, Enabled: true},
+	}
+	ids := map[string]string{}
+	for _, b := range o.cfg.Brokers {
+		ids[b.Name] = o.clientID(b)
+	}
+	if ids["tcp"] == ids["ws"] {
+		t.Errorf("two brokers on one host share ClientID %q", ids["tcp"])
+	}
+	if want := "meshcore_" + o.pubKeyHx[:16] + "_solo.example"; ids["solo"] != want {
+		t.Errorf("a broker alone on its host has ClientID %q, want %q", ids["solo"], want)
 	}
 }

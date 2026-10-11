@@ -2,7 +2,10 @@ package repeater
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,5 +186,66 @@ func TestRegionLoad_KeepsScopeItLoads(t *testing.T) {
 	waitRegions(t, r, func(rs []config.RepeaterRegion) bool { return regionParent(rs, "au") == "*" })
 	if scope := r.cfgSnapshot().FloodScope; scope != "region:nz" {
 		t.Errorf("scope = %q, want region:nz kept", scope)
+	}
+}
+
+// The firmware keeps a name's first 30 bytes, but a cut character or other non-UTF-8 name changes in our JSON storage and refuses the config at the next start, so it is refused here with the firmware's error.
+func TestRegionName_RefusedWhenStorageWouldChangeIt(t *testing.T) {
+	r := newRegionRepeater(t, config.RepeaterRegion{Name: "*"})
+	cut := "a" + strings.Repeat("ō", 15) // 31 bytes: the 30th is half an ō
+	notUTF8 := "nz\xff"
+	for cmd, want := range map[string]string{
+		"region put " + cut:         "Err - unable to put",
+		"region put " + notUTF8:     "Err - unable to put",
+		"region default " + cut:     "Err - region table full",
+		"region default " + notUTF8: "Err - region table full",
+		"region def " + cut:         "Err - put failed: " + cut,
+	} {
+		if got := r.runCLI(cmd); got != want {
+			t.Errorf("%q = %q, want %q", cmd, got, want)
+		}
+	}
+
+	// A cut on a character boundary is kept, as the firmware keeps it.
+	if got := r.runCLI("region put " + strings.Repeat("ō", 16)); got != "OK - (flood allowed)" {
+		t.Fatalf("put a 32-byte name = %q", got)
+	}
+	kept := strings.Repeat("ō", 15)
+	regions := waitRegions(t, r, func(rs []config.RepeaterRegion) bool { return regionParent(rs, kept) == "*" })
+	stored, err := json.Marshal(regions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back []config.RepeaterRegion
+	if err := json.Unmarshal(stored, &back); err != nil || !slices.Equal(back, regions) {
+		t.Errorf("regions changed in storage: %+v -> %+v (%v)", regions, back, err)
+	}
+}
+
+// A name cut to an existing region's is that region, not a duplicate the config would refuse.
+func TestRegionPut_CutToAnExistingName(t *testing.T) {
+	name := strings.Repeat("a", 30)
+	r := newRegionRepeater(t, config.RepeaterRegion{Name: "*"}, config.RepeaterRegion{Name: "nz", Parent: "*"}, config.RepeaterRegion{Name: name, Parent: "*", DenyFlood: true})
+	if got := r.runCLI("region put " + name + "b nz"); got != "OK - (flood allowed)" {
+		t.Fatalf("put = %q", got)
+	}
+	regions := waitRegions(t, r, func(rs []config.RepeaterRegion) bool { return regionParent(rs, name) == "nz" })
+	if len(regions) != 3 || regionDenies(regions, name) {
+		t.Errorf("regions = %+v, want %s moved under nz and allowing flood", regions, name)
+	}
+}
+
+// Firmware: putRegion fails on a full table, so `region default <new>` answers "Err - region table full" and changes nothing.
+func TestRegionDefault_FullTable(t *testing.T) {
+	regions := []config.RepeaterRegion{{Name: "*"}}
+	for i := range 32 {
+		regions = append(regions, config.RepeaterRegion{Name: fmt.Sprintf("r%02d", i), Parent: "*", DenyFlood: true})
+	}
+	r := newRegionRepeater(t, regions...)
+	if got := r.runCLI("region default fresh"); got != "Err - region table full" {
+		t.Errorf("default on a full table = %q, want Err - region table full", got)
+	}
+	if got := r.runCLI("region default r07"); got != " default scope is now r07" {
+		t.Errorf("default to an existing region on a full table = %q", got)
 	}
 }

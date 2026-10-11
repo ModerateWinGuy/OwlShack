@@ -281,6 +281,49 @@ func TestOpen_CopiesAreFoundByExactName(t *testing.T) {
 	}
 }
 
+// Going back by copying the pre-upgrade copy into place, not moving it, left it there, and the next upgrade took it for an unfinished one and copied nothing, so what was written since had no way back.
+func TestOpen_ACopyARollbackLeftIsTakenAfresh(t *testing.T) {
+	t.Parallel()
+	for _, to := range []int{LatestSchemaVersion(), LatestSchemaVersion() - 1} {
+		t.Run(fmt.Sprintf("left by v%d", to), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "meshcore.db")
+			markedDB(t, fmt.Sprintf("%s.pre-v16-to-v%d", path, to), 16, "before the rollback")
+			markedDB(t, path, 16, "since the rollback")
+			st, err := Open(t.Context(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.Close()
+			fresh := fmt.Sprintf("%s.pre-v16-to-v%d", path, LatestSchemaVersion())
+			if got := markedName(t, fresh); got != "since the rollback" {
+				t.Errorf("the copy holds %q, want what was written since the rollback", got)
+			}
+			if copies, _ := upgradeCopies(path); len(copies) != 1 {
+				t.Errorf("copies %v, want only %s", copies, fresh)
+			}
+		})
+	}
+}
+
+// An upgrade that stops part way after copying afresh resumes from its own copy, not the one the rollback left with the same starting version.
+func TestOpen_AResumedUpgradeAfterARollbackKeepsItsOwnCopy(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "meshcore.db")
+	markedDB(t, fmt.Sprintf("%s.pre-v16-to-v%d", path, LatestSchemaVersion()-1), 16, "before the rollback")
+	own := fmt.Sprintf("%s.pre-v16-to-v%d", path, LatestSchemaVersion())
+	markedDB(t, own, 16, "since the rollback")
+	dbAt(t, path, 20).Close()
+	st, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if copies, _ := upgradeCopies(path); len(copies) != 1 || copies[0].path != own {
+		t.Errorf("copies %v, want only %s", copies, own)
+	}
+}
+
 // The hint must name the newest copy, which a string sort puts before .pre-v9.
 func TestRestoreHint_NamesTheNewestCopy(t *testing.T) {
 	t.Parallel()

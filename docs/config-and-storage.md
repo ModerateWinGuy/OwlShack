@@ -42,29 +42,42 @@ radio/connection change still restarts everything (modem reconnect);
   reload so racing requests cannot each pass the checks the other breaks.
   The `radio` provider reads the board's battery and MCU temperature from what
   the liveness probe already cached (`liveRadio` in `internal/app/sensors.go`),
-  so it adds no link traffic; its sample time is the board's last answer, kept
-  across a reconnect like health's, and a 0 mV battery (the firmware's "not
-  supported") reads 0 V, as the firmware sends it. SPI has no board, so the
-  provider is unavailable there. On KISS the same 30 s poll also sends
-  `GET_SENSORS` with the environment permission and keeps the decoded LPP; each
-  channel the board reports is a `radio-board-sensor` (option `channel`, 2 to
-  255, one sensor per channel), reading in the I2C drivers' metrics and units,
-  and the channel map may only pick what that channel reads now (any board
-  metric while it reads nothing, so a sensor that failed to start after a
-  reboot doesn't block the node's map). Board sensors go stale on their own
-  query's answers, not the board's. The firmware numbers board channels in the
-  order it found its sensors, so rewiring the board can move one. Position is
-  not asked for, and openHop has no sensors command.
+  so it adds no link traffic. Each reading (battery, MCU temperature, noise
+  floor, board sensors) goes stale and is timed by its own query's last answer,
+  never by the board answering something else, an error reply included; the
+  battery and MCU pair is as old as the older of the two. A 0 mV battery (the
+  firmware's "not supported") reads 0 V, as the firmware sends it. SPI has no
+  board, so the provider is unavailable there. On KISS the same 30 s poll also
+  sends `GET_SENSORS` with the environment permission and keeps the decoded
+  LPP; each channel the board reports is a `radio-board-sensor` (option
+  `channel`, 2 to 255, one sensor per channel), reading in the I2C drivers'
+  metrics and units where the LPP type names one. A generic sensor value has no
+  unit, so a board BME680's gas is a unitless `generic_sensor`: the firmware
+  puts the gas resistance there, or the IAQ index on a BSEC build, and nothing
+  on the wire says which. A new map row may only pick what that channel reads
+  now (any board metric while it reads nothing); a saved row, and an edit that
+  takes nothing away, are not held to what it reads now. The firmware numbers
+  board channels in the order its sensors started, so one that fails to start
+  moves the next onto its channel: each board sensor records the metrics its
+  channel first read (`sensor_state`, as `channel:metrics`) and, while the
+  channel reads another set, reads nothing and says so rather than read
+  another part. Moving it to another channel records afresh; after rewiring
+  the board, delete its board sensors and add them again. Position is not
+  asked for, and openHop has no sensors command.
   `companions.telem_base/loc/env` hold who may read each telemetry class
   (`deny`, `selected`, `contacts`), written only by
   `PUT /api/config/companions/{id}/telemetry`, so every other companion edit
-  carries them through. `companions.app_enabled` and `app_port` are the
-  MeshCore app's TCP access (see [firmware-protocol.md](./firmware-protocol.md)),
-  written only by `PUT /api/config/companions/{id}/app`; the port is 5000-5015,
-  kept while access is off, and unique among companions with access on.
+  carries them through. `companions.app_enabled`, `app_port` and
+  `app_queue_size` are the MeshCore app's TCP access (see
+  [firmware-protocol.md](./firmware-protocol.md)), written only by
+  `PUT /api/config/companions/{id}/app`; the port is 5000-5015, kept while
+  access is off, and unique among companions with access on.
   `app_queue` holds the message frames the app has yet to sync (the firmware's
-  offline queue, 256 per companion, oldest channel message dropped first); a
-  trigger empties it when access goes off. The map keys on node kind and id with no foreign key
+  offline queue): up to `app_queue_size` per companion (16-10000, default 256,
+  most firmware builds' `OFFLINE_QUEUE_SIZE`), the oldest channel messages
+  dropped first, or the new message when only DMs fill it. A new size applies
+  on the next message without reopening the port; DMs past a lowered size stay
+  until the app syncs them. A trigger empties it when access goes off. The map keys on node kind and id with no foreign key
   (a row may be the repeater's), so deleting a companion or the repeater deletes
   its rows, and a pruned backup drops rows whose node is gone.
 - **Config is stored relationally** (the config tables: `settings`,
@@ -406,9 +419,11 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
 - **Restoring cannot overwrite the live file** (this process holds it open), so
   `StageRestore` writes `meshcore.db.restore` and `AdoptPendingRestore` (called
   from `Run` *before* `store.Open`) renames it into place on the next start,
-  keeping the outgoing DB as `meshcore.db.replaced` and deleting the stale
-  `-wal`/`-shm` — leaving those would corrupt the adopted DB. The API returns
-  `restartRequired: true`.
+  keeping the outgoing DB as `meshcore.db.replaced`. Its WAL is checkpointed
+  into it first, so the one file holds the last writes before a crash; if that
+  fails the WAL moves with it as `meshcore.db.replaced-wal`. Nothing of the old
+  DB's `-wal`/`-shm` stays beside the adopted one, which it would corrupt. The
+  API returns `restartRequired: true`.
 - **The companion selection is always explicit.** `companionIds` is exactly
   what to keep: `[]` is none (a settings-only backup), every id is all. It is
   **required** — an omitted or `null` field is a 400, not a default, which is
@@ -431,7 +446,8 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
 - **Day windows** are `-1` all, `0` none, or N days (`store.DaysAll` /
   `DaysNone`). They apply to `packets.received_at` and `messages.received_at`
   (unix ms, our clock: a sender's `timestamp` can be years out) and `node_metrics.ts` / `node_neighbors.ts` (unix seconds), hence
-  the `sinceMS` and `sinceSecs` cutoffs in `backup.go`.
+  the `sinceMS` and `sinceSecs` cutoffs in `backup.go`. Echoes go with their
+  messages.
 - **Import sniffs the upload**: the `SQLite format 3\0` magic means a backup
   (staged); anything else goes through `importConfigFile`, so an operator can
   also bring an old `.toml`/`.yaml`/`.json` config across through the UI. The
@@ -448,7 +464,12 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
   INTO` and syncs it, so going back to an older build is stopping OwlShack and
   moving the copy into place. An upgrade that fails part way keeps its copy,
   and the next start reuses it rather than copying the half-upgraded database;
-  older copies are deleted only once an upgrade finishes. If the copy cannot be
+  older copies are deleted only once an upgrade finishes. A copy whose `from` is
+  the database's own version is not unfinished, as each file commits with its
+  version bump: it is what a rollback by `cp` (not `mv`) left, so the upgrade
+  copies afresh, writing beside it and renaming over it so a failed copy keeps
+  it. Of two unfinished copies from one version, the one for the newer build
+  wins. If the copy cannot be
   made (a full disk), the upgrade goes ahead without one and logs a warning, so
   an updated node still starts. Builds from this one
   on name the copy when they refuse a newer database (v1.4.x does not). Nothing
@@ -466,8 +487,16 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
   `PUT /api/config/settings`, which refuses a missing or out-of-range value) is read by `packetPruneLoop`
   (`internal/app/packetlog.go`) at startup and hourly; saving it needs no reload.
   It deletes 500 rows per writer turn (`PacketRepo.PruneBatchBefore`) so a long
-  backlog never fills the writer queue and drops RX writes. SQLite does not
-  shrink the file, so lowering the setting frees pages for reuse only.
+  backlog never fills the writer queue and drops RX writes. SQLite only reuses
+  freed pages, so once a pass leaves a quarter of the file free (whatever freed
+  it), `Store.ReleaseFreePages` gives them back to the disk 1024 pages per
+  writer turn with `PRAGMA incremental_vacuum`. That needs `auto_vacuum =
+  INCREMENTAL`, which `Open` sets with a single `VACUUM` before the writer
+  starts, once per file (skipped, with a warning, when the disk lacks twice the
+  live data). Not in the DSN: a DSN pragma runs on every pooled connection, and
+  this one writes, which lost writes to "database is locked". **Never run a full `VACUUM` on the
+  writer**: a trigger's reply calls `WriteSync` on the RX dispatch goroutine, so
+  one long writer turn stalls RX.
 - **`received_at` is UTC unix milliseconds**, like every time Go writes (see
   CLAUDE.md), so the prune is a batched `DELETE ... WHERE received_at < ?` and
   `ScanFloodRxSince` / `SentSince` take a `WHERE` range, all on
@@ -601,7 +630,7 @@ POST /api/config/mqtt/brokers          PUT|DELETE /api/config/mqtt/brokers/{id}
 GET  /api/config/companions                                  (id, name, pubkey, privateKeySet, …)
 POST /api/config/companions            PUT|DELETE /api/config/companions/{id}
 PUT  /api/config/companions/{id}/telemetry                   { base, location, environment }   (each deny | selected | contacts)
-PUT  /api/config/companions/{id}/app                         { enabled, port }   (both required; port 5000-5015, one companion per open port)
+PUT  /api/config/companions/{id}/app                         { enabled, port, queueSize }   (all required; port 5000-5015, one companion per open port; queueSize 16-10000)
 GET  /api/config/companions/{id}/channels
 GET  /api/health                                             (monitoring snapshot; see below)
 GET  /api/config/channels                                    (all channels; for trigger name resolution)

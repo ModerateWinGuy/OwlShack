@@ -35,7 +35,7 @@ func startRepeater(ctx context.Context, cfg *config.Config, mux *node.RadioMux, 
 	}
 	hooks := repeater.Hooks{
 		Reconfigure: repeaterReconfigurer(db, reload),
-		PollStats:   statsPoller(stats),
+		BoardStats:  boardStats(stats),
 		Telemetry:   telemetry.MapFor(store.TelemetryNode{Kind: store.NodeKindRepeater, ID: store.RepeaterNodeID}),
 	}
 	rep, err := repeater.NewRepeater(*effectiveRepeaterConfig(cfg), mux, db, hub, hooks)
@@ -83,13 +83,13 @@ func onlyRegionsDiffer(a, b *config.RepeaterConfig) bool {
 	return reflect.DeepEqual(x, y)
 }
 
-// statsPoller maps a nil provider to a nil poller, leaving noise floor and battery at 0.
-func statsPoller(stats modem.StatsProvider) func(context.Context) repeater.DeviceStats {
+// boardStats maps a nil provider to nil, leaving noise floor and battery at 0; the modem's liveness probe keeps the cache current.
+func boardStats(stats modem.StatsProvider) func() repeater.DeviceStats {
 	if stats == nil {
 		return nil
 	}
-	return func(ctx context.Context) repeater.DeviceStats {
-		ds := stats.Stats(ctx)
+	return func() repeater.DeviceStats {
+		ds := stats.CachedStats()
 		return repeater.DeviceStats{
 			NoiseFloor:     ds.NoiseFloor,
 			HaveNoiseFloor: ds.HaveNoiseFloor,

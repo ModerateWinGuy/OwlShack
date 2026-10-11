@@ -142,12 +142,21 @@ export interface ConfigCompanion {
   floodScope: FloodScope;
   shareLocation: boolean;
   // The MeshCore app's TCP access; the port is kept while access is off, 0 when never chosen.
-  app: { enabled: boolean; port: number };
+  app: AppAccess;
+}
+
+export interface AppAccess {
+  enabled: boolean;
+  port: number;
+  // How many messages are held while the app is away.
+  queueSize: number;
 }
 
 // The ports the app may be given, so a container can publish the whole range up front.
 export const APP_PORT_FIRST = 5000;
 export const APP_PORT_LAST = 5015;
+export const APP_QUEUE_MIN = 16;
+export const APP_QUEUE_MAX = 10000;
 
 export type TelemetryMode = "deny" | "selected" | "contacts";
 
@@ -507,7 +516,7 @@ export const configApi = {
     request(`/api/config/companions/${id}/telemetry`, "PUT", input),
 
   // Its own endpoint, so access is only ever turned on here and never by saving another form.
-  setCompanionApp: (id: number, input: { enabled: boolean; port: number }) =>
+  setCompanionApp: (id: number, input: AppAccess) =>
     request(`/api/config/companions/${id}/app`, "PUT", input),
 
   createChannel: (companionId: number, input: ChannelInput) =>

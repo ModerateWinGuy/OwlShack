@@ -13,7 +13,8 @@ top until tagged.
   password, so anyone who can reach the port can read the companion's messages and send as it:
   turn it on only on a network you trust. From the app you can rename the companion, move it, set
   who may read its telemetry, its region and path hash size, add and remove channels, and rename
-  or star contacts; the radio's settings stay OwlShack's to change.
+  or star contacts; the radio's settings stay OwlShack's to change. The App page also sets how
+  many messages are held while the app is away (256 unless you change it).
 - **Star your favourite contacts.** Starred contacts are listed first. The star is the same one as
   in the MeshCore app, so starring a contact in either shows in both.
 - **Keep a companion's position out of its adverts.** Edit companion has Share position in
@@ -24,7 +25,9 @@ top until tagged.
 - **Sensors wired to a KISS modem show on the Sensors page.** A BME280 or other sensor on the
   modem's board appears in Add sensor as a board sensor, one per channel the board reports. Once
   added it reads like a sensor wired to the Pi, and you can share it over the mesh from the channel
-  map. If you rewire the board's sensors, check each board sensor still reads the right one.
+  map. A BME680's gas reading shows without a unit, as the board sends it. If the board's sensors
+  change, a board sensor whose channel now reports something else shows an error instead of
+  another sensor's readings; delete it and add it again.
 - **Your repeater can feed MQTT.** On the MQTT page, pick your repeater as the node, and LetsMesh,
   CoreScope and other brokers see the feed under the repeater's own name and key. The node that
   feeds MQTT can't be deleted while MQTT is on; pick another node first.
@@ -110,6 +113,13 @@ top until tagged.
 - **Resume a room's posts from its thread.** When posts stop arriving, the thread menu's "Resume
   posts" asks the room to carry on from the last one you got; it doesn't fetch posts from before
   that. It replaces "Resync posts" on the room's Status tab.
+- **The MQTT page checks the IATA code and the status interval.** An IATA code can use letters,
+  digits, `-` and `_`, and the status interval is 60 to 3600 seconds. A code with other characters
+  made the broker refuse every connection. A saved value outside these keeps working until you
+  next save the MQTT page, which then asks you to change it.
+- **Renaming or moving a companion keeps its logins and doesn't send an advert by itself.** The
+  next advert carries the new name and position; press flood advert on the companion's page to
+  announce them at once, as in the MeshCore app.
 
 ### Fixed
 
@@ -182,6 +192,50 @@ top until tagged.
   different key from the one firmware repeaters use for it, so your repeater ignored their scoped
   traffic in that region and they ignored yours. Regions written with `#`, such as `#nz`, already
   matched.
+- **Changing the radio's settings or resetting the modem no longer leaks memory.** OwlShack stays
+  the same size however often the radio reconnects.
+- **The Radio page and `/api/health` show how many packets are waiting to go out.** The transmit
+  queue always read 0.
+- **Channel messages lost when the modem resets show as failed**, with retry, instead of looking
+  sent.
+- **Changing a channel no longer breaks an open Channels or Bots page.** Adding, removing or
+  renaming a channel left other open pages failing with "channel not found" or "no bot with id"
+  until you reloaded them.
+- **A companion with more than 50 channels keeps them all.** Changing a channel no longer deletes
+  the ones past 50 or their keys, and each joins at the next start or settings save once a slot
+  is free.
+- **A remote admin can no longer leave your repeater unable to start.** A region name longer than
+  30 bytes that was cut part-way through a character was saved in a form OwlShack then refused to
+  load. Your repeater now refuses it with the firmware's error.
+- **Your repeater answers a region list with many regions.** The reply was too big to send, so
+  `region list`, the Regions tab and Discover nearby got nothing. Names that don't fit are left
+  out, as on a firmware repeater.
+- **Setting a new default region on a full region table says it failed**, instead of replying OK
+  and changing nothing.
+- **Your repeater answers CLI commands that a client marks as commands**, as firmware repeaters
+  do. It ignored them.
+- **Brokers show your node online again as soon as it reconnects.** After a network drop or a
+  broker restart it showed offline until the next status message, up to five minutes later.
+- **Saving MQTT settings no longer knocks the new connection off the broker.**
+- **Two brokers on the same host no longer knock each other off.**
+- **The log says when an MQTT broker comes back.** After a "broker connection lost" warning, the
+  reconnect is logged too, so the log no longer reads as if the broker were still down.
+- **A companion's MQTT feed no longer says it relays packets** when a repeater runs beside it.
+- **A backup that keeps recent messages keeps how they were heard.** It dropped every echo, so
+  restored messages showed no paths.
+- **The database gives disk space back after old packets are cleared.** It stayed at its largest
+  size. The first start after updating rewrites the database once to allow this, which takes a
+  little longer on a large database.
+- **Rolling back by copying the pre-upgrade copy into place is safe to upgrade from again.** The
+  next upgrade takes a fresh copy, so anything written since the rollback can still be undone.
+- **A restore after a crash keeps the replaced database complete.** `meshcore.db.replaced` holds
+  every write made before the crash.
+- **Messages keep your stored threads while the radio is down.** The list showed "Failed to load
+  conversations" and stayed empty until you pressed Retry.
+- **Monitoring charts appear after the first poll**, without reloading the page.
+- **First-run setup fits a phone screen.** Its buttons scrolled off the side.
+- **Screen readers name map markers and settings fields.** Markers were read without a name, text
+  fields by their placeholder instead of their label, and dropdowns only by their current value.
 
 ### Upgrading
 

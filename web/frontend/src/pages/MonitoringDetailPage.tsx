@@ -216,6 +216,11 @@ export function MonitoringDetailPage() {
         lastError: "",
         metrics: { ...(prev?.metrics || {}), ...m.metrics },
       }));
+      // A first poll's metrics have no chart yet; a new name brings one, and its history with it.
+      setAvailable((prev) => {
+        const added = Object.keys(m.metrics || {}).filter((k) => !prev.includes(k));
+        return added.length > 0 ? [...prev, ...added] : prev;
+      });
     },
     [pubkey],
   );

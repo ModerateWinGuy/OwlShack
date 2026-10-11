@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { ShieldAlert, Smartphone, Unplug } from "lucide-react";
+import { Loader2, ShieldAlert, Smartphone, Unplug } from "lucide-react";
 import { toast } from "sonner";
 import { BackLink } from "@/components/BackLink";
 import { PageHeader } from "@/components/PageHeader";
 import { LoadErrorAlert } from "@/components/LoadErrorAlert";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -25,7 +26,14 @@ import {
 } from "@/components/ui/select";
 import { useCompanionRef } from "@/hooks/useCompanions";
 import { apiErrorMessage } from "@/lib/apiError";
-import { APP_PORT_FIRST, APP_PORT_LAST, configApi, type ConfigCompanion } from "@/lib/configApi";
+import {
+  APP_PORT_FIRST,
+  APP_PORT_LAST,
+  APP_QUEUE_MAX,
+  APP_QUEUE_MIN,
+  configApi,
+  type ConfigCompanion,
+} from "@/lib/configApi";
 
 const PORTS = Array.from({ length: APP_PORT_LAST - APP_PORT_FIRST + 1 }, (_, i) => APP_PORT_FIRST + i);
 
@@ -39,9 +47,10 @@ interface AppStatus {
   since?: string;
 }
 
-type Action = "on" | "move" | "off";
+type Action = "on" | "move" | "off" | "queue";
 
 const hint = "font-mono text-[11px] sm:text-[10px] leading-relaxed text-muted-foreground/70";
+const button = "rounded-none font-mono text-[11px] uppercase tracking-[0.12em]";
 
 async function loadCompanions(): Promise<ConfigCompanion[]> {
   const r = await fetch("/api/config/companions");
@@ -49,39 +58,37 @@ async function loadCompanions(): Promise<ConfigCompanion[]> {
   return (await r.json()) as ConfigCompanion[];
 }
 
-export function CompanionAppPage() {
-  const { ref } = useParams();
-  const { ref: companion, id, name } = useCompanionRef(ref);
-
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-col gap-3">
-        <BackLink to={`/companions/${encodeURIComponent(companion)}`} label={name || "companion"} />
-        <PageHeader eyebrow="MeshCore app over TCP" title="App access" className="mb-0" />
-      </div>
-      {id == null ? (
-        <p className={`panel px-4 py-4 ${hint}`}>Loading this companion...</p>
-      ) : (
-        <AppAccess companionId={id} companionRef={companion} companionName={name} />
-      )}
-    </div>
+// The port opens on the reload a save starts, so what it did is read back rather than assumed.
+async function reportPort(companionRef: string, port: number): Promise<void> {
+  let radioDown = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => window.setTimeout(r, 500));
+    const r = await fetch(`/api/companions/${encodeURIComponent(companionRef)}/app`).catch(() => null);
+    radioDown = r?.status === 404 || r?.status === 503;
+    if (!r?.ok) continue;
+    const s = (await r.json()) as AppStatus;
+    if (!s.enabled || s.port !== port) continue;
+    if (s.listening) {
+      toast.success(`MeshCore app access on, port ${port}`);
+      return;
+    }
+    if (s.error) {
+      toast.error(`App access is on, but port ${port} could not be opened: ${s.error}`);
+      return;
+    }
+  }
+  toast.info(
+    radioDown
+      ? `App access is on. Port ${port} opens when the radio is running.`
+      : `App access is on, but port ${port} has not opened yet.`,
   );
 }
 
-function AppAccess({
-  companionId,
-  companionRef,
-  companionName,
-}: {
-  companionId: number;
-  companionRef: string;
-  companionName: string;
-}) {
+export function CompanionAppPage() {
+  const { ref } = useParams();
+  const { ref: companion, id, name } = useCompanionRef(ref);
   const [companions, setCompanions] = useState<ConfigCompanion[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [port, setPort] = useState<number | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState<Action | null>(null);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -95,10 +102,58 @@ function AppAccess({
     void load();
   }, [load]);
 
-  const self = companions?.find((c) => c.id === companionId) ?? null;
+  // Only running companions resolve the ref, and none run while the radio is down; the stored ones still do.
+  const stored = companions?.find((c) => (id != null ? c.id === id : c.name === companion));
+  const companionId = id ?? stored?.id ?? null;
+  const companionName = name || stored?.name || "";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3">
+        <BackLink to={`/companions/${encodeURIComponent(companion)}`} label={companionName || "companion"} />
+        <PageHeader eyebrow="MeshCore app over TCP" title="App access" className="mb-0" />
+      </div>
+      {loadError ? (
+        <LoadErrorAlert message={loadError} onRetry={() => void load()} />
+      ) : companions == null ? (
+        <Skeleton className="h-40 w-full" />
+      ) : companionId == null ? (
+        <LoadErrorAlert message="This companion is no longer configured." onRetry={() => void load()} />
+      ) : (
+        <AppAccess
+          companionId={companionId}
+          companionRef={companion}
+          companionName={companionName}
+          companions={companions}
+          load={load}
+        />
+      )}
+    </div>
+  );
+}
+
+function AppAccess({
+  companionId,
+  companionRef,
+  companionName,
+  companions,
+  load,
+}: {
+  companionId: number;
+  companionRef: string;
+  companionName: string;
+  companions: ConfigCompanion[];
+  load: () => Promise<void>;
+}) {
+  const [port, setPort] = useState<number | null>(null);
+  const [queue, setQueue] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState<Action | null>(null);
+
+  const self = companions.find((c) => c.id === companionId) ?? null;
   // Another companion's open port is taken; one kept while its access is off is not.
   const taken = useMemo(
-    () => new Map((companions ?? []).filter((c) => c.id !== companionId && c.app.enabled).map((c) => [c.app.port, c.name])),
+    () => new Map(companions.filter((c) => c.id !== companionId && c.app.enabled).map((c) => [c.app.port, c.name])),
     [companions, companionId],
   );
   const firstFree = PORTS.find((p) => !taken.has(p)) ?? null;
@@ -106,19 +161,21 @@ function AppAccess({
   const savedPort = self && self.app.port !== 0 && !keptPortTaken ? self.app.port : firstFree;
   const chosen = port ?? savedPort;
 
+  if (!self) return <LoadErrorAlert message="This companion is no longer configured." onRetry={() => void load()} />;
+
   const save = async (action: Action, p: number) => {
     setBusy(action);
     try {
+      const fresh = (await loadCompanions()).find((c) => c.id === companionId);
+      if (!fresh) throw new Error("This companion is no longer configured.");
       // A move only keeps a port open; if access went off elsewhere, turning it back on needs the warning first.
-      if (action === "move") {
-        const fresh = (await loadCompanions()).find((c) => c.id === companionId);
-        if (!fresh?.app.enabled) {
-          toast.error("App access was turned off elsewhere. Turn it on again to choose a port.");
-          return;
-        }
+      if (action === "move" && !fresh.app.enabled) {
+        toast.error("App access was turned off elsewhere. Turn it on again to choose a port.");
+        return;
       }
-      await configApi.setCompanionApp(companionId, { enabled: action !== "off", port: p });
-      toast.success(action === "off" ? "MeshCore app access off" : `MeshCore app access on, port ${p}`);
+      await configApi.setCompanionApp(companionId, { enabled: action !== "off", port: p, queueSize: fresh.app.queueSize });
+      if (action === "off") toast.success("MeshCore app access off");
+      else await reportPort(companionRef, p);
       setConfirming(false);
       setPort(null);
     } catch (e) {
@@ -129,10 +186,28 @@ function AppAccess({
     }
   };
 
-  if (loadError) return <LoadErrorAlert message={loadError} onRetry={() => void load()} />;
-  if (companions == null) return <Skeleton className="h-40 w-full" />;
-  if (!self) return <LoadErrorAlert message="This companion is no longer configured." onRetry={() => void load()} />;
+  // A new size keeps access as it is now, which may have changed elsewhere since this page loaded.
+  const saveQueue = async (size: number) => {
+    setBusy("queue");
+    try {
+      const fresh = (await loadCompanions()).find((c) => c.id === companionId);
+      if (!fresh) throw new Error("This companion is no longer configured.");
+      await configApi.setCompanionApp(companionId, { enabled: fresh.app.enabled, port: fresh.app.port, queueSize: size });
+      toast.success(`Up to ${size} messages held for the app`);
+      await load();
+      setQueue(null);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save the messages held for the app");
+      await load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const on = self.app.enabled;
+  const queueText = queue ?? String(self.app.queueSize);
+  const queueSize = /^\d+$/.test(queueText) ? Number(queueText) : NaN;
+  const queueValid = queueSize >= APP_QUEUE_MIN && queueSize <= APP_QUEUE_MAX;
 
   return (
     <>
@@ -184,18 +259,26 @@ function AppAccess({
             {on ? (
               <>
                 {chosen != null && chosen !== self.app.port ? (
-                  <Button size="xs" onClick={() => void save("move", chosen)} disabled={busy !== null}>
-                    {busy === "move" ? "Moving..." : `Move to ${chosen}`}
+                  <Button size="sm" onClick={() => void save("move", chosen)} disabled={busy !== null} className={button}>
+                    {busy === "move" && <Loader2 className="size-3.5 animate-spin" />}
+                    move to {chosen}
                   </Button>
                 ) : null}
-                <Button size="xs" variant="outline" onClick={() => void save("off", self.app.port)} disabled={busy !== null}>
-                  {busy === "off" ? "Turning off..." : "Turn off"}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void save("off", self.app.port)}
+                  disabled={busy !== null}
+                  className={button}
+                >
+                  {busy === "off" && <Loader2 className="size-3.5 animate-spin" />}
+                  turn off
                 </Button>
               </>
             ) : (
-              <Button size="xs" onClick={() => setConfirming(true)} disabled={busy !== null || chosen == null}>
-                <Smartphone />
-                Turn on
+              <Button size="sm" onClick={() => setConfirming(true)} disabled={busy !== null || chosen == null} className={button}>
+                <Smartphone className="size-3.5" />
+                turn on
               </Button>
             )}
           </div>
@@ -211,6 +294,43 @@ function AppAccess({
             </p>
           ) : null}
           {on && chosen !== self.app.port ? <p className={hint}>Moving the port drops a connected app.</p> : null}
+
+          <div className="space-y-1 pt-1">
+            <Label htmlFor="app-queue" className="label-overline">
+              Messages held for the app
+            </Label>
+            <div className="flex flex-wrap items-center gap-3">
+              <Input
+                id="app-queue"
+                type="number"
+                inputMode="numeric"
+                min={APP_QUEUE_MIN}
+                max={APP_QUEUE_MAX}
+                step={1}
+                value={queueText}
+                onChange={(e) => setQueue(e.target.value)}
+                disabled={busy !== null}
+                aria-invalid={!queueValid}
+                aria-describedby="app-queue-hint"
+                className="w-28 rounded-none border-border bg-background font-mono text-base tabular-nums md:text-xs"
+              />
+              {queueValid && queueSize !== self.app.queueSize ? (
+                <Button size="sm" onClick={() => void saveQueue(queueSize)} disabled={busy !== null} className={button}>
+                  {busy === "queue" && <Loader2 className="size-3.5 animate-spin" />}
+                  save
+                </Button>
+              ) : null}
+            </div>
+            {queueValid ? (
+              <p id="app-queue-hint" className={hint}>
+                {APP_QUEUE_MIN}-{APP_QUEUE_MAX}. When full, the oldest channel message makes room; with only direct messages held, new ones are dropped.
+              </p>
+            ) : (
+              <p id="app-queue-hint" className="font-mono text-[11px] leading-relaxed text-destructive sm:text-[10px]">
+                Enter a whole number from {APP_QUEUE_MIN} to {APP_QUEUE_MAX}.
+              </p>
+            )}
+          </div>
         </div>
       </section>
 
@@ -227,16 +347,18 @@ function AppAccess({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button size="xs" variant="outline" onClick={() => setConfirming(false)} disabled={busy !== null}>
-              Cancel
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={busy !== null} className={button}>
+              cancel
             </Button>
             <Button
-              size="xs"
+              size="sm"
               variant="destructive"
               onClick={() => chosen != null && void save("on", chosen)}
               disabled={busy !== null || chosen == null}
+              className={button}
             >
-              {busy === "on" ? "Turning on..." : "Turn on"}
+              {busy === "on" && <Loader2 className="size-3.5 animate-spin" />}
+              turn on
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -339,9 +461,9 @@ function Connection({ companionRef, port, onStale }: { companionRef: string; por
                 <span className="text-muted-foreground"> since {new Date(status.since).toLocaleString()}</span>
               ) : null}
             </span>
-            <Button size="xs" variant="outline" onClick={() => void disconnect()} disabled={busy}>
-              <Unplug />
-              {busy ? "Disconnecting..." : "Disconnect"}
+            <Button size="sm" variant="outline" onClick={() => void disconnect()} disabled={busy} className={button}>
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Unplug className="size-3.5" />}
+              disconnect
             </Button>
           </>
         ) : (

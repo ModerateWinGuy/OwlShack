@@ -26,6 +26,14 @@ var ErrUnknownChannel = errors.New("channel not found")
 // uniqueTimestamp mirrors the firmware's getCurrentTimeUnique(): a remote node drops a second post sharing a timestamp as a retry.
 func (c *Companion) uniqueTimestamp() uint32 { return c.repeaters.UniqueTimestamp() }
 
+// SendScope is the region a send floods in: Label is what its message is stored under, Region the key it goes out with, nil unscoped.
+type SendScope struct {
+	Label  config.FloodScope
+	Region *meshcore.Region
+}
+
+func scopeOf(s config.FloodScope) SendScope { return SendScope{Label: s, Region: s.MeshRegion()} }
+
 func (c *Companion) SendChannelMessage(channelName, text string) error {
 	ch := c.findChannel(channelName)
 	if ch == nil {
@@ -34,8 +42,12 @@ func (c *Companion) SendChannelMessage(channelName, text string) error {
 	return c.sendGroupReply(ch, text, c.pathHashSize(), 5*time.Second, 3, c.channelScope(ch.Name))
 }
 
-// sendGroupReply is the shared send path for the chat API and trigger replies, so bot replies are persisted, broadcast and echo-tracked like manual sends.
 func (c *Companion) sendGroupReply(ch *meshcore.ChannelEntry, text string, hashSize uint8, retryTimeout time.Duration, maxRetries int, scope config.FloodScope) error {
+	return c.sendGroup(ch, text, hashSize, retryTimeout, maxRetries, scopeOf(scope))
+}
+
+// sendGroup is the shared send path for the chat API, the app and trigger replies, so every post is persisted, broadcast and echo-tracked alike.
+func (c *Companion) sendGroup(ch *meshcore.ChannelEntry, text string, hashSize uint8, retryTimeout time.Duration, maxRetries int, scope SendScope) error {
 	name := c.conf().Name
 	payload := &meshcore.GroupTextPayload{
 		Timestamp: c.uniqueTimestamp(),
@@ -53,7 +65,7 @@ func (c *Companion) sendGroupReply(ch *meshcore.ChannelEntry, text string, hashS
 		Direction:   "tx",
 		Timestamp:   now,
 		ReceivedAt:  now,
-		FloodScope:  string(scope),
+		FloodScope:  string(scope.Label),
 	}
 
 	c.store.WriteSync(func() {
@@ -85,7 +97,7 @@ func (c *Companion) sendGroupReply(ch *meshcore.ChannelEntry, text string, hashS
 	c.pendingOutbound.Unlock()
 
 	err := c.node.SendGroupTextScoped(
-		ch, scope.MeshRegion(), payload, hashSize, retryTimeout, maxRetries,
+		ch, scope.Region, payload, hashSize, retryTimeout, maxRetries,
 		func(gsr node.GroupSendResult) {
 			c.log.Debug("group reply result", "channel", ch.Name, "confirmed", gsr.Confirmed)
 		},
@@ -122,13 +134,13 @@ func (c *Companion) setMessageStatus(msgID int64, channel, status string) {
 
 // SendContactMessage is the chat API's DM send: a flood or 0-hop DM goes out at the contact's bytes per hop.
 func (c *Companion) SendContactMessage(pubkeyHex, text string) error {
-	_, err := c.sendDM(pubkeyHex, text, c.bytesPerHopHex(pubkeyHex), 5*time.Second, c.contactScopeHex(pubkeyHex), nil)
+	_, err := c.sendDM(pubkeyHex, text, c.bytesPerHopHex(pubkeyHex), 5*time.Second, scopeOf(c.contactScopeHex(pubkeyHex)), nil)
 	return err
 }
 
 // sendDMReply is a DM trigger's answer: the trigger's pathHashSize frames it only when no route is stored, since a stored path already fixes its own hash width.
 func (c *Companion) sendDMReply(pubkeyHex, text string, hashSize uint8, ackTimeout time.Duration, scope config.FloodScope) error {
-	_, err := c.sendDM(pubkeyHex, text, hashSize, ackTimeout, scope, nil)
+	_, err := c.sendDM(pubkeyHex, text, hashSize, ackTimeout, scopeOf(scope), nil)
 	return err
 }
 
@@ -165,7 +177,7 @@ func (c *Companion) dmAckTimeout(textLen int, outPath []byte, hashSize uint8, fl
 }
 
 // sendDM stores, shows and sends a DM; done, when set, also hears the outcome.
-func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTimeout time.Duration, scope config.FloodScope, done func(node.DMSendResult)) (AppDMSend, error) {
+func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTimeout time.Duration, scope SendScope, done func(node.DMSendResult)) (AppDMSend, error) {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
 		return AppDMSend{}, fmt.Errorf("invalid pubkey hex: %w", err)
@@ -207,7 +219,7 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 		Timestamp:   now,
 		ReceivedAt:  now,
 		Status:      &statusSending,
-		FloodScope:  string(scope),
+		FloodScope:  string(scope.Label),
 	}
 
 	c.store.WriteSync(func() {
@@ -233,12 +245,13 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	}
 
 	msgID := msg.ID
+	sentAt := c.uniqueTimestamp()
 	err = c.node.SendTextMessageScoped(
 		peerIdentity,
-		scope.MeshRegion(),
+		scope.Region,
 		[]byte(text),
 		0,
-		time.Unix(int64(c.uniqueTimestamp()), 0),
+		time.Unix(int64(sentAt), 0),
 		outPath,
 		hashSize,
 		ackTimeout,
@@ -278,7 +291,10 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	if outPath != nil {
 		attempts = 6
 	}
-	return AppDMSend{Flood: outPath == nil, Timeout: ackTimeout * time.Duration(attempts)}, nil
+	resend := func(attempt int, done func(node.DMSendResult)) (AppDMSend, error) {
+		return c.resendDM(peerIdentity, text, sentAt, attempt, msgID, channelKey, fallbackHashSize, scope, done)
+	}
+	return AppDMSend{Flood: outPath == nil, Timeout: ackTimeout * time.Duration(attempts), Resend: resend}, nil
 }
 
 func (c *Companion) SendTrace(path []byte, pathHashSize uint8) (uint32, error) {
@@ -320,6 +336,8 @@ func (c *Companion) sendTracePacket(tag, auth uint32, path []byte, pathHashSize 
 		flags = 1
 	case 4:
 		flags = 2
+	case 8:
+		flags = 3
 	}
 
 	trace := &meshcore.Trace{

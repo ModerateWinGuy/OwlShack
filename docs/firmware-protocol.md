@@ -85,7 +85,9 @@ The node we run (`internal/node/repeater`) is measured against MeshCore 1.17.1
   `region load`: it reads lines before stripping our `XX|` tag, so a firmware
   repeater would swallow every later command until rebooted. `region list` and
   `regionsExport` are comma-separated (`region list` includes `*` and prints
-  `-none-` when empty); bare `region` is the newline-terminated tree
+  `-none-` when empty), skipping a name that does not fit as `exportNamesTo`
+  does (160 bytes for `region list`, `sizeof(reply_data)-12` for the anon
+  reply); bare `region` is the newline-terminated tree
   (`regionTree`, mirroring `RegionMap::exportTo` — wildcard first, children
   indented one space per level, `^` = home (on `*` when unset), ` F` = flood
   allowed, cut at 159 bytes).
@@ -95,13 +97,18 @@ The node we run (`internal/node/repeater`) is measured against MeshCore 1.17.1
   keeps `*`'s flood setting and the home region, which the firmware's temp map
   resets (re-opening unscoped flood on a repeater that denied it). `region default $x` is
   refused too: we can't load a private region's keys, so its adverts would go unscoped.
+  A name that is not UTF-8 once cut to 30 bytes gets the firmware's put error (`Err -
+  unable to put`, `Err - region table full` for `region default`) where the firmware
+  stores the bytes: JSON storage would swap them for U+FFFD and refuse the config at start.
   A `#nz` default is stored as `region:nz`, which keys the same. Removing the
   default region, or a `region load` without it, sets the default to `<null>`: the
   firmware keeps sending in it until a reboot finds no region, and its load always
   drops the default.
   **Reading a remote node's regions** (`client/repeater/region_map.go`): `region`
-  gives the tree; a reply of 159 bytes was cut, so the name lists fill in the
-  rest and `region get` each missing one's parent. A list of 127 bytes or more
+  gives the tree and the name lists are always read: a reply of 159 bytes was cut,
+  and a region in a parent loop (the firmware's `region put` allows one) never
+  prints, so `region get` asks each missing one's parent, and a loop is reported as
+  `partial` since no tree can show it. A list of 127 bytes or more
   may have skipped a name (`exportNamesTo` drops what does not fit), and a lost
   `region get` leaves its region out; either is reported as `partial`. The read
   stops between commands when the HTTP request is gone. `region home` is always
@@ -168,7 +175,8 @@ The node we run (`internal/node/repeater`) is measured against MeshCore 1.17.1
   `multi.acks` copies are handled by the library.
 - **Telemetry (0x03)** returns battery voltage and MCU temperature on the self
   channel, both read from the KISS modem board (`HW_CMD_GET_BATTERY` /
-  `HW_CMD_GET_MCU_TEMP`, polled by `deviceStatsLoop` into `DeviceStats`). The
+  `HW_CMD_GET_MCU_TEMP`, read from the modem's `CachedStats` per reply, so a
+  reading past `StaleReadingAfter` is never sent; STATUS reads the same). The
   temperature is omitted when the board can't measure one — the modem answers
   `HW_ERR_NO_CALLBACK` and `HaveMCUTemp` stays false — mirroring the firmware's
   `isnan` check. The operator's channel map adds local sensors, and the inverse
@@ -497,7 +505,10 @@ the BLE pin always 0. There is no password, so the handlers are an allowlist:
   was added or last heard), DMs and channel posts (sent through the companion's
   own send path, so they are stored, shown and retried like any other; SENT
   carries our own ack tag and SEND_CONFIRMED follows delivery), the offline
-  queue, login, status, telemetry, binary and anon requests, path discovery
+  queue (`addToOfflineQueue`: when full the oldest channel message goes, or
+  the new one if only DMs are held; its size is the App page's setting,
+  default 256 as most builds set `OFFLINE_QUEUE_SIZE`, where the firmware's
+  is fixed), login, status, telemetry, binary and anon requests, path discovery
   (flooded, and the route is left alone), trace, discover-nearby control data,
   CLI over a logged-in session, adverts, import and self export, the send scope
   (CMD 54, per connection, only for regions in the list), time, battery, the

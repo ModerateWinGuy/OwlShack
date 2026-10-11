@@ -168,7 +168,7 @@ func assembleFromRows(rows *configRows) *config.Config {
 			TelemetryLocation:    emptyToNil(c.TelemLoc),
 			TelemetryEnvironment: emptyToNil(c.TelemEnv),
 			FloodScope:           config.FloodScope(c.FloodScope),
-			App:                  config.AppAccess{Enabled: c.AppEnabled, Port: c.AppPort},
+			App:                  config.AppAccess{Enabled: c.AppEnabled, Port: c.AppPort, QueueSize: c.AppQueueSize},
 			ShareLocation:        &c.ShareLocation,
 		}
 		if chs := chansByComp[c.ID]; len(chs) > 0 {
@@ -370,6 +370,7 @@ func writeConfigToTables(ctx context.Context, st *store.Store, cfg *config.Confi
 			FloodScope:    string(cc.FloodScope),
 			AppEnabled:    cc.App.Enabled,
 			AppPort:       cc.App.Port,
+			AppQueueSize:  cc.App.QueueSize,
 			ShareLocation: cc.SharesLocation(),
 		}
 		if prev, ok := byName[cc.Name]; ok {

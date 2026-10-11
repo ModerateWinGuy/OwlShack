@@ -71,5 +71,6 @@ export function drawLink(
       iconAnchor: [0, 0],
     }),
     interactive: false,
+    keyboard: false,
   }).addTo(layer);
 }

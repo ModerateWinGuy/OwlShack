@@ -4,7 +4,9 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OwlShack/meshcore-go/node"
 
@@ -13,6 +15,34 @@ import (
 	"github.com/OwlShack/OwlShack/internal/node/companion"
 	"github.com/OwlShack/OwlShack/internal/store"
 )
+
+// countingModem counts what it is asked to send and whether a mux still hands it received data.
+type countingModem struct {
+	sends   atomic.Int32
+	handled atomic.Bool
+}
+
+func (m *countingModem) SendData([]byte) error { m.sends.Add(1); return nil }
+func (m *countingModem) SetDataHandler(h func([]byte, float32, int8, bool)) {
+	m.handled.Store(h != nil)
+}
+func (m *countingModem) AddOutboundHandler(func([]byte)) {}
+
+// Node.Stop leaves the mux running, so every modem change, reset or reconnect left a transmit goroutine holding the whole old generation of nodes.
+func TestCloseRadio_StopsTheMux(t *testing.T) {
+	t.Parallel()
+	m := &countingModem{}
+	mux := node.NewRadioMux(m)
+	closeRadio(mux, &modem.State{Modem: m})
+	if m.handled.Load() {
+		t.Error("the closed mux is still the modem's data handler")
+	}
+	mux.NewRadio().Enqueue([]byte{0x11, 0}, node.PrioritySend, 0)
+	time.Sleep(300 * time.Millisecond)
+	if n := m.sends.Load(); n != 0 {
+		t.Errorf("the closed mux's transmit engine sent %d packets, want none", n)
+	}
+}
 
 func reloadRig(t *testing.T) (*store.Store, func(old, next *config.Config, running []*companion.Companion) []*companion.Companion) {
 	t.Helper()
@@ -76,6 +106,52 @@ func TestReload_SettingsApplyInPlace(t *testing.T) {
 	}
 }
 
+// A channel's region saved from its thread or the Channels page, read back from the database, applies in place: a rebuild would advertise and drop every login.
+func TestReload_ChannelRegionAppliesInPlace(t *testing.T) {
+	st, reload := reloadRig(t)
+	ctx := t.Context()
+	if _, err := initConfigTables(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	seed := oneCompanion(nil)
+	seed.Companions[0].ID = 0
+	var err error
+	st.WriteSync(func() { err = writeConfigToTables(ctx, st, seed) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := readConfigFromTables(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := reload(nil, before, nil)
+
+	chans, err := st.Channels.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range chans {
+		if ch.Name == "#westest" {
+			ch.FloodScope = "region:nz"
+			st.WriteSync(func() { err = st.Channels.Update(ctx, &ch) })
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := readConfigFromTables(ctx, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := reload(before, after, running)
+	if again[0] != running[0] {
+		t.Fatal("the companion was rebuilt for a channel's region")
+	}
+	if got := again[0].ChannelScopeOwn("#westest"); got != "region:nz" {
+		t.Errorf("#westest sends in %q, want region:nz", got)
+	}
+}
+
 // A channel added on the Channels page and saved, then read back from the database, matches what the node runs, so the reload keeps the companion.
 func TestReload_RunningChannelsNoRebuild(t *testing.T) {
 	st, reload := reloadRig(t)
@@ -111,8 +187,8 @@ func TestReload_RunningChannelsNoRebuild(t *testing.T) {
 	}
 }
 
-// A channel slot past the node's table is skipped, not refused, so a database that loaded before still loads.
-func TestSlotPastTableSkipped(t *testing.T) {
+// A channel slot past the node's table is not refused, so a database that loaded before still loads; the channel takes the first free slot.
+func TestSlotPastTableTakesAFreeSlot(t *testing.T) {
 	_, reload := reloadRig(t)
 	far := 60
 	cfg := oneCompanion(func(c *config.CompanionConfig) {
@@ -121,8 +197,12 @@ func TestSlotPastTableSkipped(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if running := reload(nil, cfg, nil); running[0].Node().Channel(2) == nil {
+	running := reload(nil, cfg, nil)
+	if running[0].Node().Channel(2) == nil {
 		t.Error("the other channels were not joined")
+	}
+	if got := running[0].Node().Channel(1); got == nil || got.Name != "#far" {
+		t.Errorf("slot 1 = %+v, want #far in the first free slot", got)
 	}
 }
 
