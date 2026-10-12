@@ -183,6 +183,10 @@ func NewRepeater(cfg config.RepeaterConfig, mux *node.RadioMux, st *store.Store,
 		// Firmware repeaters never answer a client's flood PATH with their own; handlePath learns the route.
 		node.WithoutReciprocalPath(),
 	}
+	// Relay and rx delays are slots of the packet's airtime; without it every relay went out at once.
+	if r.airtime != nil {
+		opts = append(opts, node.WithAirtimeEstimator(r.airtime))
+	}
 	// Registering named scopes is what lets FindFloodMatch relay their transport-flood packets.
 	named, wildcardFlags := regionsFromConfig(cfg.Regions)
 	if len(named) > 0 {
