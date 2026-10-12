@@ -24,7 +24,7 @@ regenerates `web/frontend/src/data/radio-presets.json` from it; don't hand-edit)
 
 | Layer | Tech |
 |---|---|
-| Backend | Go 1.26+, **no CGO**, `modernc.org/sqlite`, `embed.FS` for the SPA |
+| Backend | Go 1.27+, **no CGO**, `modernc.org/sqlite`, `embed.FS` for the SPA |
 | Frontend | **React 19** (not Preact) + Vite 6 + TS 5.7, Tailwind v4, shadcn/ui (new-york), `react-router-dom@7`, `sonner`, Leaflet |
 | Mesh proto | `github.com/OwlShack/meshcore-go` v1.7.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
 | Real-time | WS `/api/ws`, topics `peers` `packets` `messages` `traces` `repeaterNeighbors` `discovered` `sensors` |
