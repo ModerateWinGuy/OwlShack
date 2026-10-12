@@ -1,13 +1,11 @@
 package companion
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -113,21 +111,12 @@ func (c *Companion) buildPathReturn(destPubKey []byte, sharedSecret []byte, inPa
 	return pkt, nil
 }
 
-func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, roomPubKeyHex string, sharedSecret []byte, plaintext []byte) {
-	if len(plaintext) < 9 {
-		c.log.Debug("room push plaintext too short", "room", roomPubKeyHex[:12])
-		return
-	}
-
-	postTs := binary.LittleEndian.Uint32(plaintext[:4])
-	authorPrefix := plaintext[5:9]
-	text := strings.TrimRight(string(plaintext[9:]), "\x00")
+func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, roomPubKeyHex string, sharedSecret []byte, plaintext []byte, post meshcore.TextPlaintext) {
+	postTs, authorPrefix, text := post.Timestamp, post.Author, string(post.Text)
 
 	// Pushes are ACK-gated: the server sends no further post until it sees a CRC hashed with OUR pubkey, and each retry needs its own ACK.
 	selfPubKey := c.node.Identity().PublicKey()
-	ack := make([]byte, 4)
-	binary.LittleEndian.PutUint32(ack, meshcore.CalcAckHash(plaintext[:9+len(text)], selfPubKey[:]))
-	c.sendDMAck(pkt, roomPubKey, sharedSecret, ack)
+	c.sendDMAck(pkt, roomPubKey, sharedSecret, binary.LittleEndian.AppendUint32(nil, meshcore.SignedTextAckHash(plaintext, selfPubKey[:])))
 
 	channelKey := "dm:" + roomPubKeyHex
 
@@ -491,15 +480,14 @@ func (c *Companion) registerPacketHandlers() {
 			return
 		}
 
-		if len(plaintext) < 5 {
-			c.log.Debug("DM plaintext too short")
+		dm, err := meshcore.ParseTextPlaintext(plaintext)
+		if err != nil {
+			c.log.Debug("DM plaintext too short", "error", err)
 			return
 		}
+		text := string(dm.Text)
 
-		flags := plaintext[4] >> 2
-		text, attemptByte := parseTextPlaintext(plaintext)
-
-		switch flags {
+		switch dm.TxtType {
 		case meshcore.TxtTypeCLIData:
 			var senderKey [32]byte
 			copy(senderKey[:], senderPubKey)
@@ -509,11 +497,11 @@ func (c *Companion) registerPacketHandlers() {
 			}
 			return
 		case meshcore.TxtTypeSignedPlain:
-			c.handleRoomPush(pkt, senderPubKey, senderPubKeyHex, sharedSecret, plaintext)
+			c.handleRoomPush(pkt, senderPubKey, senderPubKeyHex, sharedSecret, plaintext, dm)
 			return
 		case meshcore.TxtTypePlain:
 		default:
-			c.log.Debug("unsupported DM text type", "flags", flags)
+			c.log.Debug("unsupported DM text type", "flags", dm.TxtType)
 			return
 		}
 
@@ -528,16 +516,14 @@ func (c *Companion) registerPacketHandlers() {
 			c.addDMSenderAsContact(senderPubKey, senderName)
 		}
 
-		// Plain-DM ack payload: [crc:4][attempt][random]
-		ackPlaintext := plaintext[:5+len(text)]
 		var randomByte [1]byte
 		rand.Read(randomByte[:])
-		c.sendDMAck(pkt, senderPubKey, sharedSecret, meshcore.BuildAckPayload(ackPlaintext, senderPubKey, attemptByte, randomByte[0]))
+		c.sendDMAck(pkt, senderPubKey, sharedSecret, meshcore.BuildTextAck(plaintext, senderPubKey, randomByte[0]))
 
 		// The ack goes out first: a retry means the sender never got one, and answering is the
 		// whole point. Past that a retransmission must not become a second message.
 		if c.recentDM(senderPubKey, binary.LittleEndian.Uint32(plaintext[:4]), text) {
-			c.log.Debug("duplicate DM ignored", "from", senderName, "attempt", attemptByte)
+			c.log.Debug("duplicate DM ignored", "from", senderName, "attempt", dm.Attempt)
 			return
 		}
 		if a := c.app(); a != nil {
@@ -785,23 +771,6 @@ func (c *Companion) dispatchDMTriggers(dm trigger.DirectMessage, pkt *meshcore.P
 			h.HandleDirectMessage(dm, pkt)
 		}
 	}
-}
-
-// parseTextPlaintext splits a TXT_MSG plaintext into its text and the sender's attempt number.
-// The text ends at the first NUL, as the firmware's strlen does (BaseChatMesh.cpp:241): a retry
-// past attempt 3 hides the attempt byte AFTER that terminator, so trimming trailing NULs instead
-// leaves the suffix in the message and computes the ack over the wrong bytes, which the sender
-// then never accepts.
-func parseTextPlaintext(plaintext []byte) (string, byte) {
-	body := plaintext[5:]
-	if i := bytes.IndexByte(body, 0); i >= 0 {
-		body = body[:i]
-	}
-	var attempt byte
-	if 5+len(body)+1 < len(plaintext) {
-		attempt = plaintext[5+len(body)+1]
-	}
-	return string(body), attempt
 }
 
 // dmRetryWindow bounds how long a message is remembered for retry collapsing. The firmware gives up

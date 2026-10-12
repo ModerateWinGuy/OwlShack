@@ -184,9 +184,9 @@ func TestParseRepeaterStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("52-byte payload (no recvErrors) parses without error", func(t *testing.T) {
+	t.Run("52-byte layout (no recvErrors), block-padded as it arrives, parses", func(t *testing.T) {
 		t.Parallel()
-		data := buildStatus()[:52] // drop the trailing recvErrors u32
+		data := append(buildStatus()[:52], make([]byte, 8)...) // a pre-January repeater, padded to the cipher block
 		got, err := parseRepeaterStatus(data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
