@@ -66,7 +66,7 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRejected, err)
 	}
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(rm.UniqueTimestamp(), body))
+	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(rm.node.UniqueTimestamp(), body))
 	if err != nil {
 		return nil, fmt.Errorf("encrypting login: %w", err)
 	}

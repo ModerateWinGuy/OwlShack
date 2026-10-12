@@ -23,9 +23,6 @@ const MaxDMTextBytes = meshcore.MaxRetryTextLen
 // ErrUnknownChannel is a send to a channel this companion doesn't have.
 var ErrUnknownChannel = errors.New("channel not found")
 
-// uniqueTimestamp mirrors the firmware's getCurrentTimeUnique(): a remote node drops a second post sharing a timestamp as a retry.
-func (c *Companion) uniqueTimestamp() uint32 { return c.repeaters.UniqueTimestamp() }
-
 // SendScope is the region a send floods in: Label is what its message is stored under, Region the key it goes out with, nil unscoped.
 type SendScope struct {
 	Label  config.FloodScope
@@ -50,7 +47,7 @@ func (c *Companion) sendGroupReply(ch *meshcore.ChannelEntry, text string, hashS
 func (c *Companion) sendGroup(ch *meshcore.ChannelEntry, text string, hashSize uint8, retryTimeout time.Duration, maxRetries int, scope SendScope) error {
 	name := c.conf().Name
 	payload := &meshcore.GroupTextPayload{
-		Timestamp: c.uniqueTimestamp(),
+		Timestamp: c.node.UniqueTimestamp(),
 		Sender:    name,
 		Text:      text,
 	}
@@ -245,7 +242,7 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	}
 
 	msgID := msg.ID
-	sentAt := c.uniqueTimestamp()
+	sentAt := c.node.UniqueTimestamp()
 	err = c.node.SendTextMessageScoped(
 		peerIdentity,
 		scope.Region,

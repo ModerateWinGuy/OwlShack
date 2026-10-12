@@ -122,21 +122,6 @@ type Client struct {
 
 	cliMu      sync.Mutex
 	cliPending map[string]chan string
-
-	tsMu   sync.Mutex
-	lastTS uint32
-}
-
-// UniqueTimestamp mirrors the firmware's getCurrentTimeUnique(): a remote node drops a timestamp <= the last one it saw.
-func (rm *Client) UniqueTimestamp() uint32 {
-	rm.tsMu.Lock()
-	defer rm.tsMu.Unlock()
-	ts := uint32(time.Now().Unix())
-	if ts <= rm.lastTS {
-		ts = rm.lastTS + 1
-	}
-	rm.lastTS = ts
-	return ts
 }
 
 func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator, ownHashSize func() uint8, scopeFor func(pubkey []byte) *meshcore.Region) *Client {
@@ -267,7 +252,7 @@ func (rm *Client) routedPacket(peer *node.Peer, payloadType byte, payload []byte
 
 // roundtripRequest awaits the tagged response; a pr carrying the secret is matched without a session.
 func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecret []byte, localPubByte byte, body []byte, timeout time.Duration, label string, pr *pendingRequest) ([]byte, error) {
-	tag := rm.UniqueTimestamp()
+	tag := rm.node.UniqueTimestamp()
 
 	plaintext := make([]byte, 4+len(body))
 	binary.LittleEndian.PutUint32(plaintext[:4], tag)
@@ -356,7 +341,7 @@ func (rm *Client) RequestRegions(pubkeyHex string, timeout time.Duration) (meshc
 	if err != nil {
 		return meshcore.AnonRegionsReply{}, err
 	}
-	tag := rm.UniqueTimestamp()
+	tag := rm.node.UniqueTimestamp()
 	plaintext := binary.LittleEndian.AppendUint32(nil, tag)
 	plaintext = append(plaintext, body...)
 	req, err := meshcore.NewAnonReq(rm.node.Identity(), peer, plaintext, secret)
@@ -395,7 +380,7 @@ func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Dur
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
-	tag := rm.UniqueTimestamp()
+	tag := rm.node.UniqueTimestamp()
 	req, err := meshcore.NewAnonReq(rm.node.Identity(), peerID, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
 	if err != nil {
 		return nil, fmt.Errorf("encrypting anon req: %w", err)

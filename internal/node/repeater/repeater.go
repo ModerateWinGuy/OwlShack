@@ -94,24 +94,11 @@ type Repeater struct {
 		m map[string]*store.RepeaterACLEntry // keyed by full pubkey hex
 	}
 
-	lastTS atomic.Uint32 // last timestamp we stamped (firmware getCurrentTimeUnique)
-
 	regionLoad *regionLoad // non-nil between `region load` and the blank line ending it; guarded by mu
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	runCtx context.Context
-}
-
-// uniqueTimestamp mirrors firmware getCurrentTimeUnique: strictly increasing across every timestamp we stamp on outgoing traffic.
-func (r *Repeater) uniqueTimestamp() uint32 {
-	for {
-		last := r.lastTS.Load()
-		ts := max(uint32(time.Now().Unix()), last+1)
-		if r.lastTS.CompareAndSwap(last, ts) {
-			return ts
-		}
-	}
 }
 
 // reverseHops flips a received path into send order: a flood request accumulates the client's neighbour first.

@@ -48,19 +48,11 @@ func BuildSelf(n *node.Node, advType, name string, lat, lon *float64, flood bool
 		appData.Lat = int32(math.Round(*lat * 1_000_000.0))
 		appData.Lon = int32(math.Round(*lon * 1_000_000.0))
 	}
-	rawAppData, err := appData.ToBytes()
+	// Firmware stamps an advert with getCurrentTime, not the unique clock.
+	adv, err := meshcore.NewAdvert(n.Identity(), appData, uint32(time.Now().Unix()))
 	if err != nil {
 		return nil, err
 	}
-
-	adv := meshcore.Advert{
-		PublicKey:  n.Identity().Identity,
-		Timestamp:  uint32(time.Now().Unix()),
-		RawAppData: rawAppData,
-	}
-	// SignWith, not Sign(PrivateKey()): an imported expanded-key identity has no usable seed.
-	adv.SignWith(n.Identity())
-
 	payload, err := adv.ToBytes()
 	if err != nil {
 		return nil, err

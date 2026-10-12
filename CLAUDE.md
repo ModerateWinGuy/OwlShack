@@ -102,10 +102,10 @@ MeshCore feed (a feed that is down or unusable only warns).
   merge commit, not a squash: the tag sits on a commit only `main` has, so
   without it `build.sh`'s `git describe` stamps dev builds with the previous tag.
 
-**Every timestamp on outgoing admin traffic comes from
-`Client.UniqueTimestamp()`** (the firmware's `getCurrentTimeUnique()`), never
-`time.Now().Unix()`. The companion's DMs and room posts share that counter; the
-repeater node has its own `Repeater.uniqueTimestamp()`. Remote firmware drops a
+**Every timestamp on outgoing admin traffic comes from the node's
+`UniqueTimestamp()`** (the firmware's `getCurrentTimeUnique()`), never
+`time.Now().Unix()`. A companion's DMs, room posts and repeater client share its
+node's counter; the repeater node has its own. Remote firmware drops a
 timestamp `<=` the last one it saw as a replay, and treats an equal CLI
 timestamp as a retry it never answers, so two sends in one second silently lose
 the second.

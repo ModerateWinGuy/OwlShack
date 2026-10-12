@@ -60,15 +60,15 @@ func (r *Repeater) handleAnonReq(pkt *meshcore.Packet) {
 	}
 	pkt.MarkDoNotRetransmit()
 
-	// [timestamp:4][password:N], except that a leading control byte (0 < b < ' ') marks an unauthenticated sub-request.
+	// [timestamp:4][password:N], except that a leading control byte marks an unauthenticated sub-request.
 	ts := binary.LittleEndian.Uint32(plain[:4])
-	if plain[4] != 0 && plain[4] < ' ' {
-		r.handleAnonSubReq(pkt, clientPub, secret, ts, plain[4], plain[5:])
+	login, err := meshcore.ParseLoginRequest(plain[4:], false)
+	if err != nil {
+		r.handleAnonSubReq(pkt, clientPub, secret, ts, plain[4:])
 		return
 	}
-	password := cString(plain[4:])
 
-	perms, ok := r.authLogin(clientPub, password, ts)
+	perms, ok := r.authLogin(clientPub, login.Password, ts)
 	if !ok {
 		return // bad password / replay — silent, matching the firmware
 	}
@@ -79,7 +79,7 @@ func (r *Repeater) handleAnonReq(pkt *meshcore.Packet) {
 	}
 	var random [4]byte
 	rand.Read(random[:])
-	resp := meshcore.BuildTaggedPlaintext(r.uniqueTimestamp(), meshcore.BuildLoginReply(reply, random))
+	resp := meshcore.BuildTaggedPlaintext(r.node.UniqueTimestamp(), meshcore.BuildLoginReply(reply, random))
 
 	r.log.Info("admin login", "client", hex.EncodeToString(clientPub[:6]), "perms", perms, "flood", pkt.IsRouteFlood())
 	if err := r.sendServerReply(pkt, clientPub, secret, resp); err != nil {
@@ -87,45 +87,34 @@ func (r *Repeater) handleAnonReq(pkt *meshcore.Packet) {
 	}
 }
 
-// Anon sub-request types (firmware ANON_REQ_TYPE_*): unauthenticated, direct-routed only, answered ahead of any login.
-const ()
-
-// handleAnonSubReq replies [sender_ts:4][now:4][body] along the caller-supplied return path (request body [pathLenByte][path]).
-func (r *Repeater) handleAnonSubReq(pkt *meshcore.Packet, clientPub [32]byte, secret []byte, ts uint32, subType byte, params []byte) {
+// handleAnonSubReq replies [sender_ts:4][now:4][body] along the caller-supplied return path; firmware answers these on direct requests only.
+func (r *Repeater) handleAnonSubReq(pkt *meshcore.Packet, clientPub [32]byte, secret []byte, ts uint32, req []byte) {
 	if pkt.IsRouteFlood() || !r.anonLimiter.allow() {
-		return // firmware answers these on direct requests only
-	}
-	if len(params) < 1 {
 		return
 	}
-	pathLenByte := params[0]
-	if !meshcore.IsValidPathLen(pathLenByte) {
-		return
-	}
-	hashSize := int(pathLenByte>>6)&3 + 1
-	pathLen := int(pathLenByte&63) * hashSize
-	if len(params) < 1+pathLen {
+	subType, path, hashSize, err := meshcore.ParseAnonRequest(req)
+	if err != nil {
 		return
 	}
 
 	cfg := r.cfgSnapshot()
-	body := make([]byte, 8)
-	binary.LittleEndian.PutUint32(body[:4], ts)                        // reflected tag
-	binary.LittleEndian.PutUint32(body[4:], uint32(time.Now().Unix())) // our clock
+	now := uint32(time.Now().Unix())
+	var reply []byte
 	switch subType {
 	case meshcore.AnonReqTypeRegions:
-		body = append(body, r.regionsExport()...)
+		reply = meshcore.BuildAnonRegionsReply(meshcore.AnonRegionsReply{Clock: now, Regions: floodRegionNames(cfg.Regions, false)})
 	case meshcore.AnonReqTypeOwner:
-		body = append(body, cfg.Name+"\n"+cfg.OwnerInfo...)
+		reply = meshcore.BuildAnonOwnerReply(meshcore.AnonOwnerReply{Clock: now, Name: cfg.Name, Owner: cfg.OwnerInfo})
 	case meshcore.AnonReqTypeBasic:
 		var feat byte
 		if cfg.IsFwdDisabled() {
 			feat |= 0x80 // "is disabled" bit; we have no bridge bits to set
 		}
-		body = append(body, feat)
+		reply = meshcore.BuildAnonBasicReply(meshcore.AnonBasicReply{Clock: now, Features: feat})
 	default:
 		return
 	}
+	body := meshcore.BuildTaggedPlaintext(ts, reply)
 
 	me := r.node.Identity().PublicKey()
 	payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
@@ -134,20 +123,14 @@ func (r *Repeater) handleAnonSubReq(pkt *meshcore.Packet, clientPub [32]byte, se
 	if err != nil {
 		return
 	}
-	// pathLenByte is already the wire encoding ((hashSize-1)<<6 | hops).
 	if err := r.sendPkt(&meshcore.Packet{
 		Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeResponse, 0),
-		PathLength: pathLenByte,
-		Path:       params[1 : 1+pathLen],
+		PathLength: meshcore.MakePathLen(hashSize, uint8(len(path)/int(hashSize))),
+		Path:       path,
 		Payload:    payload,
 	}, nil, serverReplyDelay); err != nil {
 		r.log.Error("anon sub-request reply failed", "subType", subType, "error", err)
 	}
-}
-
-// regionsExport mirrors RegionMap::exportNamesTo(mask=DENY_FLOOD): flood-allowed names, "*" first when unscoped flood is allowed.
-func (r *Repeater) regionsExport() string {
-	return regionNames(r.cfgRegions(), false, regionsReplyMax)
 }
 
 // handlePath learns a client's return route from a PATH packet body [pathLenByte][path][extraType][extra...]; no reciprocal path is sent, matching the firmware.

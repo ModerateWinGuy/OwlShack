@@ -47,7 +47,7 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 		return ErrNoDirectRoute
 	}
 
-	plaintext := meshcore.BuildTaggedPlaintext(rm.UniqueTimestamp(), meshcore.BuildKeepAliveRequest(since))
+	plaintext := meshcore.BuildTaggedPlaintext(rm.node.UniqueTimestamp(), meshcore.BuildKeepAliveRequest(since))
 	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
 	if err != nil {
 		return fmt.Errorf("encrypting keep-alive: %w", err)
@@ -207,7 +207,7 @@ func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout 
 	if err != nil {
 		return fmt.Errorf("deriving shared secret: %w", err)
 	}
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.UniqueTimestamp()), 0), txtType<<2|attempt&3, []byte(text))
+	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.node.UniqueTimestamp()), 0), txtType<<2|attempt&3, []byte(text))
 	msg, err := meshcore.NewTextMessage(rm.node.Identity(), peerIdentity, plaintext, secret)
 	if err != nil {
 		return fmt.Errorf("encrypting CLI: %w", err)
@@ -306,7 +306,7 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 		rm.cliMu.Unlock()
 	}()
 
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.UniqueTimestamp()), 0), meshcore.TxtTypeCLIData<<2, []byte(framedCommand))
+	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.node.UniqueTimestamp()), 0), meshcore.TxtTypeCLIData<<2, []byte(framedCommand))
 
 	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
 	if err != nil {

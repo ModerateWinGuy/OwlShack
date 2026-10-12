@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
@@ -98,6 +99,18 @@ func TestStart_SendsZeroHopRequestWithTheTypeFilter(t *testing.T) {
 	}
 	if req.PrefixOnly {
 		t.Error("prefix_only set: the responder would send 8 key bytes and we need the whole key")
+	}
+}
+
+// The request is laid out as simple_repeater's (MyMesh.cpp:846-859): [0x80][filter][tag:4][since:4].
+func TestStart_FirmwareLayout(t *testing.T) {
+	f, s, _ := newFake(t)
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeSensor)), time.Unix(0x01020304, 0)); err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte{0x80, 1 << meshcore.AdvertTypeSensor}, binary.LittleEndian.AppendUint32(nil, sentTag(t, f.sent[0]))...)
+	if want = append(want, 0x04, 0x03, 0x02, 0x01); !bytes.Equal(f.sent[0].Payload, want) {
+		t.Errorf("request = %x, want %x", f.sent[0].Payload, want)
 	}
 }
 
