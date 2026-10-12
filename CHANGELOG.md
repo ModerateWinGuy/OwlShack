@@ -123,6 +123,9 @@ top until tagged.
 
 ### Fixed
 
+- **Channel posts sent at the same moment each show their own repeats.** When two posts went out
+  together, for example from two open pages or a bot replying as you post, one could show the
+  other's repeats while the other showed none.
 - **A channel post the radio never sent shows as failed.** A post the radio took but failed to
   transmit, or still held when the radio went down, read as sent; it now shows failed with Retry.
 - **A direct message cut off by a radio restart shows as failed.** It stayed on "sending" for good.

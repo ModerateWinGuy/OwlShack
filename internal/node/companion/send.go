@@ -16,6 +16,7 @@ import (
 	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/echo"
 	"github.com/OwlShack/OwlShack/internal/meshpath"
 	"github.com/OwlShack/OwlShack/internal/store"
 )
@@ -91,10 +92,12 @@ func (c *Companion) sendGroup(ch *meshcore.ChannelEntry, text string, hashSize u
 		})
 	}
 
-	c.pendingOutbound.Lock()
-	c.pendingOutbound.msgID = msgID
-	c.pendingOutbound.channel = ch.Name
-	c.pendingOutbound.Unlock()
+	c.pendingPosts.Lock()
+	if c.pendingPosts.m == nil {
+		c.pendingPosts.m = map[uint32]echo.Sent{}
+	}
+	c.pendingPosts.m[payload.Timestamp] = echo.Sent{MessageID: msgID, CompanionID: c.conf().ID, Companion: name, Channel: ch.Name}
+	c.pendingPosts.Unlock()
 
 	err := c.node.SendGroupTextScoped(
 		ch, scope.Region, payload, hashSize, retryTimeout, maxRetries,
@@ -103,17 +106,19 @@ func (c *Companion) sendGroup(ch *meshcore.ChannelEntry, text string, hashSize u
 		},
 	)
 	if err != nil { // never sent, so the row already shown must not read as sent, nor take an earlier post's echoes
-		c.pendingOutbound.Lock()
-		unhanded := c.pendingOutbound.msgID == msgID
-		if unhanded {
-			c.pendingOutbound.msgID, c.pendingOutbound.channel = 0, ""
-		}
-		c.pendingOutbound.Unlock()
-		if unhanded { // one the radio took is settled by its transmit result
+		if _, unhanded := c.takePendingPost(payload.Timestamp); unhanded { // one the radio took is settled by its transmit result
 			c.setMessageStatus(msgID, ch.Name, "failed")
 		}
 	}
 	return err
+}
+
+func (c *Companion) takePendingPost(ts uint32) (echo.Sent, bool) {
+	c.pendingPosts.Lock()
+	defer c.pendingPosts.Unlock()
+	s, ok := c.pendingPosts.m[ts]
+	delete(c.pendingPosts.m, ts)
+	return s, ok
 }
 
 // setMessageStatus records an outgoing message's status and tells the open chats.

@@ -289,30 +289,17 @@ func (c *Companion) registerPacketHandlers() {
 	})
 
 	radio.AddOutboundHandler(func(data []byte) {
-		if c.echoTracker == nil {
-			return
-		}
 		pkt, err := meshcore.PacketFromBytes(data)
 		if err != nil || pkt.PayloadType() != meshcore.PayloadTypeGrpTxt {
 			return
 		}
-
-		c.pendingOutbound.Lock()
-		msgID := c.pendingOutbound.msgID
-		channel := c.pendingOutbound.channel
-		c.pendingOutbound.msgID = 0
-		c.pendingOutbound.channel = ""
-		c.pendingOutbound.Unlock()
-
-		if msgID == 0 {
+		payload, _, err := c.node.DecryptGroupText(pkt)
+		if err != nil {
 			return
 		}
-		c.echoTracker.TrackQueued(pkt.PacketHash(), echo.Sent{
-			MessageID:   msgID,
-			CompanionID: c.conf().ID,
-			Companion:   c.conf().Name,
-			Channel:     channel,
-		})
+		if sent, ok := c.takePendingPost(payload.Timestamp); ok && c.echoTracker != nil {
+			c.echoTracker.TrackQueued(pkt.PacketHash(), sent)
+		}
 	})
 
 	c.node.OnPacket(meshcore.PayloadTypeAdvert, c.handleAdvert)

@@ -66,10 +66,10 @@ type Companion struct {
 	// telemetry is the operator's channel map and the readings behind it; nil publishes no sensors.
 	telemetry func() ([]sensor.ChannelEntry, []sensor.Status)
 
-	pendingOutbound struct {
+	// pendingPosts is each channel post not yet handed to the radio, by its unique timestamp, so each takes only its own packet.
+	pendingPosts struct {
 		sync.Mutex
-		msgID   int64
-		channel string
+		m map[uint32]echo.Sent
 	}
 
 	traceWaiters traceWaiters
