@@ -93,7 +93,7 @@ func (p *sx12xxStatsProvider) EstAirtimeMs(packetLen int) uint32 {
 	if m == nil {
 		return 0
 	}
-	return m.AirtimeEstimator()(packetLen)
+	return m.EstAirtime(packetLen)
 }
 
 func (p *sx12xxStatsProvider) PacketScore(snrDB float64, packetLen int) float64 {

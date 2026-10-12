@@ -25,7 +25,6 @@ type State struct {
 	// ParseErrors is intact bytes that did not decode as a MeshCore packet; the radio did its job.
 	ParseErrors *atomic.Uint64
 
-	radioConfig   *hardware.RadioConfig
 	airtimeFactor float64
 	closers       []io.Closer
 	watcherDone   chan struct{}
@@ -142,9 +141,6 @@ func MuxOptions(ms *State) []node.MuxOption {
 			ms.ParseErrors.Add(1)
 		}),
 	}
-	if ms.radioConfig != nil {
-		opts = append(opts, node.WithMuxAirtimeEstimator(hardware.LoRaAirtimeEstimator(ms.radioConfig)))
-	}
 	opts = append(opts, node.WithMuxAirtimeFactor(ms.airtimeFactor))
 	return opts
 }
@@ -167,7 +163,6 @@ func Setup(ctx context.Context, cfg *config.Config) (*State, error) {
 		SF:     *cfg.SF,
 		CR:     *cfg.CR,
 	}
-	ms.radioConfig = radioConfig
 	ms.airtimeFactor = cfg.AirtimeFactorOr()
 	// The library takes an inverted factor; log the percentage instead.
 	slog.Info("airtime budget",
@@ -209,7 +204,6 @@ func setupKiss(ctx context.Context, ms *State, cfg *config.Config, connScheme, c
 		hardware.WithSignalReport(true),
 		hardware.WithLogger(slog.Default()),
 		hardware.WithTxFlowControl(hardware.DefaultTxTimeout),
-		hardware.WithTxAirtimeEstimator(hardware.LoRaAirtimeEstimator(radioConfig)),
 		hardware.WithHandlerWatchdog(handlerWatchdog),
 	)
 	kissModem.SetErrorHandler(func(err error) {

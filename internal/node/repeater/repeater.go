@@ -12,7 +12,6 @@ import (
 	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
-	"github.com/OwlShack/meshcore-go/hardware"
 	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/api"
@@ -50,7 +49,7 @@ type Repeater struct {
 	statsBase  node.RouteStats
 	sf         uint8 // spreading factor, for the rx-delay packet score (0 = unknown)
 
-	// Last heard signal and accumulated airtime; airtime is nil when the radio params are unknown, and is set before the node is live.
+	// Last heard signal and accumulated airtime; airtime is the radio's estimate (0 while its params are unknown), set before the node is live.
 	lastRSSI    atomic.Int32
 	lastSNRx4   atomic.Int32
 	haveSignal  atomic.Bool
@@ -156,7 +155,10 @@ func NewRepeater(cfg config.RepeaterConfig, mux *node.RadioMux, st *store.Store,
 	r.discoverLimiter = newRateLimiter(4, 2*time.Minute) // firmware discover_limiter(4, 120)
 	r.aclLoad()                                          // seed the ACL cache from the DB before handlers register
 	// Set before the node goes live so neither airtime accumulator sees a torn value.
-	r.airtime, r.sf = buildAirtimeEstimator(st)
+	if src, ok := radio.(node.AirtimeSource); ok {
+		r.airtime = src.EstAirtime
+	}
+	r.sf = settingsSF(st)
 
 	opts := []node.Option{
 		node.WithMaxPeers(100_000),
@@ -184,18 +186,13 @@ func NewRepeater(cfg config.RepeaterConfig, mux *node.RadioMux, st *store.Store,
 	return r, nil
 }
 
-// buildAirtimeEstimator returns a nil estimator and SF 0 when the radio params aren't set.
-func buildAirtimeEstimator(st *store.Store) (func(int) uint32, uint8) {
+// settingsSF returns 0 when the radio params aren't set.
+func settingsSF(st *store.Store) uint8 {
 	s, err := st.Settings.Get(context.Background())
-	if err != nil || s.Freq == nil || s.BW == nil || s.SF == nil || s.CR == nil {
-		return nil, 0
+	if err != nil || s.SF == nil {
+		return 0
 	}
-	return hardware.LoRaAirtimeEstimator(&hardware.RadioConfig{
-		FreqHz: uint32(*s.Freq * 1_000_000),
-		BwHz:   uint32(*s.BW * 1000),
-		SF:     uint8(*s.SF),
-		CR:     uint8(*s.CR),
-	}), uint8(*s.SF)
+	return uint8(*s.SF)
 }
 
 // runContext guards the nil r.runCtx window: node.New registers the radio handler in NewRepeater, so traffic can arrive before Start.
