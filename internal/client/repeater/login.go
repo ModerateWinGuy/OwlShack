@@ -66,7 +66,9 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRejected, err)
 	}
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(rm.node.UniqueTimestamp(), body))
+	ts, release := rm.Stamp()
+	defer release()
+	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(ts, body))
 	if err != nil {
 		return nil, fmt.Errorf("encrypting login: %w", err)
 	}
@@ -112,7 +114,9 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
 
 	pub := peer.Identity.PublicKey()
-	if err := meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0); err != nil {
+	err = meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0)
+	release()
+	if err != nil {
 		return nil, fmt.Errorf("sending login: %w", err)
 	}
 

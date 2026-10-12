@@ -242,7 +242,8 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	}
 
 	msgID := msg.ID
-	sentAt := c.node.UniqueTimestamp()
+	sentAt, release := c.repeaters.Stamp()
+	defer release()
 	err = c.node.SendTextMessageScoped(
 		peerIdentity,
 		scope.Region,

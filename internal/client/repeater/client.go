@@ -122,6 +122,14 @@ type Client struct {
 
 	cliMu      sync.Mutex
 	cliPending map[string]chan string
+
+	sendMu sync.Mutex
+}
+
+// Stamp holds the send order until release, so packets reach the queue in timestamp order: a node drops one below the last it saw.
+func (rm *Client) Stamp() (uint32, func()) {
+	rm.sendMu.Lock()
+	return rm.node.UniqueTimestamp(), sync.OnceFunc(rm.sendMu.Unlock)
 }
 
 func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator, ownHashSize func() uint8, scopeFor func(pubkey []byte) *meshcore.Region) *Client {
@@ -252,7 +260,8 @@ func (rm *Client) routedPacket(peer *node.Peer, payloadType byte, payload []byte
 
 // roundtripRequest awaits the tagged response; a pr carrying the secret is matched without a session.
 func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecret []byte, localPubByte byte, body []byte, timeout time.Duration, label string, pr *pendingRequest) ([]byte, error) {
-	tag := rm.node.UniqueTimestamp()
+	tag, release := rm.Stamp()
+	defer release()
 
 	plaintext := make([]byte, 4+len(body))
 	binary.LittleEndian.PutUint32(plaintext[:4], tag)
@@ -285,11 +294,11 @@ func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecr
 		pkt.Header = meshcore.MakeHeader(routeType, meshcore.PayloadTypeReq, 0)
 		pkt.PathLength, pkt.Path, outPath = pathLen, nil, nil
 	}
-	return rm.sendAwaitTag(tag, pr, pkt, outPath, hashSize, peerPub, timeout, label)
+	return rm.sendAwaitTag(tag, release, pr, pkt, outPath, hashSize, peerPub, timeout, label)
 }
 
 // sendAwaitTag sends pkt and waits for the response echoing tag, sizing the wait from the route.
-func (rm *Client) sendAwaitTag(tag uint32, pr *pendingRequest, pkt *meshcore.Packet, outPath []byte, hashSize uint8, peerPub [32]byte, timeout time.Duration, label string) ([]byte, error) {
+func (rm *Client) sendAwaitTag(tag uint32, release func(), pr *pendingRequest, pkt *meshcore.Packet, outPath []byte, hashSize uint8, peerPub [32]byte, timeout time.Duration, label string) ([]byte, error) {
 	resultCh := make(chan []byte, 1)
 	pr.ch, pr.created = resultCh, time.Now()
 	rm.pendingMu.Lock()
@@ -302,7 +311,9 @@ func (rm *Client) sendAwaitTag(tag uint32, pr *pendingRequest, pkt *meshcore.Pac
 		rm.pendingMu.Unlock()
 	}()
 
-	if err := meshpath.Send(rm.node, pkt, rm.floodScope(pr.app, peerPub[:]), 0); err != nil {
+	err := meshpath.Send(rm.node, pkt, rm.floodScope(pr.app, peerPub[:]), 0)
+	release()
+	if err != nil {
 		return nil, fmt.Errorf("sending %s req: %w", label, err)
 	}
 
@@ -341,7 +352,8 @@ func (rm *Client) RequestRegions(pubkeyHex string, timeout time.Duration) (meshc
 	if err != nil {
 		return meshcore.AnonRegionsReply{}, err
 	}
-	tag := rm.node.UniqueTimestamp()
+	tag, release := rm.Stamp()
+	defer release()
 	plaintext := binary.LittleEndian.AppendUint32(nil, tag)
 	plaintext = append(plaintext, body...)
 	req, err := meshcore.NewAnonReq(rm.node.Identity(), peer, plaintext, secret)
@@ -359,7 +371,7 @@ func (rm *Client) RequestRegions(pubkeyHex string, timeout time.Duration) (meshc
 	}
 	pub := peer.PublicKey()
 	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub}
-	data, err := rm.sendAwaitTag(tag, pr, pkt, []byte{}, hashSize, pub, timeout, "regions")
+	data, err := rm.sendAwaitTag(tag, release, pr, pkt, []byte{}, hashSize, pub, timeout, "regions")
 	if err != nil {
 		return meshcore.AnonRegionsReply{}, err
 	}
@@ -380,7 +392,8 @@ func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Dur
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
-	tag := rm.node.UniqueTimestamp()
+	tag, release := rm.Stamp()
+	defer release()
 	req, err := meshcore.NewAnonReq(rm.node.Identity(), peerID, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
 	if err != nil {
 		return nil, fmt.Errorf("encrypting anon req: %w", err)
@@ -403,5 +416,5 @@ func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Dur
 		}
 	}
 	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub, app: &app}
-	return rm.sendAwaitTag(tag, pr, pkt, outPath, hashSize, pub, timeout, "app-anon")
+	return rm.sendAwaitTag(tag, release, pr, pkt, outPath, hashSize, pub, timeout, "app-anon")
 }
