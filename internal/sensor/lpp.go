@@ -27,8 +27,6 @@ const (
 	cipherBlock   = 16
 	maxFrame      = 176 // MAX_FRAME_SIZE: the requester's companion drops a longer frame to its app
 	pushHeaderLen = 8   // PUSH_CODE_TELEMETRY_RESPONSE, a reserved byte and a 6-byte key prefix
-	// maxCombinedPath is the firmware's MAX_COMBINED_PATH: createPathReturn refuses path + reply + 5 past it (Mesh.cpp:440,452).
-	maxCombinedPath = meshcore.MaxPacketPayload - 2 - cipherBlock
 	// ReplyTagLen is the client timestamp a reply reflects back, ahead of the body.
 	ReplyTagLen = 4
 )
@@ -43,7 +41,7 @@ func MaxReplyBody(pkt *meshcore.Packet) int {
 	if route == 0 {
 		return plain - ReplyTagLen
 	}
-	return min(plain-route, maxCombinedPath-5-len(pkt.Path)) - ReplyTagLen
+	return min(plain-route, meshcore.MaxCombinedPath-5-len(pkt.Path)) - ReplyTagLen
 }
 
 // LPPType is one CayenneLPP type a reading can be published as; only single-value types are listed.

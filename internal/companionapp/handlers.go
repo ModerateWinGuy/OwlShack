@@ -544,7 +544,7 @@ func (c *conn) sendText(comp *companion.Companion, d []byte) {
 	case meshcore.TxtTypeCLIData, meshcore.TxtTypeCLICommand:
 		// Sent as the firmware's sendCommandData: no login of ours needed, and a CLI reply, not an ACK, answers it, which reaches the app as a message whenever it comes.
 		c.async(func(sent func(uint32, time.Duration, bool)) error {
-			return comp.Repeaters().AppCLI(pubHex, text, txtType, d[2], reqTimeout, c.appSend(comp, pub[:], sent))
+			return comp.Repeaters().AppCLI(pubHex, text, txtType, d[2], c.appSend(comp, pub[:], sent))
 		})
 
 	default:

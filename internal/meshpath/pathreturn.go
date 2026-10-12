@@ -1,5 +1,4 @@
-// Package meshpath builds the PATH packets that teach a peer its route back to us. Both the
-// companion (DM path returns) and the repeater client (reciprocal returns) need them.
+// Package meshpath builds the PATH packets that carry a reply and teach a peer its route back to us.
 package meshpath
 
 import (
@@ -30,14 +29,4 @@ func BuildReturn(selfPubKey [meshcore.PubKeySize]byte, destPubKey, sharedSecret,
 		PathLength: meshcore.MakePathLen(meshcore.PathHashSize, 0),
 		Payload:    payload,
 	}, nil
-}
-
-// Direct re-points a return packet down a known route, as the firmware's sendDirect does.
-func Direct(pkt *meshcore.Packet, path []byte, hashSize uint8) {
-	if hashSize == 0 {
-		hashSize = 1
-	}
-	pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypePath, 0)
-	pkt.Path = path
-	pkt.PathLength = meshcore.MakePathLen(hashSize, uint8(len(path)/int(hashSize)))
 }

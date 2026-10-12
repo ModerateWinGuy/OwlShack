@@ -47,27 +47,26 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 		return ErrNoDirectRoute
 	}
 
-	ts, release := rm.Stamp()
-	defer release()
-	plaintext := meshcore.BuildTaggedPlaintext(ts, meshcore.BuildKeepAliveRequest(since))
-	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
-	if err != nil {
-		return fmt.Errorf("encrypting keep-alive: %w", err)
-	}
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-	peerPub := peerIdentity.PublicKey()
-	reqBytes, err := (&meshcore.Request{
-		Destination:      peerPub[0],
-		Source:           sess.localPubKey[0],
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}).ToBytes()
-	if err != nil {
-		return fmt.Errorf("encoding keep-alive: %w", err)
-	}
-	pkt, _, _ := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
-	return meshpath.Send(rm.node, pkt, rm.scopeFor(peerPub[:]), 0)
+	return rm.node.SendStamped(func(ts uint32) error {
+		encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, meshcore.BuildTaggedPlaintext(ts, meshcore.BuildKeepAliveRequest(since)))
+		if err != nil {
+			return fmt.Errorf("encrypting keep-alive: %w", err)
+		}
+		var mac [2]byte
+		copy(mac[:], encrypted[:2])
+		peerPub := peerIdentity.PublicKey()
+		reqBytes, err := (&meshcore.Request{
+			Destination:      peerPub[0],
+			Source:           sess.localPubKey[0],
+			MAC:              mac,
+			EncryptedPayload: encrypted[2:],
+		}).ToBytes()
+		if err != nil {
+			return fmt.Errorf("encoding keep-alive: %w", err)
+		}
+		pkt, _, _ := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
+		return meshpath.Send(rm.node, pkt, rm.scopeFor(peerPub[:]), 0)
+	})
 }
 
 // SendRoomStatusReq is SendStatusReq for a room server, whose ServerStats trailer differs.
@@ -189,10 +188,7 @@ func (rm *Client) AppPathDiscovery(pubkeyHex string, timeout time.Duration, app 
 }
 
 // AppCLI sends the app's CLI text as the firmware's sendCommandData does: under the contact's own secret with no login of ours, its ACL deciding; the reply comes back as a received message.
-func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout time.Duration, app AppSend) error {
-	if len(text) > meshcore.MaxTextLen {
-		return node.ErrTextTooLong
-	}
+func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, app AppSend) error {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
 		return fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
@@ -205,29 +201,34 @@ func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout 
 	if peer == nil {
 		return ErrUnknownPeer
 	}
-	secret, err := rm.node.SharedSecret(peerIdentity)
+	sent, err := rm.sendText(peer, app.Scope, []byte(text), txtType, int(attempt))
 	if err != nil {
-		return fmt.Errorf("deriving shared secret: %w", err)
+		return err
 	}
-	ts, release := rm.Stamp()
-	defer release()
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), txtType<<2|attempt&3, []byte(text))
-	msg, err := meshcore.NewTextMessage(rm.node.Identity(), peerIdentity, plaintext, secret)
-	if err != nil {
-		return fmt.Errorf("encrypting CLI: %w", err)
-	}
-	msgBytes, err := msg.ToBytes()
-	if err != nil {
-		return fmt.Errorf("encoding CLI: %w", err)
-	}
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
-	err = meshpath.Send(rm.node, pkt, app.Scope, 0)
-	release()
-	if err != nil {
-		return fmt.Errorf("sending CLI: %w", err)
-	}
-	app.Sent(0, rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout), outPath == nil)
+	app.Sent(0, sent.Timeout, sent.Flood)
 	return nil
+}
+
+// sendText sends one attempt of a text to peer along its route, stamped in send order as firmware's sendCommandData.
+func (rm *Client) sendText(peer *node.Peer, scope *meshcore.Region, text []byte, txtType byte, attempt int) (node.TextSent, error) {
+	path, hashSize := learnedRoute(peer)
+	if len(path) == 0 {
+		pub := peer.Identity.PublicKey()
+		hashSize = max(rm.bytesPerHop(pub[:]), 1)
+	}
+	var sent node.TextSent
+	err := rm.node.SendStamped(func(ts uint32) error {
+		var err error
+		sent, err = rm.node.SendTextAttempt(node.TextAttempt{
+			Peer: peer.Identity, Scope: scope, Text: text, Flags: meshcore.TextFlags(txtType),
+			Timestamp: ts, Attempt: attempt, Path: path, PathHashSize: hashSize,
+		}, nil)
+		return err
+	})
+	if err != nil {
+		return node.TextSent{}, fmt.Errorf("sending CLI: %w", err)
+	}
+	return sent, nil
 }
 
 // ErrNoPath is a path discovery answered without the path return that carries both routes.
@@ -312,40 +313,13 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 		rm.cliMu.Unlock()
 	}()
 
-	ts, release := rm.Stamp()
-	defer release()
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), meshcore.TxtTypeCLIData<<2, []byte(framedCommand))
-
-	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
-	if err != nil {
-		return "", fmt.Errorf("encrypting CLI: %w", err)
-	}
-
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-
-	txtMsg := &meshcore.TextMessage{
-		Destination:      peerIdentity.PublicKey()[0],
-		Source:           sess.localPubKey[0],
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}
-
-	msgBytes, err := txtMsg.ToBytes()
-	if err != nil {
-		return "", fmt.Errorf("encoding text message: %w", err)
-	}
-
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
-
 	pub := peer.Identity.PublicKey()
-	err = meshpath.Send(rm.node, pkt, rm.scopeFor(pub[:]), 0)
-	release()
-	if err != nil {
-		return "", fmt.Errorf("sending CLI: %w", err)
+	if _, err := rm.sendText(peer, rm.scopeFor(pub[:]), []byte(framedCommand), meshcore.TxtTypeCLIData, 0); err != nil {
+		return "", err
 	}
 
-	wait := rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout)
+	outPath, hashSize := learnedRoute(peer)
+	wait := rm.replyTimeout(0, outPath, hashSize, timeout)
 	rm.log.Debug("CLI sent", "peer", pubkeyHex[:12], "prefix", prefix, "command", command, "wait", wait)
 
 	select {

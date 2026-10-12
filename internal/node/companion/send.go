@@ -7,6 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"sync"
 	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
@@ -101,11 +104,14 @@ func (c *Companion) sendGroup(ch *meshcore.ChannelEntry, text string, hashSize u
 	)
 	if err != nil { // never sent, so the row already shown must not read as sent, nor take an earlier post's echoes
 		c.pendingOutbound.Lock()
-		if c.pendingOutbound.msgID == msgID {
+		unhanded := c.pendingOutbound.msgID == msgID
+		if unhanded {
 			c.pendingOutbound.msgID, c.pendingOutbound.channel = 0, ""
 		}
 		c.pendingOutbound.Unlock()
-		c.setMessageStatus(msgID, ch.Name, "failed")
+		if unhanded { // one the radio took is settled by its transmit result
+			c.setMessageStatus(msgID, ch.Name, "failed")
+		}
 	}
 	return err
 }
@@ -145,9 +151,6 @@ func (c *Companion) sendDMReply(pubkeyHex, text string, hashSize uint8, ackTimeo
 // (MyMesh.cpp:851-858): the wait has to scale with airtime and hop count or a slow preset gives up
 // before the ack can physically arrive. floor keeps the caller's configured value as a minimum,
 // and is used outright when the radio params are unknown and airtime reads 0.
-// Library limitation: SendTextMessage applies one timeout to every attempt, while the firmware
-// recomputes per attempt, so a 0-hop neighbour that goes out of range mid-conversation runs its
-// flood fallback attempts on the shorter direct timeout.
 func (c *Companion) dmAckTimeout(textLen int, outPath []byte, hashSize uint8, floor time.Duration) time.Duration {
 	if c.stats == nil {
 		return floor
@@ -190,7 +193,7 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 		return AppDMSend{}, fmt.Errorf("%w: message is %d bytes, over the %d-byte limit (multibyte characters cost more than one)", node.ErrTextTooLong, len(text), MaxDMTextBytes)
 	}
 
-	// SendTextMessage treats a nil path as a flood, so an unrouted contact still sends.
+	// A nil path floods, so an unrouted contact still sends.
 	outPath, hashSize, haveRoute := c.learnedRoute(pubkeyBytes)
 	if !haveRoute {
 		outPath = nil // flood
@@ -199,8 +202,6 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	if len(outPath) == 0 {
 		hashSize = fallbackHashSize
 	}
-
-	ackTimeout = c.dmAckTimeout(len(text), outPath, hashSize, ackTimeout)
 
 	channelKey := "dm:" + pubkeyHex
 	statusSending := "sending"
@@ -242,58 +243,160 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	}
 
 	msgID := msg.ID
-	sentAt, release := c.repeaters.Stamp()
-	defer release()
-	err = c.node.SendTextMessageScoped(
-		peerIdentity,
-		scope.Region,
-		[]byte(text),
-		0,
-		time.Unix(int64(sentAt), 0),
-		outPath,
-		hashSize,
-		ackTimeout,
-		func(result node.DMSendResult) {
-			var status string
-			if result.Confirmed {
-				status = "delivered"
-				c.log.Debug("DM delivered", "peer", pubkeyHex[:12], "roundTrip", result.RoundTrip)
-			} else {
-				status = "failed"
-				c.log.Warn("DM delivery failed", "peer", pubkeyHex[:12])
-				// Every attempt failed on a route we believed in, so stop believing in it: the
-				// official app issues CMD_RESET_PATH here. The next path return re-learns it.
-				if haveRoute {
-					c.node.Peers().ResetOutPath(peerIdentity.PublicKey())
-					c.store.WriteAsync(func() {
-						if err := c.store.Contacts.UpdateOutPath(context.Background(), c.conf().ID, pubkeyBytes, nil, 0); err != nil {
-							c.log.Error("failed to clear stale route", "peer", pubkeyHex[:12], "error", err)
-						}
-					})
-					c.log.Info("cleared stale route after failed delivery", "peer", pubkeyHex[:12])
+	settle := func(result node.DMSendResult) bool {
+		if !c.dmsInFlight.end(msgID) {
+			return false
+		}
+		status := "failed"
+		if result.Confirmed {
+			status = "delivered"
+			c.log.Debug("DM delivered", "peer", pubkeyHex[:12], "roundTrip", result.RoundTrip)
+		}
+		c.setMessageStatus(msgID, channelKey, status)
+		if done != nil {
+			done(result)
+		}
+		return true
+	}
+	c.dmsInFlight.begin(msgID, func() { settle(node.DMSendResult{}) })
+	giveUp := func() {
+		if !settle(node.DMSendResult{}) {
+			return
+		}
+		c.log.Warn("DM delivery failed", "peer", pubkeyHex[:12])
+		// Every attempt failed on a route we believed in, so drop it as the app's CMD_RESET_PATH does; the next path return re-learns it.
+		if haveRoute {
+			c.node.Peers().ResetOutPath(peerIdentity.PublicKey())
+			c.store.WriteAsync(func() {
+				if err := c.store.Contacts.UpdateOutPath(context.Background(), c.conf().ID, pubkeyBytes, nil, 0); err != nil {
+					c.log.Error("failed to clear stale route", "peer", pubkeyHex[:12], "error", err)
 				}
-			}
+			})
+			c.log.Info("cleared stale route after failed delivery", "peer", pubkeyHex[:12])
+		}
+	}
 
-			c.setMessageStatus(msgID, channelKey, status)
-			if done != nil {
-				done(result)
+	// Firmware's sendMessage per attempt, as the app retries: direct ones first when routed, then floods.
+	attempts, direct := dmUnroutedAttempts, 0
+	if outPath != nil {
+		attempts, direct = dmAttempts, dmDirectAttempts
+	}
+	a := node.TextAttempt{Peer: peerIdentity, Scope: scope.Region, Text: []byte(text)}
+	var send func(attempt int) error
+	send = func(attempt int) error {
+		a.Attempt, a.Path, a.PathHashSize = attempt, nil, fallbackHashSize
+		if attempt < direct {
+			a.Path, a.PathHashSize = outPath, hashSize
+		}
+		sent, err := c.node.SendTextAttempt(a, nil)
+		if err != nil {
+			return err
+		}
+		c.sentAcks.add(sent.ACK, peerIdentity)
+		wait := max(sent.Timeout, ackTimeout)
+		c.log.Debug("DM attempt sent", "peer", pubkeyHex[:12], "attempt", attempt, "flood", sent.Flood, "estTimeout", sent.Timeout, "wait", wait)
+		start := time.Now()
+		c.node.ExpectACK(sent.ACK, wait, func(time.Duration) {
+			settle(node.DMSendResult{Confirmed: true, RoundTrip: time.Since(start)})
+		}, func() {
+			if attempt+1 >= attempts {
+				giveUp()
+				return
 			}
-		},
-	)
-	release()
-	if err != nil { // the library reports no result for a send it refused outright
-		c.setMessageStatus(msgID, channelKey, "failed")
+			if err := send(attempt + 1); err != nil {
+				c.log.Warn("DM retry refused", "peer", pubkeyHex[:12], "attempt", attempt+1, "error", err)
+				settle(node.DMSendResult{})
+			}
+		})
+		return nil
+	}
+	var sentAt uint32
+	err = c.node.SendStamped(func(ts uint32) error {
+		sentAt, a.Timestamp = ts, ts
+		return send(0)
+	})
+	if err != nil { // never sent, so no attempt will report
+		settle(node.DMSendResult{})
 		return AppDMSend{}, err
 	}
-	// The library makes 4 flood attempts, or 6 starting direct, each waiting ackTimeout.
-	attempts := 4
-	if outPath != nil {
-		attempts = 6
+	total := time.Duration(attempts-direct) * c.dmAckTimeout(len(text), nil, fallbackHashSize, ackTimeout)
+	if direct > 0 {
+		total += time.Duration(direct) * c.dmAckTimeout(len(text), outPath, hashSize, ackTimeout)
 	}
 	resend := func(attempt int, done func(node.DMSendResult)) (AppDMSend, error) {
 		return c.resendDM(peerIdentity, text, sentAt, attempt, msgID, channelKey, fallbackHashSize, scope, done)
 	}
-	return AppDMSend{Flood: outPath == nil, Timeout: ackTimeout * time.Duration(attempts), Resend: resend}, nil
+	return AppDMSend{Flood: outPath == nil, Timeout: total, Resend: resend}, nil
+}
+
+// A routed DM tries dmDirectAttempts times along its route then floods up to dmAttempts in all; an unrouted one floods dmUnroutedAttempts times.
+const (
+	dmAttempts         = 5
+	dmDirectAttempts   = 3
+	dmUnroutedAttempts = 3
+)
+
+// dmsInFlight settles each DM once, and fails those still waiting when the node stops, which ends their ACK waits unreported.
+type dmsInFlight struct {
+	sync.Mutex
+	abort map[int64]func()
+}
+
+func (d *dmsInFlight) begin(id int64, abort func()) {
+	d.Lock()
+	defer d.Unlock()
+	if d.abort == nil {
+		d.abort = map[int64]func(){}
+	}
+	d.abort[id] = abort
+}
+
+// end reports whether id was still in flight, so only its first outcome counts.
+func (d *dmsInFlight) end(id int64) bool {
+	d.Lock()
+	defer d.Unlock()
+	_, ok := d.abort[id]
+	delete(d.abort, id)
+	return ok
+}
+
+func (d *dmsInFlight) abortAll() {
+	d.Lock()
+	fns := slices.Collect(maps.Values(d.abort))
+	d.Unlock()
+	for _, f := range fns {
+		f()
+	}
+}
+
+// sentAcks is the firmware's expected_ack_table (MyMesh.h:303): the last 8 DM attempts' ACK CRCs and their recipients.
+type sentAcks struct {
+	sync.Mutex
+	next int
+	tab  [8]struct {
+		crc  uint32
+		peer meshcore.Identity
+	}
+}
+
+func (s *sentAcks) add(crc uint32, peer meshcore.Identity) {
+	s.Lock()
+	defer s.Unlock()
+	s.tab[s.next].crc, s.tab[s.next].peer = crc, peer
+	s.next = (s.next + 1) % len(s.tab)
+}
+
+// take clears and returns the recipient of crc, as the firmware's processAck clears a matched entry.
+func (s *sentAcks) take(crc uint32) (meshcore.Identity, bool) {
+	s.Lock()
+	defer s.Unlock()
+	for i := range s.tab {
+		if e := &s.tab[i]; e.crc == crc && crc != 0 {
+			e.crc = 0
+			return e.peer, true
+		}
+	}
+	return meshcore.Identity{}, false
 }
 
 func (c *Companion) SendTrace(path []byte, pathHashSize uint8) (uint32, error) {

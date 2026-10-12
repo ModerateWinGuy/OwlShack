@@ -1,6 +1,7 @@
 package echo
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -8,12 +9,25 @@ import (
 	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/store"
 )
 
-// A radio reset throws the TX queue away, so a post still in it never went out and must not read as sent.
-func TestFailQueued_FailsOnlyWhatNeverReachedTheModem(t *testing.T) {
+type failingModem struct{ sent chan []byte }
+
+func (m failingModem) SendData(data []byte) error {
+	m.sent <- data
+	if data[len(data)-4] == 2 {
+		return errors.New("kiss: tx failed")
+	}
+	return nil
+}
+func (failingModem) SetDataHandler(func([]byte, float32, int8, bool)) {}
+func (failingModem) AddOutboundHandler(func([]byte))                  {}
+
+// A post the radio took but never transmitted, or still held when it stopped, must not read as sent; each settles on its first result.
+func TestTxResult_FailsWhatNeverWentOut(t *testing.T) {
 	ctx := t.Context()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "echo.db"))
 	if err != nil {
@@ -26,34 +40,48 @@ func TestFailQueued_FailsOnlyWhatNeverReachedTheModem(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := NewTracker(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	frame := func(b byte) ([]byte, [meshcore.PacketHashSize]byte) {
-		pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0), Payload: []byte{b, 1, 2, 3}}
-		data, err := pkt.ToBytes()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return data, pkt.PacketHash()
-	}
+	modem := failingModem{sent: make(chan []byte, 8)}
+	mux := node.NewRadioMux(modem, node.WithMuxTxResult(tr.TxResult))
+	radio := mux.NewRadio()
+
+	names := []string{"went out", "tx failed", "still queued", "received"}
 	ids := map[string]int64{}
-	for _, name := range []string{"went out", "still queued", "received"} {
+	frames := map[string][]byte{}
+	for i, name := range names {
 		m := store.Message{CompanionID: c.ID, Channel: "Public", Sender: "home", Text: name, Direction: "tx", Timestamp: time.Now(), ReceivedAt: time.Now(), FloodScope: "everywhere"}
 		db.WriteSync(func() { err = db.Messages.Insert(ctx, &m) })
 		if err != nil {
 			t.Fatal(err)
 		}
 		ids[name] = m.ID
+		pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0), Payload: []byte{byte(i + 1), 1, 2, 3}}
+		frames[name], _ = pkt.ToBytes()
+		sent := Sent{MessageID: m.ID, CompanionID: c.ID, Companion: "home", Channel: "Public"}
+		if name == "received" {
+			tr.Track(pkt.PacketHash(), sent)
+			continue
+		}
+		tr.TrackQueued(pkt.PacketHash(), sent)
+		delay := time.Duration(0)
+		if name == "still queued" {
+			delay = time.Hour
+		}
+		radio.Enqueue(frames[name], node.PrioritySend, delay)
 	}
-	sentData, sentHash := frame(1)
-	_, queuedHash := frame(2)
-	_, heardHash := frame(3)
-	tr.TrackQueued(sentHash, Sent{MessageID: ids["went out"], CompanionID: c.ID, Companion: "home", Channel: "Public"})
-	tr.TrackQueued(queuedHash, Sent{MessageID: ids["still queued"], CompanionID: c.ID, Companion: "home", Channel: "Public"})
-	tr.Track(heardHash, Sent{MessageID: ids["received"], CompanionID: c.ID, Companion: "home", Channel: "Public"})
-	tr.OnAir(sentData)
-	tr.FailQueued()
+	for range 2 {
+		select {
+		case <-modem.sent:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the radio never took the posts")
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	mux.Stop()
+	time.Sleep(200 * time.Millisecond)
+	tr.TxResult(frames["went out"], errors.New("a later resend failed"))
 	db.WriteSync(func() {})
 
-	for name, want := range map[string]string{"went out": "", "still queued": "failed", "received": ""} {
+	for name, want := range map[string]string{"went out": "", "tx failed": "failed", "still queued": "failed", "received": ""} {
 		m, err := db.Messages.GetByID(ctx, ids[name])
 		if err != nil {
 			t.Fatal(err)

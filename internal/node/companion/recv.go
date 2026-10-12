@@ -253,6 +253,9 @@ func (c *Companion) handleDMPathReturn(pkt *meshcore.Packet) {
 			}
 		})
 
+		if extraType == meshcore.PayloadTypeAck && len(extraData) >= 4 {
+			c.sentAcks.take(binary.LittleEndian.Uint32(extraData[:4]))
+		}
 		if extraType == meshcore.PayloadTypeAck && len(extraData) >= 4 && !handled {
 			ackCRC := binary.LittleEndian.Uint32(extraData[:4])
 			c.node.NotifyACK(ackCRC)
@@ -265,7 +268,9 @@ func (c *Companion) handleDMPathReturn(pkt *meshcore.Packet) {
 		// along the route we just learned. Without it the peer never learns its route to us and
 		// keeps flooding every reply.
 		if pkt.IsRouteFlood() && !handled {
-			c.sendReciprocalPathReturn(cand.pubkey, secret, pkt, returnPath, hs)
+			if err := c.node.SendReciprocalPath(peerID, pkt, returnPath, hs, reciprocalPathDelay); err != nil {
+				c.log.Debug("failed to send reciprocal path return", "error", err)
+			}
 		}
 		return
 	}
@@ -677,6 +682,8 @@ func (c *Companion) registerPacketHandlers() {
 		}
 	})
 
+	c.node.OnPacket(meshcore.PayloadTypeAck, c.handleAck)
+
 	c.node.OnPacket(meshcore.PayloadTypePath, func(pkt *meshcore.Packet) {
 		if c.repeaters.HandlePathPacket(pkt) {
 			return
@@ -818,20 +825,29 @@ func (c *Companion) learnedRoute(pubkey []byte) ([]byte, uint8, bool) {
 // reciprocalPathDelay matches the firmware's 500 ms on a reciprocal path return (Mesh.cpp:177).
 const reciprocalPathDelay = 500 * time.Millisecond
 
-// sendReciprocalPathReturn teaches a peer its route to us, sent direct down the route they just
-// taught us. It carries no extra payload, so buildPathReturn salts it to keep the packet unique.
-func (c *Companion) sendReciprocalPathReturn(peerPubKey, secret []byte, pkt *meshcore.Packet, learnedPath []byte, hashSize uint8) {
-	rpath, err := c.buildPathReturn(peerPubKey, secret, pkt.Path, pkt.PathLength, 0, nil)
-	if err != nil {
-		c.log.Debug("failed to build reciprocal path return", "error", err)
+// returnPathRetryDelay is the firmware's 3 s on handleReturnPathRetry (BaseChatMesh.cpp:389).
+const returnPathRetryDelay = 3 * time.Second
+
+// handleAck answers a flood ACK to our DM from a peer we hold a route to: it never learned ours, so
+// BaseChatMesh::onAckRecv (BaseChatMesh.cpp:372-382) resends it direct after 3 s.
+func (c *Companion) handleAck(pkt *meshcore.Packet) {
+	if len(pkt.Payload) < 4 {
 		return
 	}
-	meshpath.Direct(rpath, learnedPath, hashSize)
-	if err := meshpath.Send(c.node, rpath, nil, reciprocalPathDelay); err != nil {
-		c.log.Debug("failed to send reciprocal path return", "error", err)
+	peer, ok := c.sentAcks.take(binary.LittleEndian.Uint32(pkt.Payload[:4]))
+	if !ok || !pkt.IsRouteFlood() {
 		return
 	}
-	c.log.Debug("sent reciprocal path return", "peer", hex.EncodeToString(peerPubKey[:min(6, len(peerPubKey))]), "hops", len(learnedPath)/int(max(hashSize, 1)))
+	pub := peer.PublicKey()
+	path, hashSize, ok := c.learnedRoute(pub[:])
+	if !ok {
+		return
+	}
+	if err := c.node.SendReciprocalPath(peer, pkt, path, hashSize, returnPathRetryDelay); err != nil {
+		c.log.Debug("failed to send return path retry", "error", err)
+		return
+	}
+	c.log.Debug("sent return path retry", "peer", hex.EncodeToString(pub[:6]))
 }
 
 // handleAdvert records a peer as firmware BaseChatMesh::onAdvertRecv does: an advert with invalid app data or no name is ignored.

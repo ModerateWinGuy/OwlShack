@@ -123,6 +123,15 @@ top until tagged.
 
 ### Fixed
 
+- **A channel post the radio never sent shows as failed.** A post the radio took but failed to
+  transmit, or still held when the radio went down, read as sent; it now shows failed with Retry.
+- **A direct message cut off by a radio restart shows as failed.** It stayed on "sending" for good.
+- **Direct message retries wait as long as their route needs.** When a message to a contact falls
+  back from its route to a flood, each flood attempt now waits a flood's time for the reply, so a
+  reply that was on its way is no longer given up on and sent again.
+- **A contact that keeps flooding its replies to you learns your route again.** When a contact
+  you reach direct answers your message by flood, OwlShack sends it the route back to you, as
+  MeshCore companions do, so its later replies come straight back.
 - **Your repeater waits its turn before relaying a packet, as firmware repeaters do.** It relayed
   everything the moment it heard it, so it collided with other repeaters relaying the same packet.
 - **Commands sent to a repeater or room close together are all answered.** When two went out

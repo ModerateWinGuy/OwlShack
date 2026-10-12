@@ -86,7 +86,9 @@ type Companion struct {
 	chanEditMu sync.Mutex
 
 	// dmSeen collapses a sender's retransmissions of one message; see recentDM.
-	dmSeen dmSeen
+	dmSeen      dmSeen
+	dmsInFlight dmsInFlight
+	sentAcks    sentAcks
 
 	triggers []triggerEntry
 
@@ -236,6 +238,7 @@ func (c *Companion) Stop() error {
 	}
 
 	c.node.Stop()
+	c.dmsInFlight.abortAll()
 	return nil
 }
 

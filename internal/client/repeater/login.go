@@ -66,28 +66,6 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRejected, err)
 	}
-	ts, release := rm.Stamp()
-	defer release()
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(ts, body))
-	if err != nil {
-		return nil, fmt.Errorf("encrypting login: %w", err)
-	}
-
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-
-	anonReq := &meshcore.AnonReq{
-		Destination:      peerIdentity.PublicKey()[0],
-		EphemeralPubKey:  selfIdentity.PublicKey(),
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}
-
-	payload, err := anonReq.ToBytes()
-	if err != nil {
-		return nil, fmt.Errorf("encoding anon req: %w", err)
-	}
-
 	resultCh := make(chan []byte, 1)
 	pl := &pendingLogin{
 		ch:             resultCh,
@@ -111,16 +89,39 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 		rm.loginMu.Unlock()
 	}()
 
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
-
 	pub := peer.Identity.PublicKey()
-	err = meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0)
-	release()
+	var (
+		pkt      *meshcore.Packet
+		outPath  []byte
+		hashSize uint8
+	)
+	err = rm.node.SendStamped(func(ts uint32) error {
+		encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(ts, body))
+		if err != nil {
+			return fmt.Errorf("encrypting login: %w", err)
+		}
+		var mac [2]byte
+		copy(mac[:], encrypted[:2])
+		payload, err := (&meshcore.AnonReq{
+			Destination:      peerIdentity.PublicKey()[0],
+			EphemeralPubKey:  selfIdentity.PublicKey(),
+			MAC:              mac,
+			EncryptedPayload: encrypted[2:],
+		}).ToBytes()
+		if err != nil {
+			return fmt.Errorf("encoding anon req: %w", err)
+		}
+		pkt, outPath, hashSize = rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
+		if err := meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0); err != nil {
+			return fmt.Errorf("sending login: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("sending login: %w", err)
+		return nil, err
 	}
 
-	wait := rm.replyTimeout(len(payload), outPath, hashSize, timeout)
+	wait := rm.replyTimeout(len(pkt.Payload), outPath, hashSize, timeout)
 	rm.log.Debug("login sent", "peer", pubkeyHex[:12], "wait", wait)
 	if app != nil {
 		app.Sent(binary.LittleEndian.Uint32(pub[:4]), wait, outPath == nil)
