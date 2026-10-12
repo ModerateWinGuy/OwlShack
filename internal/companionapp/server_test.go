@@ -899,15 +899,24 @@ func TestFrameShapeRefusals(t *testing.T) {
 	a.ask(illegal, mc.CmdSetDevicePin, 12, 0, 0, 0)
 }
 
-// A name longer than its field is cut whole characters at a time.
-func TestLongNameCutOnRune(t *testing.T) {
+// A name longer than its field is cut as the firmware's strzcpy cuts it (TxtDataHelpers.cpp): at 31 bytes, even mid-character, then NULs.
+func TestLongNameCutAsStrzcpy(t *testing.T) {
 	r := newRig(t)
-	k := r.contactOf(t, strings.Repeat("é", 20), "CHAT")
+	name := strings.Repeat("x", 29) + "\U0001F989"
+	k := r.contactOf(t, name, "CHAT")
+	chName := strings.Repeat("y", 30) + "é"
+	if err := r.comp.AppSetChannel(5, chName, bytes.Repeat([]byte{0x5c}, 16)); err != nil {
+		t.Fatal(err)
+	}
+	strzcpy := func(s string) []byte { return append([]byte(s[:31]), 0) }
 	a := r.dial(t)
 	a.send(append([]byte{mc.CmdGetContactByKey}, k.PublicKeyBytes()...)...)
-	got, err := mc.ParseContactResponse(a.next()[1:])
-	if err != nil || got.AdvertName != strings.Repeat("é", 15) {
-		t.Errorf("contact name %q, %v; want 15 whole characters", got.AdvertName, err)
+	if f := a.next(); !bytes.Equal(f[100:132], strzcpy(name)) {
+		t.Errorf("contact name field % x, want % x", f[100:132], strzcpy(name))
+	}
+	a.send(mc.CmdGetChannel, 5)
+	if f := a.next(); !bytes.Equal(f[2:34], strzcpy(chName)) {
+		t.Errorf("channel name field % x, want % x", f[2:34], strzcpy(chName))
 	}
 }
 
