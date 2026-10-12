@@ -127,10 +127,7 @@ func TestIncrementalContactsSeeEdits(t *testing.T) {
 }
 
 func addContactFrame(pub []byte, name string, lastAdvert uint32) []byte {
-	b := append([]byte{mc.CmdAddUpdateContact}, pub...)
-	b = append(b, meshcore.AdvertTypeChat, 0, 0xFF)
-	b = append(b, make([]byte, 64)...)
-	return le32(fixed(b, name, 32), lastAdvert)
+	return mc.AddUpdateContactCommand{PublicKey: [32]byte(pub), Type: meshcore.AdvertTypeChat, OutPathLen: mc.OutPathUnknown, Name: name, LastAdvert: lastAdvert}.ToBytes()[:136]
 }
 
 // A heard node added from the app keeps the advert heard, as the REST add does; one never heard takes the frame's, as the firmware does. Only a heard one has an advert path.
