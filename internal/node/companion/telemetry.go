@@ -110,7 +110,7 @@ func (c *Companion) telemetryReply(granted, mask byte, req *meshcore.Packet) ([]
 	maxBody := sensor.MaxReplyBody(req)
 	body, dropped := sensor.BuildReply(perms, c.selfReadings(), entries, statuses, maxBody)
 	if dropped {
-		c.log.Error("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
+		c.log.Info("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
 	}
 	return body, true
 }
