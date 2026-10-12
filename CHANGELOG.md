@@ -125,6 +125,9 @@ top until tagged.
 
 - **Your repeater waits its turn before relaying a packet, as firmware repeaters do.** It relayed
   everything the moment it heard it, so it collided with other repeaters relaying the same packet.
+- **Commands sent to a repeater or room close together are all answered.** When two went out
+  within a moment of each other, for example from two open pages or from the app and OwlShack at
+  once, the node could ignore one, and it timed out as if the node were unreachable.
 - **A room, repeater or sensor you haven't added as a contact shows its own name.** Its page was
   titled just "Room", "Repeater" or "Sensor"; it now uses the name from its advert.
 - **A room server opened from Contacts, Monitoring, the Repeaters list or a message thread shows

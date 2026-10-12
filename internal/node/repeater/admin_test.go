@@ -801,19 +801,6 @@ func testReconfigure(r *Repeater) func(func(*config.RepeaterConfig)) error {
 	}
 }
 
-// Pins the send-order flip: a flood request's accumulated path lists the client's neighbour first.
-func TestReverseHops(t *testing.T) {
-	if got := reverseHops([]byte{1, 2, 3}, 1); string(got) != string([]byte{3, 2, 1}) {
-		t.Errorf("1-byte = %x", got)
-	}
-	if got := reverseHops([]byte{1, 2, 3, 4}, 2); string(got) != string([]byte{3, 4, 1, 2}) {
-		t.Errorf("2-byte = %x", got)
-	}
-	if got := reverseHops(nil, 0); len(got) != 0 {
-		t.Errorf("empty = %x", got)
-	}
-}
-
 // Pins the firmware's unknown-command reply strings and the parsing helpers behind `set`.
 func TestCLIFirmwareReplies(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{Name: "rp"}}

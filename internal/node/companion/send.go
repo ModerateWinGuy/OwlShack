@@ -280,6 +280,7 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 			}
 		},
 	)
+	release()
 	if err != nil { // the library reports no result for a send it refused outright
 		c.setMessageStatus(msgID, channelKey, "failed")
 		return AppDMSend{}, err

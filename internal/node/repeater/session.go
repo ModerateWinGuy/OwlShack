@@ -10,6 +10,7 @@ import (
 	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/store"
 )
@@ -425,7 +426,7 @@ func (r *Repeater) sendFloodScoped(out, reqPkt *meshcore.Packet, delay time.Dura
 
 // learnFloodRoute caches a flood request's accumulated path, reversed into send order.
 func (r *Repeater) learnFloodRoute(clientPub [32]byte, pkt *meshcore.Packet) {
-	r.learnRoute(clientPub, reverseHops(pkt.Path, pkt.PathHashSize()), pkt.PathHashSize())
+	r.learnRoute(clientPub, node.ReverseHops(pkt.Path, int(pkt.PathHashSize())), pkt.PathHashSize())
 }
 
 // learnRoute caches a client's return path, already in send order.

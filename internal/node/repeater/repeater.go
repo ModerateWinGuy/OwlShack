@@ -100,20 +100,6 @@ type Repeater struct {
 	runCtx context.Context
 }
 
-// reverseHops flips a received path into send order: a flood request accumulates the client's neighbour first.
-func reverseHops(path []byte, hashSize uint8) []byte {
-	hs := int(hashSize)
-	if hs == 0 {
-		hs = int(meshcore.PathHashSize)
-	}
-	n := len(path) / hs * hs
-	out := make([]byte, n)
-	for i := 0; i < n; i += hs {
-		copy(out[n-hs-i:], path[i:i+hs])
-	}
-	return out
-}
-
 // Hooks are the app-provided callbacks the repeater can't build itself.
 type Hooks struct {
 	// Reconfigure persists + validates + reloads a config change; nil disables config writes.

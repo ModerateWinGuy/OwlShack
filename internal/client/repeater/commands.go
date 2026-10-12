@@ -221,7 +221,9 @@ func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout 
 		return fmt.Errorf("encoding CLI: %w", err)
 	}
 	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
-	if err := meshpath.Send(rm.node, pkt, app.Scope, 0); err != nil {
+	err = meshpath.Send(rm.node, pkt, app.Scope, 0)
+	release()
+	if err != nil {
 		return fmt.Errorf("sending CLI: %w", err)
 	}
 	app.Sent(0, rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout), outPath == nil)
