@@ -137,14 +137,12 @@ func (c *Companion) setMessageStatus(msgID int64, channel, status string) {
 
 // SendContactMessage is the chat API's DM send: a flood or 0-hop DM goes out at the contact's bytes per hop.
 func (c *Companion) SendContactMessage(pubkeyHex, text string) error {
-	_, err := c.sendDM(pubkeyHex, text, c.bytesPerHopHex(pubkeyHex), 5*time.Second, scopeOf(c.contactScopeHex(pubkeyHex)), nil)
-	return err
+	return c.sendDM(pubkeyHex, text, c.bytesPerHopHex(pubkeyHex), 5*time.Second, scopeOf(c.contactScopeHex(pubkeyHex)))
 }
 
 // sendDMReply is a DM trigger's answer: the trigger's pathHashSize frames it only when no route is stored, since a stored path already fixes its own hash width.
 func (c *Companion) sendDMReply(pubkeyHex, text string, hashSize uint8, ackTimeout time.Duration, scope config.FloodScope) error {
-	_, err := c.sendDM(pubkeyHex, text, hashSize, ackTimeout, scopeOf(scope), nil)
-	return err
+	return c.sendDM(pubkeyHex, text, hashSize, ackTimeout, scopeOf(scope))
 }
 
 // dmAckTimeout mirrors the firmware's calcFloodTimeoutMillisFor / calcDirectTimeoutMillisFor
@@ -176,21 +174,21 @@ func (c *Companion) dmAckTimeout(textLen int, outPath []byte, hashSize uint8, fl
 	return max(timeout, floor)
 }
 
-// sendDM stores, shows and sends a DM; done, when set, also hears the outcome.
-func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTimeout time.Duration, scope SendScope, done func(node.DMSendResult)) (AppDMSend, error) {
+// sendDM stores, shows and sends a DM, retrying it as the app would.
+func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTimeout time.Duration, scope SendScope) error {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
-		return AppDMSend{}, fmt.Errorf("invalid pubkey hex: %w", err)
+		return fmt.Errorf("invalid pubkey hex: %w", err)
 	}
 
 	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
 	if err != nil {
-		return AppDMSend{}, fmt.Errorf("invalid pubkey: %w", err)
+		return fmt.Errorf("invalid pubkey: %w", err)
 	}
 
 	// The UI counts characters; the wire counts bytes, and a retry past attempt 3 appends 2 more.
 	if len(text) > MaxDMTextBytes {
-		return AppDMSend{}, fmt.Errorf("%w: message is %d bytes, over the %d-byte limit (multibyte characters cost more than one)", node.ErrTextTooLong, len(text), MaxDMTextBytes)
+		return fmt.Errorf("%w: message is %d bytes, over the %d-byte limit (multibyte characters cost more than one)", node.ErrTextTooLong, len(text), MaxDMTextBytes)
 	}
 
 	// A nil path floods, so an unrouted contact still sends.
@@ -204,45 +202,7 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 	}
 
 	channelKey := "dm:" + pubkeyHex
-	statusSending := "sending"
-
-	now := time.Now()
-	msg := &store.Message{
-		CompanionID: c.conf().ID,
-		Channel:     channelKey,
-		ChannelHash: 0,
-		Sender:      c.conf().Name,
-		Text:        text,
-		Direction:   "tx",
-		Timestamp:   now,
-		ReceivedAt:  now,
-		Status:      &statusSending,
-		FloodScope:  string(scope.Label),
-	}
-
-	c.store.WriteSync(func() {
-		if insertErr := c.store.Messages.Insert(context.Background(), msg); insertErr != nil {
-			c.log.Error("failed to persist outgoing DM", "error", insertErr)
-		}
-	})
-
-	if c.hub != nil {
-		c.hub.Broadcast("messages", map[string]any{
-			"companion":   c.conf().Name,
-			"companionId": c.conf().ID,
-			"channel":     channelKey,
-			"sender":      c.conf().Name,
-			"text":        text,
-			"direction":   "tx",
-			"timestamp":   msg.Timestamp.UTC().Format(time.RFC3339),
-			"receivedAt":  msg.ReceivedAt.UTC().Format(time.RFC3339),
-			"id":          msg.ID,
-			"status":      "sending",
-			"floodScope":  msg.FloodScope,
-		})
-	}
-
-	msgID := msg.ID
+	msgID := c.storeDM(pubkeyHex, text, scope)
 	settle := func(result node.DMSendResult) bool {
 		if !c.dmsInFlight.end(msgID) {
 			return false
@@ -253,9 +213,6 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 			c.log.Debug("DM delivered", "peer", pubkeyHex[:12], "roundTrip", result.RoundTrip)
 		}
 		c.setMessageStatus(msgID, channelKey, status)
-		if done != nil {
-			done(result)
-		}
 		return true
 	}
 	c.dmsInFlight.begin(msgID, func() { settle(node.DMSendResult{}) })
@@ -310,23 +267,58 @@ func (c *Companion) sendDM(pubkeyHex, text string, fallbackHashSize uint8, ackTi
 		})
 		return nil
 	}
-	var sentAt uint32
 	err = c.node.SendStamped(func(ts uint32) error {
-		sentAt, a.Timestamp = ts, ts
+		a.Timestamp = ts
 		return send(0)
 	})
 	if err != nil { // never sent, so no attempt will report
 		settle(node.DMSendResult{})
-		return AppDMSend{}, err
 	}
-	total := time.Duration(attempts-direct) * c.dmAckTimeout(len(text), nil, fallbackHashSize, ackTimeout)
-	if direct > 0 {
-		total += time.Duration(direct) * c.dmAckTimeout(len(text), outPath, hashSize, ackTimeout)
+	return err
+}
+
+// storeDM stores and shows an outgoing DM as sending, returning its id.
+func (c *Companion) storeDM(pubkeyHex, text string, scope SendScope) int64 {
+	channelKey := "dm:" + pubkeyHex
+	statusSending := "sending"
+
+	now := time.Now()
+	msg := &store.Message{
+		CompanionID: c.conf().ID,
+		Channel:     channelKey,
+		ChannelHash: 0,
+		Sender:      c.conf().Name,
+		Text:        text,
+		Direction:   "tx",
+		Timestamp:   now,
+		ReceivedAt:  now,
+		Status:      &statusSending,
+		FloodScope:  string(scope.Label),
 	}
-	resend := func(attempt int, done func(node.DMSendResult)) (AppDMSend, error) {
-		return c.resendDM(peerIdentity, text, sentAt, attempt, msgID, channelKey, fallbackHashSize, scope, done)
+
+	c.store.WriteSync(func() {
+		if insertErr := c.store.Messages.Insert(context.Background(), msg); insertErr != nil {
+			c.log.Error("failed to persist outgoing DM", "error", insertErr)
+		}
+	})
+
+	if c.hub != nil {
+		c.hub.Broadcast("messages", map[string]any{
+			"companion":   c.conf().Name,
+			"companionId": c.conf().ID,
+			"channel":     channelKey,
+			"sender":      c.conf().Name,
+			"text":        text,
+			"direction":   "tx",
+			"timestamp":   msg.Timestamp.UTC().Format(time.RFC3339),
+			"receivedAt":  msg.ReceivedAt.UTC().Format(time.RFC3339),
+			"id":          msg.ID,
+			"status":      "sending",
+			"floodScope":  msg.FloodScope,
+		})
 	}
-	return AppDMSend{Flood: outPath == nil, Timeout: total, Resend: resend}, nil
+
+	return msg.ID
 }
 
 // A routed DM tries dmDirectAttempts times along its route then floods up to dmAttempts in all; an unrouted one floods dmUnroutedAttempts times.

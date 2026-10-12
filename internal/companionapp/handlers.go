@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -478,30 +477,9 @@ func (c *conn) sendText(comp *companion.Companion, cmd mc.SendTxtMsgCommand) {
 
 	switch cmd.TxtType {
 	case meshcore.TxtTypePlain:
-		// The app resends after est_timeout with the same timestamp; while ours is still trying, that is the same message.
-		key := fmt.Sprint(pubHex, "|", cmd.SenderTimestamp, "|", cmd.Text)
-		tag := s.nextTag()
-		confirmed := func(r node.DMSendResult) {
-			s.endFlight(key)
-			if r.Confirmed {
-				s.push(mc.PushSendConfirmedResponse{AckCode: tag, RoundTrip: uint32(r.RoundTrip.Milliseconds())}.ToBytes())
-			}
-		}
-		f, ok := s.flight(key)
-		if ok && !f.over {
-			c.send(sentFrame(f.flood, f.tag, uint32(time.Until(f.until).Milliseconds())))
-			return
-		}
-		start := time.Now()
-		var res companion.AppDMSend
-		var err error
-		if ok {
-			// Ours are over, so this is one more attempt at the same message, as the firmware sends each the app asks for.
-			res, err = f.resend(int(cmd.Attempt), confirmed)
-			res.Resend = f.resend
-		} else {
-			res, err = comp.SendAppDM(pubHex, cmd.Text, c.session.scope, confirmed)
-		}
+		res, err := comp.SendAppDM(pubHex, cmd.Text, cmd.SenderTimestamp, int(cmd.Attempt), c.session.scope, func(ack uint32, rt time.Duration) {
+			s.push(mc.PushSendConfirmedResponse{AckCode: ack, RoundTrip: uint32(rt.Milliseconds())}.ToBytes())
+		})
 		if errors.Is(err, node.ErrTextTooLong) {
 			c.send(errFrame(mc.ErrCodeIllegalArg))
 			return
@@ -510,8 +488,7 @@ func (c *conn) sendText(comp *companion.Companion, cmd mc.SendTxtMsgCommand) {
 			c.send(errFrame(mc.ErrCodeTableFull))
 			return
 		}
-		s.startFlight(key, flight{tag: tag, flood: res.Flood, until: start.Add(res.Timeout), resend: res.Resend})
-		c.send(sentFrame(res.Flood, tag, uint32(res.Timeout.Milliseconds())))
+		c.send(sentFrame(res.Flood, res.ACK, uint32(res.Timeout.Milliseconds())))
 
 	case meshcore.TxtTypeCLIData, meshcore.TxtTypeCLICommand:
 		// Sent as the firmware's sendCommandData: no login of ours needed, and a CLI reply, not an ACK, answers it, which reaches the app as a message whenever it comes.

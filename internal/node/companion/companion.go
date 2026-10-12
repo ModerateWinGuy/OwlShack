@@ -89,6 +89,10 @@ type Companion struct {
 	dmSeen      dmSeen
 	dmsInFlight dmsInFlight
 	sentAcks    sentAcks
+	appDMs      struct {
+		sync.Mutex
+		m map[string]*appDM
+	}
 
 	triggers []triggerEntry
 

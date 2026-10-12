@@ -3,10 +3,7 @@ package companion
 import (
 	"encoding/binary"
 	"encoding/hex"
-	"maps"
-	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -163,28 +160,18 @@ func TestFloodACK_ResendsOurRouteAfter3s(t *testing.T) {
 	}
 }
 
-// Stopping the node ends a DM's ACK wait unreported, so the DM fails then, once, rather than reading "sending" for good.
+// Stopping the node ends a DM's ACK wait unreported, so the DM fails then rather than reading "sending" for good.
 func TestStop_FailsADMStillWaiting(t *testing.T) {
 	t.Parallel()
 	c, _, _, friend := timedCompanion(t)
 	friendHex := hex.EncodeToString(friend.PublicKeyBytes())
-	var results atomic.Int32
-	if _, err := c.sendDM(friendHex, "hi", 2, time.Minute, scopeOf(c.contactScopeHex(friendHex)), func(node.DMSendResult) { results.Add(1) }); err != nil {
+	if err := c.sendDM(friendHex, "hi", 2, time.Minute, scopeOf(c.contactScopeHex(friendHex))); err != nil {
 		t.Fatal(err)
 	}
-	c.dmsInFlight.Lock()
-	abort := slices.Collect(maps.Values(c.dmsInFlight.abort))
-	c.dmsInFlight.Unlock()
 	if err := c.Stop(); err != nil {
 		t.Fatal(err)
 	}
 	if got := lastStatus(t, c, "dm:"+friendHex); got != "failed" {
 		t.Errorf("DM status %q after stop, want failed", got)
-	}
-	for _, f := range abort { // as an ACK settling it while Stop fails it would
-		f()
-	}
-	if n := results.Load(); n != 1 {
-		t.Errorf("%d results, want 1", n)
 	}
 }

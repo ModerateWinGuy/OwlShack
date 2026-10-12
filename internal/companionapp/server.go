@@ -5,7 +5,6 @@ package companionapp
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	mcompanion "github.com/OwlShack/meshcore-go/companion"
-	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/node/companion"
 	"github.com/OwlShack/OwlShack/internal/store"
@@ -53,10 +51,6 @@ type Server struct {
 	done chan struct{}
 	wg   sync.WaitGroup
 
-	tags      atomic.Uint32
-	flightsMu sync.Mutex
-	flights   map[string]flight
-
 	settings Settings
 	// rx is what the radio has heard while this port was open, as the firmware's radio stats count it.
 	rx struct {
@@ -64,52 +58,6 @@ type Server struct {
 		lastSNR              atomic.Uint32 // float32 bits
 		lastRSSI             atomic.Int32
 	}
-}
-
-// flight is an app DM, so the app's own resend of it is not sent twice while ours are trying, and goes as the same message after.
-type flight struct {
-	tag   uint32
-	flood bool
-	until time.Time
-	// resend is one more attempt once ours are over.
-	resend func(attempt int, done func(node.DMSendResult)) (companion.AppDMSend, error)
-	over   bool
-}
-
-// flightKeep is how long a DM is remembered past its tries, for the app's retries after ours.
-const flightKeep = 15 * time.Minute
-
-// nextTag is the ack code the app is given for a DM; the app only matches it against the confirmation that follows.
-func (s *Server) nextTag() uint32 { return s.tags.Add(1) }
-
-// flight is the DM the app is sending again, if it is remembered; over once ours are done.
-func (s *Server) flight(key string) (flight, bool) {
-	s.flightsMu.Lock()
-	defer s.flightsMu.Unlock()
-	now := time.Now()
-	for k, f := range s.flights {
-		if now.After(f.until.Add(flightKeep)) {
-			delete(s.flights, k)
-		}
-	}
-	f, ok := s.flights[key]
-	f.over = f.over || now.After(f.until)
-	return f, ok
-}
-
-func (s *Server) startFlight(key string, f flight) {
-	s.flightsMu.Lock()
-	s.flights[key] = f
-	s.flightsMu.Unlock()
-}
-
-func (s *Server) endFlight(key string) {
-	s.flightsMu.Lock()
-	if f, ok := s.flights[key]; ok {
-		f.over = true
-		s.flights[key] = f
-	}
-	s.flightsMu.Unlock()
 }
 
 // pop takes the app's next message in the writer without WriteSync's checkpoint, a disk sync per message; the firmware's queue is RAM, and a power cut here at worst delivers one again.
@@ -129,11 +77,8 @@ var errWriterFull = errors.New("the store's write queue is full")
 
 // Start opens the port and serves c; a port that cannot be opened is reported by Status, not returned.
 func Start(host string, port int, c *companion.Companion, env Env, st *store.Store, settings Settings, log *slog.Logger) *Server {
-	s := &Server{port: port, id: c.ID(), st: st, settings: settings, done: make(chan struct{}), flights: map[string]flight{},
+	s := &Server{port: port, id: c.ID(), st: st, settings: settings, done: make(chan struct{}),
 		log: log.With("component", "app", "companionId", c.ID(), "companion", c.Name(), "port", port)}
-	var seed [4]byte
-	rand.Read(seed[:])
-	s.tags.Store(binary.LittleEndian.Uint32(seed[:]))
 	s.env.Store(&env)
 	s.Use(c)
 	s.ln, s.err = net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
@@ -154,9 +99,6 @@ func (s *Server) Use(c *companion.Companion) {
 	if old == nil || old == c {
 		return
 	}
-	s.flightsMu.Lock()
-	clear(s.flights)
-	s.flightsMu.Unlock()
 	switch {
 	case old.Node().Identity().PublicKey() != c.Node().Identity().PublicKey():
 		s.log.Info("the companion has a new key, dropping the app so it reads it again")
