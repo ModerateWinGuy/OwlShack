@@ -123,6 +123,8 @@ top until tagged.
 
 ### Fixed
 
+- **While a companion's radio reconnects, sending says the radio isn't connected yet.** It said
+  the companion was not found, as if it had been deleted.
 - **A room, repeater or sensor you haven't added as a contact shows its own name.** Its page was
   titled just "Room", "Repeater" or "Sensor"; it now uses the name from its advert.
 - **A room server opened from Contacts, Monitoring, the Repeaters list or a message thread shows

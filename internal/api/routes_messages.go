@@ -1,12 +1,15 @@
 package api
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	meshcore "github.com/OwlShack/meshcore-go"
 
 	"github.com/OwlShack/OwlShack/internal/store"
 )
@@ -22,7 +25,7 @@ func (s *Server) handleAddChannel(w http.ResponseWriter, r *http.Request) {
 
 	adder, _, ok := mutator(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -54,7 +57,7 @@ func (s *Server) handleRemoveChannel(w http.ResponseWriter, r *http.Request) {
 
 	_, remover, ok := mutator(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -91,7 +94,7 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	provider := s.companionProvider()
 
 	if provider == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -102,7 +105,7 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeError(w, http.StatusNotFound, "companion not found")
+	s.companionNotRunning(w, r)
 }
 
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +159,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	channelSender, dmSender, ok := lookup(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -176,6 +179,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	var sendErr error
 	if strings.HasPrefix(body.Channel, "dm:") {
 		pubkeyHex := strings.TrimPrefix(body.Channel, "dm:")
+		if pk, err := hex.DecodeString(pubkeyHex); err != nil || len(pk) != meshcore.PubKeySize {
+			writeError(w, http.StatusBadRequest, "invalid pubkey hex")
+			return
+		}
 		if dmSender == nil {
 			writeError(w, http.StatusBadRequest, "direct messaging not supported")
 			return
@@ -271,8 +278,12 @@ func (s *Server) handleRetryMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, dmSender, ok := lookup(name)
-	if !ok || dmSender == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+	if !ok {
+		s.companionNotRunning(w, r)
+		return
+	}
+	if dmSender == nil {
+		writeError(w, http.StatusBadRequest, "direct messaging not supported")
 		return
 	}
 

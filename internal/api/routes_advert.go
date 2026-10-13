@@ -23,7 +23,7 @@ func (s *Server) handleSendAdvert(w http.ResponseWriter, r *http.Request) {
 
 	sender, ok := lookup(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 

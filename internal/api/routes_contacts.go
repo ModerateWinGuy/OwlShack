@@ -427,6 +427,19 @@ func (s *Server) handleSetContactFloodScope(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// companionNotRunning answers a lookup that found no running companion: 503 while a stored one waits for its radio, 404 when there is none.
+func (s *Server) companionNotRunning(w http.ResponseWriter, r *http.Request) {
+	_, err := s.store.Companions.IDByName(r.Context(), r.PathValue("name"))
+	switch {
+	case err == nil:
+		writeError(w, http.StatusServiceUnavailable, "the companion's radio is not connected yet")
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "companion not found")
+	default:
+		s.serverError(w, "companion lookup", err)
+	}
+}
+
 // companionID maps the name in the URL to the surrogate id, writing a 404 when there is no such companion.
 func (s *Server) companionID(ctx context.Context, w http.ResponseWriter, name string) (int64, bool) {
 	id, err := s.store.Companions.IDByName(ctx, name)
