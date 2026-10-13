@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	meshcore "github.com/OwlShack/meshcore-go"
+
 	"github.com/OwlShack/OwlShack/internal/api"
 	"github.com/OwlShack/OwlShack/internal/client/repeater"
 	"github.com/OwlShack/OwlShack/internal/discover"
@@ -39,7 +41,7 @@ func (s *regionScanner) start(disc *discover.Service, client *repeater.Client, n
 		s.mu.Unlock()
 		return s.snapshot(), nil
 	}
-	if err := disc.Start(discover.FilterFor(discover.TypeRepeater), time.Time{}); err != nil {
+	if err := disc.Start(discover.FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		s.mu.Unlock()
 		return api.RegionScanState{}, err
 	}
@@ -54,7 +56,7 @@ func (s *regionScanner) start(disc *discover.Service, client *repeater.Client, n
 func (s *regionScanner) run(disc *discover.Service, client *repeater.Client, name func(string) string) {
 	time.Sleep(time.Until(s.listenUntil))
 	_, _, results := disc.State()
-	results = slices.DeleteFunc(results, func(r discover.Result) bool { return r.Type != discover.TypeRepeater })
+	results = slices.DeleteFunc(results, func(r discover.Result) bool { return r.Type != int(meshcore.AdvertTypeRepeater) })
 	slices.SortFunc(results, func(a, b discover.Result) int { return int(b.SNR*4) - int(a.SNR*4) })
 
 	s.mu.Lock()

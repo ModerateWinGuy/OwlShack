@@ -44,7 +44,7 @@ func TestBuildReply_AMappedBatteryReplacesTheBoards(t *testing.T) {
 
 // The firmware's getBattMilliVolts returns 0 with no cell, so a node sending no voltage on channel 1 reads as another kind of node.
 func TestBuildReply_TheBatteryIsAlwaysSent(t *testing.T) {
-	if got := replyHex(t, PermBase, SelfReadings{}, nil, nil); got != "01740000" {
+	if got := replyHex(t, meshcore.TelemPermBase, SelfReadings{}, nil, nil); got != "01740000" {
 		t.Fatalf("a node with no battery replied %q, want 01740000", got)
 	}
 }
@@ -54,10 +54,10 @@ func TestBuildReply_TheNodesOwnChannelAnswersToBase(t *testing.T) {
 	mapped := []ChannelEntry{{Channel: ChannelSelf, Type: meshcore.LPPVoltage, SensorID: 1, Metric: Voltage}}
 	sts := oneSensor(Voltage, 3.7)
 
-	if got := replyHex(t, PermBase, SelfReadings{}, mapped, sts); got != "01740172" {
+	if got := replyHex(t, meshcore.TelemPermBase, SelfReadings{}, mapped, sts); got != "01740172" {
 		t.Fatalf("base only: %s, want the mapped battery", got)
 	}
-	if got := replyHex(t, PermEnvironment, SelfReadings{}, mapped, sts); got != "" {
+	if got := replyHex(t, meshcore.TelemPermEnvironment, SelfReadings{}, mapped, sts); got != "" {
 		t.Fatalf("environment only: %s, want nothing from the node's own channel", got)
 	}
 }

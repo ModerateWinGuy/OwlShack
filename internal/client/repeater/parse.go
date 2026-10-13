@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 type Neighbor struct {
@@ -116,74 +118,49 @@ func parseRepeaterOwnerInfo(data []byte) *OwnerInfo {
 	return info
 }
 
-// parseRoomStatus: bytes 48-52 are n_posted and n_post_push (u16 each) where a repeater carries rx_air_time_secs.
+// parseRoomStatus reads a room server's ServerStats, which carries posts where a repeater has its rx airtime.
 func parseRoomStatus(data []byte) (*Status, error) {
-	if len(data) < 52 {
-		return nil, fmt.Errorf("%w: room status data too short: got %d, need 52", ErrBadReply, len(data))
+	st, err := meshcore.ParseRoomStats(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBadReply, err)
 	}
-	s := parseCommonStats(data)
-	posted := binary.LittleEndian.Uint16(data[48:50])
-	pushes := binary.LittleEndian.Uint16(data[50:52])
-	s.Posted, s.PostPushes = &posted, &pushes
+	s := commonStatus(st.CommonStats)
+	s.Posted, s.PostPushes = &st.Posted, &st.PostPushes
 	return s, nil
 }
 
-// parseCommonStats decodes the 48 bytes shared by RepeaterStats and ServerStats.
-func parseCommonStats(data []byte) *Status {
+// commonStatus is the part RepeaterStats and ServerStats share.
+func commonStatus(c meshcore.CommonStats) *Status {
 	return &Status{
-		BatteryMV:   binary.LittleEndian.Uint16(data[0:2]),
-		QueueLen:    binary.LittleEndian.Uint16(data[2:4]),
-		NoiseFloor:  int16(binary.LittleEndian.Uint16(data[4:6])),
-		LastRSSI:    int16(binary.LittleEndian.Uint16(data[6:8])),
-		PacketsRecv: binary.LittleEndian.Uint32(data[8:12]),
-		PacketsSent: binary.LittleEndian.Uint32(data[12:16]),
-		TxAirSecs:   binary.LittleEndian.Uint32(data[16:20]),
-		UptimeSecs:  binary.LittleEndian.Uint32(data[20:24]),
-		FloodTx:     binary.LittleEndian.Uint32(data[24:28]),
-		DirectTx:    binary.LittleEndian.Uint32(data[28:32]),
-		FloodRx:     binary.LittleEndian.Uint32(data[32:36]),
-		DirectRx:    binary.LittleEndian.Uint32(data[36:40]),
-		ErrEvents:   binary.LittleEndian.Uint16(data[40:42]),
-		LastSNR:     float64(int16(binary.LittleEndian.Uint16(data[42:44]))) / 4.0,
-		DirectDups:  binary.LittleEndian.Uint16(data[44:46]),
-		FloodDups:   binary.LittleEndian.Uint16(data[46:48]),
+		BatteryMV:   c.BattMilliVolts,
+		QueueLen:    c.TxQueueLen,
+		NoiseFloor:  c.NoiseFloor,
+		LastRSSI:    c.LastRSSI,
+		PacketsRecv: c.PacketsRecv,
+		PacketsSent: c.PacketsSent,
+		TxAirSecs:   c.AirTimeSecs,
+		UptimeSecs:  c.UpTimeSecs,
+		FloodTx:     c.SentFlood,
+		DirectTx:    c.SentDirect,
+		FloodRx:     c.RecvFlood,
+		DirectRx:    c.RecvDirect,
+		ErrEvents:   c.ErrEvents,
+		LastSNR:     float64(c.LastSNR) / 4,
+		DirectDups:  c.DirectDups,
+		FloodDups:   c.FloodDups,
 	}
 }
 
+// parseRepeaterStatus reads RepeaterStats; a repeater from before n_recv_errors sends 52 bytes, and the block padding reads as 0 errors.
 func parseRepeaterStatus(data []byte) (*Status, error) {
-	if len(data) < 52 {
-		return nil, fmt.Errorf("%w: status data too short: got %d, need at least 52", ErrBadReply, len(data))
+	st, err := meshcore.ParseRepeaterStats(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBadReply, err)
 	}
-
-	s := &Status{
-		BatteryMV:   binary.LittleEndian.Uint16(data[0:2]),
-		QueueLen:    binary.LittleEndian.Uint16(data[2:4]),
-		NoiseFloor:  int16(binary.LittleEndian.Uint16(data[4:6])),
-		LastRSSI:    int16(binary.LittleEndian.Uint16(data[6:8])),
-		PacketsRecv: binary.LittleEndian.Uint32(data[8:12]),
-		PacketsSent: binary.LittleEndian.Uint32(data[12:16]),
-		TxAirSecs:   binary.LittleEndian.Uint32(data[16:20]),
-		UptimeSecs:  binary.LittleEndian.Uint32(data[20:24]),
-		FloodTx:     binary.LittleEndian.Uint32(data[24:28]),
-		DirectTx:    binary.LittleEndian.Uint32(data[28:32]),
-		FloodRx:     binary.LittleEndian.Uint32(data[32:36]),
-		DirectRx:    binary.LittleEndian.Uint32(data[36:40]),
-		ErrEvents:   binary.LittleEndian.Uint16(data[40:42]),
-		LastSNR:     float64(int16(binary.LittleEndian.Uint16(data[42:44]))) / 4.0,
-		DirectDups:  binary.LittleEndian.Uint16(data[44:46]),
-		FloodDups:   binary.LittleEndian.Uint16(data[46:48]),
+	s := commonStatus(st.CommonStats)
+	s.RxAirSecs, s.RecvErrors = st.RxAirTimeSecs, st.RecvErrors
+	if s.UptimeSecs > 0 {
+		s.ChanUtil = float64(s.TxAirSecs+s.RxAirSecs) / float64(s.UptimeSecs) * 100
 	}
-
-	if len(data) >= 52 {
-		rxAirSecs := binary.LittleEndian.Uint32(data[48:52])
-		s.RxAirSecs = rxAirSecs
-		if s.UptimeSecs > 0 {
-			s.ChanUtil = float64(s.TxAirSecs+rxAirSecs) / float64(s.UptimeSecs) * 100
-		}
-	}
-	if len(data) >= 56 {
-		s.RecvErrors = binary.LittleEndian.Uint32(data[52:56])
-	}
-
 	return s, nil
 }

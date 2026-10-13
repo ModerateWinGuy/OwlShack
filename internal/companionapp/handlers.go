@@ -273,7 +273,9 @@ func (c *conn) handle(d []byte) {
 		c.login(comp, d[1:33], password)
 
 	case cmd == mc.CmdSendStatusReq && n >= 33:
-		c.request(comp, d[1:33], []byte{meshcore.ReqTypeGetStatus, 0, 0, 0, 0}, func(_ uint32, pub [32]byte, data []byte) []byte {
+		var r [4]byte
+		rand.Read(r[:])
+		c.request(comp, d[1:33], meshcore.BuildRequest(meshcore.ReqTypeGetStatus, r), func(_ uint32, pub [32]byte, data []byte) []byte {
 			return replyPush(mc.PushStatusResponse, pub, data)
 		})
 
@@ -282,10 +284,9 @@ func (c *conn) handle(d []byte) {
 		c.send(replyPush(mc.PushTelemetryResponse, self, comp.AppSelfTelemetry(mc.MaxFrameSize-8)))
 
 	case cmd == mc.CmdSendTelemetryReq && n >= 36:
-		body := make([]byte, 9)
-		body[0] = meshcore.ReqTypeGetTelemetryData
-		rand.Read(body[5:])
-		c.request(comp, d[4:36], body, func(_ uint32, pub [32]byte, data []byte) []byte {
+		var r [4]byte
+		rand.Read(r[:])
+		c.request(comp, d[4:36], meshcore.BuildRequest(meshcore.ReqTypeGetTelemetryData, r), func(_ uint32, pub [32]byte, data []byte) []byte {
 			return replyPush(mc.PushTelemetryResponse, pub, data)
 		})
 

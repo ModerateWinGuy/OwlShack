@@ -144,7 +144,7 @@ func (c *Companion) resendDM(peer meshcore.Identity, text string, sentAt uint32,
 	if err != nil {
 		return AppDMSend{}, err
 	}
-	crc := meshcore.CalcAckHash(plaintext[:5+len(text)], self.PublicKeyBytes())
+	crc := meshcore.TextAckHash(plaintext, self.PublicKeyBytes())
 	c.node.ExpectACK(crc, timeout, func(rt time.Duration) {
 		c.setMessageStatus(msgID, channelKey, "delivered")
 		done(node.DMSendResult{Confirmed: true, RoundTrip: rt})
@@ -169,7 +169,7 @@ func (c *Companion) AppSelfTelemetry(maxBody int) []byte {
 	if hook := c.telemetryHook(); hook != nil {
 		entries, statuses = hook()
 	}
-	body, _ := sensor.BuildReply(sensor.PermBase|sensor.PermLocation|sensor.PermEnvironment, c.selfReadings(), entries, statuses, maxBody)
+	body, _ := sensor.BuildReply(meshcore.TelemPermBase|meshcore.TelemPermLocation|meshcore.TelemPermEnvironment, c.selfReadings(), entries, statuses, maxBody)
 	return body
 }
 

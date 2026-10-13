@@ -18,13 +18,8 @@ const MaxTelemetryPayload = 153 - 8
 // MaxChannel is the highest channel offered; the firmware stops at 17 (MAX_ACTIVE_SENSORS of 16).
 const MaxChannel = 32
 
-// Telemetry permission classes (firmware SensorManager.h); a requester masks classes out, not in.
-const (
-	PermBase        byte = 0x01 // the node itself: battery, MCU temperature
-	PermLocation    byte = 0x02 // position, which the firmware sends only from a GPS module, and no host here has one
-	PermEnvironment byte = 0x04 // everything the operator attached
-	PermAll         byte = 0xFF
-)
+// PermAll is every meshcore.TelemPerm* class; a requester masks classes out, not in.
+const PermAll byte = 0xFF
 
 // Reply framing, from the firmware's reply_data buffer and the requesting companion's push to its app.
 const (

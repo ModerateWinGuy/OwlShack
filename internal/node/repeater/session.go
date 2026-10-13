@@ -26,8 +26,7 @@ const (
 )
 
 const (
-	respServerLoginOK = 0x00 // login response code
-	firmwareVerLevel  = 2    // FIRMWARE_VER_LEVEL advertised in the login reply
+	firmwareVerLevel = 2 // FIRMWARE_VER_LEVEL advertised in the login reply
 	// Firmware SERVER_RESPONSE_DELAY: hold the reply until the half-duplex requester is back in RX.
 	serverReplyDelay = 300 * time.Millisecond
 )
@@ -74,16 +73,13 @@ func (r *Repeater) handleAnonReq(pkt *meshcore.Packet) {
 		return // bad password / replay — silent, matching the firmware
 	}
 
-	resp := make([]byte, 13)
-	binary.LittleEndian.PutUint32(resp[:4], r.uniqueTimestamp())
-	resp[4] = respServerLoginOK
-	resp[5] = 0 // legacy keep-alive interval
+	reply := meshcore.LoginReply{Permissions: byte(perms), FirmwareLevel: firmwareVerLevel}
 	if perms&permRoleMask == permAdmin {
-		resp[6] = 1
+		reply.Admin = 1
 	}
-	resp[7] = byte(perms)
-	_, _ = rand.Read(resp[8:12]) // blob for packet-hash uniqueness
-	resp[12] = firmwareVerLevel
+	var random [4]byte
+	rand.Read(random[:])
+	resp := meshcore.BuildTaggedPlaintext(r.uniqueTimestamp(), meshcore.BuildLoginReply(reply, random))
 
 	r.log.Info("admin login", "client", hex.EncodeToString(clientPub[:6]), "perms", perms, "flood", pkt.IsRouteFlood())
 	if err := r.sendServerReply(pkt, clientPub, secret, resp); err != nil {
@@ -400,13 +396,11 @@ func (r *Repeater) sendServerReply(reqPkt *meshcore.Packet, clientPub [32]byte, 
 	if reqPkt.IsRouteFlood() {
 		r.learnFloodRoute(clientPub, reqPkt)
 
-		// PATH-return payload: [pathLenByte][path][extraType=RESPONSE][resp].
-		inner := make([]byte, 0, 1+len(reqPkt.Path)+1+len(respPlaintext))
-		inner = append(inner, reqPkt.PathLength)
-		inner = append(inner, reqPkt.Path...)
-		inner = append(inner, meshcore.PayloadTypeResponse)
-		inner = append(inner, respPlaintext...)
-
+		// Refused past MAX_COMBINED_PATH, as the firmware's createPathReturn returns NULL (Mesh.cpp:452).
+		inner, err := (&meshcore.PathPayload{PathLength: reqPkt.PathLength, Path: reqPkt.Path, ExtraType: meshcore.PayloadTypeResponse, Extra: respPlaintext}).ToBytes()
+		if err != nil {
+			return err
+		}
 		payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
 			return (&meshcore.Path{Destination: clientPub[0], Source: me[0], MAC: mac, EncryptedPayload: enc}).ToBytes()
 		}, inner)

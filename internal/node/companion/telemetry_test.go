@@ -110,7 +110,7 @@ func TestTelemetry_ClassModes(t *testing.T) {
 				TelemetryBase:        mode(config.TelemetryContacts),
 				TelemetryEnvironment: mode(config.TelemetrySelected),
 			},
-			granted: sensor.PermEnvironment,
+			granted: meshcore.TelemPermEnvironment,
 			want:    "01740190026700E1",
 		},
 		{
@@ -119,7 +119,7 @@ func TestTelemetry_ClassModes(t *testing.T) {
 				TelemetryBase:        mode(config.TelemetryContacts),
 				TelemetryEnvironment: mode(config.TelemetryContacts),
 			},
-			mask: sensor.PermEnvironment,
+			mask: meshcore.TelemPermEnvironment,
 			want: "01740190",
 		},
 		{
@@ -495,7 +495,7 @@ func TestTelemetry_AGrantCannotOpenADeniedClass(t *testing.T) {
 		Latitude:             &lat, Longitude: &lon,
 	}, oneRow(2, meshcore.LPPTemperature, sensor.Temperature, 22.5))
 
-	got, _ := replyHex(t, c, sensor.PermLocation|sensor.PermEnvironment, 0)
+	got, _ := replyHex(t, c, meshcore.TelemPermLocation|meshcore.TelemPermEnvironment, 0)
 	if strings.Contains(got, "0188") {
 		t.Errorf("reply %s carries a position the operator denied", got)
 	}

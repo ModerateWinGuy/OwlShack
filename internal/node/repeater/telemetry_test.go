@@ -42,7 +42,7 @@ func telemetryRepeater(t *testing.T, hook func() ([]sensor.ChannelEntry, []senso
 // params[0] is an inverse mask, so 0x00 asks for everything.
 func telemetryReply(t *testing.T, r *Repeater, role int, mask byte) string {
 	t.Helper()
-	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: role}, meshcore.ReqTypeGetTelemetryData, []byte{mask}, sensor.MaxReplyBody(nil))
+	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: role}, []byte{meshcore.ReqTypeGetTelemetryData, mask}, sensor.MaxReplyBody(nil))
 	if !ok {
 		t.Fatal("the node refused to answer a telemetry request")
 	}
@@ -64,7 +64,7 @@ func TestTelemetry_EnvironmentPermissionGatesTheMap(t *testing.T) {
 	r := telemetryRepeater(t, oneRow(2, meshcore.LPPTemperature, sensor.Temperature, 22.5))
 
 	// Masking out the environment class leaves the node's own channel behind.
-	got := telemetryReply(t, r, permReadOnly, sensor.PermEnvironment)
+	got := telemetryReply(t, r, permReadOnly, meshcore.TelemPermEnvironment)
 	if got != "01740190" {
 		t.Fatalf("reply %s, want the node's own channel only", got)
 	}

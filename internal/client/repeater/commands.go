@@ -2,7 +2,6 @@ package repeater
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,9 +16,7 @@ import (
 )
 
 func (rm *Client) SendStatusReq(pubkeyHex string, timeout time.Duration) (*Status, error) {
-	body := make([]byte, 5)
-	body[0] = meshcore.ReqTypeGetStatus
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "status")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetStatus, random4()), timeout, "status")
 	if err != nil {
 		return nil, err
 	}
@@ -50,12 +47,7 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 		return ErrNoDirectRoute
 	}
 
-	// [tag:4][0x02][since:4] — exactly the 9 bytes the room hashes for its ACK.
-	plaintext := make([]byte, 9)
-	binary.LittleEndian.PutUint32(plaintext[:4], rm.UniqueTimestamp())
-	plaintext[4] = meshcore.ReqTypeKeepAlive
-	binary.LittleEndian.PutUint32(plaintext[5:9], since)
-
+	plaintext := meshcore.BuildTaggedPlaintext(rm.UniqueTimestamp(), meshcore.BuildKeepAliveRequest(since))
 	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
 	if err != nil {
 		return fmt.Errorf("encrypting keep-alive: %w", err)
@@ -78,9 +70,7 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 
 // SendRoomStatusReq is SendStatusReq for a room server, whose ServerStats trailer differs.
 func (rm *Client) SendRoomStatusReq(pubkeyHex string, timeout time.Duration) (*Status, error) {
-	body := make([]byte, 5)
-	body[0] = meshcore.ReqTypeGetStatus
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "room status")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetStatus, random4()), timeout, "room status")
 	if err != nil {
 		return nil, err
 	}
@@ -88,17 +78,8 @@ func (rm *Client) SendRoomStatusReq(pubkeyHex string, timeout time.Duration) (*S
 }
 
 func (rm *Client) SendNeighborsReq(pubkeyHex string, count uint8, offset uint16, timeout time.Duration) (*Neighbors, error) {
-	// payload: type(1) request_version(1) count(1) offset(2) order_by(1) prefix_len(1) random(4)
-	body := make([]byte, 11)
-	body[0] = meshcore.ReqTypeGetNeighbours
-	body[1] = 0 // request version
-	body[2] = count
-	binary.LittleEndian.PutUint16(body[3:5], offset)
-	body[5] = 2 // order_by: strongest_to_weakest
-	body[6] = 6 // 6-byte pubkey prefix (matches CLI `neighbors` output)
-	if _, err := rand.Read(body[7:11]); err != nil {
-		return nil, fmt.Errorf("generating random: %w", err)
-	}
+	// Strongest first, with the 6-byte prefixes the CLI `neighbors` output shows.
+	body := meshcore.BuildNeighboursRequest(meshcore.NeighboursRequest{Count: count, Offset: offset, OrderBy: 2, PrefixLen: 6}, random4())
 	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "neighbors")
 	if err != nil {
 		return nil, err
@@ -107,9 +88,7 @@ func (rm *Client) SendNeighborsReq(pubkeyHex string, count uint8, offset uint16,
 }
 
 func (rm *Client) SendOwnerInfoReq(pubkeyHex string, timeout time.Duration) (*OwnerInfo, error) {
-	body := make([]byte, 5)
-	body[0] = meshcore.ReqTypeGetOwnerInfo
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "owner")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetOwnerInfo, random4()), timeout, "owner")
 	if err != nil {
 		return nil, err
 	}
@@ -117,13 +96,7 @@ func (rm *Client) SendOwnerInfoReq(pubkeyHex string, timeout time.Duration) (*Ow
 }
 
 func (rm *Client) SendAccessListReq(pubkeyHex string, timeout time.Duration) (*AccessList, error) {
-	// payload: type(1) reserved(2) reserved(2) random(4)
-	body := make([]byte, 9)
-	body[0] = meshcore.ReqTypeGetAccessList
-	if _, err := rand.Read(body[5:9]); err != nil {
-		return nil, fmt.Errorf("generating random: %w", err)
-	}
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "access list")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetAccessList, random4()), timeout, "access list")
 	if err != nil {
 		return nil, err
 	}
@@ -147,11 +120,7 @@ func (rm *Client) SetAccessPerm(pubkeyHex, targetPubkeyHex string, perms uint8, 
 
 // SendSeriesReq bounds are seconds before the sensor's now, start being the older edge; needs read-only or above.
 func (rm *Client) SendSeriesReq(pubkeyHex string, startSecsAgo, endSecsAgo uint32, timeout time.Duration) (*telemetry.Series, error) {
-	// payload: type(1) start(4) end(4) reserved(2)
-	body := make([]byte, 11)
-	body[0] = meshcore.ReqTypeGetAvgMinMax
-	binary.LittleEndian.PutUint32(body[1:5], startSecsAgo)
-	binary.LittleEndian.PutUint32(body[5:9], endSecsAgo)
+	body := meshcore.BuildAvgMinMaxRequest(meshcore.AvgMinMaxRequest{StartSecsAgo: startSecsAgo, EndSecsAgo: endSecsAgo})
 	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "series")
 	if err != nil {
 		return nil, err
@@ -168,22 +137,14 @@ func badReply[T any](v T, err error) (T, error) {
 	return v, nil
 }
 
-// telemetryReqBody: type(1) mask(1) reserved(3) random(4); mask 0x00 asks for all and the firmware filters by ACL.
-func telemetryReqBody() ([]byte, error) {
-	body := make([]byte, 9)
-	body[0] = meshcore.ReqTypeGetTelemetryData
-	if _, err := rand.Read(body[5:9]); err != nil {
-		return nil, fmt.Errorf("generating random: %w", err)
-	}
-	return body, nil
+// random4 is the random tail that keeps a request's packet hash unique (BaseChatMesh.cpp:697).
+func random4() (r [4]byte) {
+	rand.Read(r[:])
+	return r
 }
 
 func (rm *Client) SendTelemetryReq(pubkeyHex string, timeout time.Duration) (*telemetry.Telemetry, error) {
-	body, err := telemetryReqBody()
-	if err != nil {
-		return nil, err
-	}
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "telemetry")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetTelemetryData, random4()), timeout, "telemetry")
 	if err != nil {
 		return nil, err
 	}
@@ -192,11 +153,7 @@ func (rm *Client) SendTelemetryReq(pubkeyHex string, timeout time.Duration) (*te
 
 // SendContactTelemetryReq needs no login: it encrypts with the ECDH secret shared with the contact.
 func (rm *Client) SendContactTelemetryReq(pubkeyHex string, timeout time.Duration) (*telemetry.Telemetry, error) {
-	body, err := telemetryReqBody()
-	if err != nil {
-		return nil, err
-	}
-	data, err := rm.contactRequest(pubkeyHex, body, timeout, "contact-telemetry", &pendingRequest{})
+	data, err := rm.contactRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetTelemetryData, random4()), timeout, "contact-telemetry", &pendingRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -210,11 +167,7 @@ func (rm *Client) AppRequest(pubkeyHex string, body []byte, timeout time.Duratio
 
 // AppPathDiscovery is the app's path discovery: a flooded base-telemetry request whose reply brings back both paths and leaves the stored route alone.
 func (rm *Client) AppPathDiscovery(pubkeyHex string, timeout time.Duration, app AppSend) (out, in PathBytes, err error) {
-	body, err := telemetryReqBody()
-	if err != nil {
-		return out, in, err
-	}
-	body[1] = ^meshcore.TelemPermBase
+	body := meshcore.BuildTelemetryRequest(meshcore.TelemPermBase, random4())
 	paths := make(chan [2]PathBytes, 1)
 	pr := &pendingRequest{app: &app, discovery: true, onPath: func(o, i PathBytes) {
 		select {
