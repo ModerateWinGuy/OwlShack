@@ -303,7 +303,7 @@ func (s *Server) handleGetChannelKey(w http.ResponseWriter, r *http.Request) {
 	provider := s.companionProvider()
 
 	if provider == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -323,7 +323,7 @@ func (s *Server) handleGetChannelKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeError(w, http.StatusNotFound, "companion not found")
+	s.companionNotRunning(w, r)
 }
 
 func (s *Server) handleGetContactPath(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +332,7 @@ func (s *Server) handleGetContactPath(w http.ResponseWriter, r *http.Request) {
 
 	ops, ok := s.repeaterOps(name)
 	if !ok || ops == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -351,7 +351,7 @@ func (s *Server) handleResetContactPath(w http.ResponseWriter, r *http.Request) 
 
 	ops, ok := s.repeaterOps(name)
 	if !ok || ops == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 

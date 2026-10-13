@@ -23,7 +23,7 @@ func (s *Server) repeaterOps(name string) (*RepeaterOps, bool) {
 func (s *Server) handleRepeaterLogin(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -49,7 +49,7 @@ func (s *Server) handleRoomLogin(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	ops, ok := s.repeaterOps(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 	if ops.RoomLogin == nil {
@@ -90,7 +90,7 @@ func (s *Server) handleRoomLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRoomStatus(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 	res, err := ops.RoomStatusReq(r.PathValue("pubkey"))
@@ -105,7 +105,7 @@ func (s *Server) handleRoomStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRoomKeepAlive(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 	var body struct {
@@ -131,7 +131,7 @@ func (s *Server) handleRoomKeepAlive(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterStatus(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -147,7 +147,7 @@ func (s *Server) handleRepeaterStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterCLI(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -175,7 +175,7 @@ func (s *Server) handleRepeaterCLI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterSession(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -191,7 +191,7 @@ func (s *Server) handleRepeaterSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterLogout(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -202,7 +202,7 @@ func (s *Server) handleRepeaterLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterPathGet(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -218,7 +218,7 @@ func (s *Server) handleRepeaterPathGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterPathReset(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -233,7 +233,7 @@ func (s *Server) handleRepeaterPathReset(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRepeaterPathSet(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -291,7 +291,7 @@ func (s *Server) handleRepeaterPathSet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterNeighbors(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -321,7 +321,7 @@ func (s *Server) handleRepeaterNeighbors(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRepeaterOwnerInfo(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -337,7 +337,7 @@ func (s *Server) handleRepeaterOwnerInfo(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRepeaterRegions(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 	res, err := ops.Regions(r.Context(), r.PathValue("pubkey"))
@@ -351,7 +351,7 @@ func (s *Server) handleRepeaterRegions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepeaterAccessList(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -367,7 +367,7 @@ func (s *Server) handleRepeaterAccessList(w http.ResponseWriter, r *http.Request
 func (s *Server) handleRepeaterAccessSet(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -390,7 +390,7 @@ func (s *Server) handleRepeaterAccessSet(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRepeaterAccessRemove(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -405,7 +405,7 @@ func (s *Server) handleRepeaterAccessRemove(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleRepeaterTelemetry(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -422,7 +422,7 @@ func (s *Server) handleRepeaterTelemetry(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRepeaterSeries(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 	from, to := uint32(86400), uint32(0)
@@ -457,7 +457,7 @@ func (s *Server) handleRepeaterSeries(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleContactTelemetry(w http.ResponseWriter, r *http.Request) {
 	ops, ok := s.repeaterOps(r.PathValue("name"))
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
