@@ -222,11 +222,10 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 	// startRadio brings up the modem and everything that hangs off it, leaving ms nil if it cannot.
 	// Failing is not fatal: exiting here would take away the page an operator uses to fix the connection.
 	startRadio := func(c *config.Config) error {
-		newMs, newMux, err := reconnectModem(ctx, c, db, srv, reconnectCh, mqttObs)
+		newMs, newMux, err := reconnectModem(ctx, c, db, srv, reconnectCh, mqttObs, echoTracker.TxResult)
 		if err != nil {
 			return err
 		}
-		newMs.Modem.AddOutboundHandler(echoTracker.OnAir)
 		newComps, err := startCompanions(ctx, c, newMs, newMux, db, srv.Hub(), echoTracker, telemetry)
 		if err != nil {
 			closeRadio(newMux, newMs)
@@ -268,8 +267,6 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 			liveRadio.Store(nil)
 			radioSeen.keepReply(ms.Stats)
 			closeRadio(mux, ms)
-			// After the close, so nothing more can reach the modem: a post that had not went with the queue.
-			echoTracker.FailQueued()
 		}
 		ms, mux, companions, rep, disc, feed = nil, nil, nil, nil, nil, nil
 	}
@@ -665,13 +662,13 @@ func closeRadio(mux *node.RadioMux, ms *modem.State) {
 }
 
 // reconnectModem performs a single modem.Setup attempt and rebuilds the mux, dead-watcher and packet logger.
-func reconnectModem(ctx context.Context, cfg *config.Config, db *store.Store, srv *api.Server, reconnectCh chan struct{}, mqttObs *atomic.Pointer[mqtt.Observer]) (*modem.State, *node.RadioMux, error) {
+func reconnectModem(ctx context.Context, cfg *config.Config, db *store.Store, srv *api.Server, reconnectCh chan struct{}, mqttObs *atomic.Pointer[mqtt.Observer], txResult node.TxResultFunc) (*modem.State, *node.RadioMux, error) {
 	ms, err := modem.Setup(ctx, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	ms.StartDeadWatcher(reconnectCh)
-	mux := node.NewRadioMux(ms.Modem, modem.MuxOptions(ms)...)
+	mux := node.NewRadioMux(ms.Modem, append(modem.MuxOptions(ms), node.WithMuxTxResult(txResult))...)
 	wirePacketLogger(mux, ms.Modem, db, srv, mqttObs)
 	return ms, mux, nil
 }

@@ -16,10 +16,12 @@ import (
 
 func (s *Server) AppMessage(m companion.AppMessage) {
 	if m.Channel >= 0 {
-		s.queue(true, channelMsgFrame(snrByte(m.Packet), byte(m.Channel), pathLenByte(m.Packet), m.Timestamp, m.Text))
+		s.queue(true, capped(mc.ChannelMsgRecvV3Response{SNR: m.Packet.SNR, ChannelIdx: byte(m.Channel), PathLen: pathLenByte(m.Packet),
+			TxtType: meshcore.TxtTypePlain, SenderTimestamp: m.Timestamp, Text: m.Text}.ToBytes()))
 		return
 	}
-	s.queue(false, contactMsgFrame(snrByte(m.Packet), pathLenByte(m.Packet), m.From, m.TxtType, m.Timestamp, m.Signer, m.Text))
+	s.queue(false, capped(mc.ContactMsgRecvV3Response{SNR: m.Packet.SNR, PubKeyPrefix: prefix(m.From), PathLen: pathLenByte(m.Packet),
+		TxtType: m.TxtType, SenderPrefix: m.Signer, SenderTimestamp: m.Timestamp, Text: m.Text}.ToBytes()))
 }
 
 // queue holds a message frame for the app's next sync and tickles a connected app once it is stored.
@@ -29,7 +31,7 @@ func (s *Server) queue(channel bool, frame []byte) {
 			s.log.Error("queueing a message for the app", "error", err)
 			return
 		}
-		s.push(msgWaitingFrame())
+		s.push(mc.PushMsgWaitingResponse{}.ToBytes())
 	})
 }
 
@@ -39,17 +41,19 @@ func (s *Server) AppAdvert(pub [32]byte) {
 		return
 	}
 	if _, ok := s.contact(pub[:]); ok {
-		s.push(pubkeyPush(mc.PushAdvert, pub))
+		s.push(mc.PushAdvertResponse{PublicKey: pub}.ToBytes())
 		return
 	}
 	p, err := s.st.Peers.GetByPubKey(context.Background(), pub[:])
 	if err != nil || p == nil {
 		return
 	}
-	s.push(contactFrame(mc.PushNewAdvert, peerContact(p)))
+	s.push(mc.PushNewAdvertResponse(peerContact(p)).ToBytes())
 }
 
-func (s *Server) AppPathUpdated(pub [32]byte) { s.push(pubkeyPush(mc.PushPathUpdated, pub)) }
+func (s *Server) AppPathUpdated(pub [32]byte) {
+	s.push(mc.PushPathUpdatedResponse{PublicKey: pub}.ToBytes())
+}
 
 func (s *Server) AppRawRX(raw []byte, snr float32, rssi int8) {
 	if len(raw) > 0 {
@@ -64,15 +68,18 @@ func (s *Server) AppRawRX(raw []byte, snr float32, rssi int8) {
 		s.rx.lastRSSI.Store(int32(rssi))
 	}
 	if len(raw)+3 <= mc.MaxFrameSize {
-		s.push(logRxFrame(raw, snr, rssi))
+		s.push(mc.PushLogRxDataResponse{LastSNR: snr, LastRSSI: rssi, Raw: raw}.ToBytes())
 	}
 }
 
-func (s *Server) AppTrace(pkt *meshcore.Packet, tr *meshcore.Trace) { s.push(traceFrame(pkt, tr)) }
+func (s *Server) AppTrace(pkt *meshcore.Packet, tr *meshcore.Trace) {
+	s.push(mc.PushTraceDataResponse{PathLen: byte(len(tr.PathHashes)), Flags: tr.Flags, Tag: tr.Tag, AuthCode: tr.AuthCode,
+		PathHashes: tr.PathHashes, PathSnrs: pkt.Path, LastSNR: pkt.SNR}.ToBytes())
+}
 
 func (s *Server) AppControl(pkt *meshcore.Packet) {
 	if len(pkt.Payload)+4 <= mc.MaxFrameSize {
-		s.push(controlFrame(pkt))
+		s.push(mc.PushControlDataResp{SNR: pkt.SNR, RSSI: pkt.RSSI, PathLen: pkt.PathLength, Payload: pkt.Payload}.ToBytes())
 	}
 }
 
@@ -82,25 +89,26 @@ var advTypes = map[string]byte{"CHAT": meshcore.AdvertTypeChat, "REPEATER": mesh
 var advNames = map[byte]string{meshcore.AdvertTypeChat: "CHAT", meshcore.AdvertTypeRepeater: "REPEATER", meshcore.AdvertTypeRoom: "ROOM", meshcore.AdvertTypeSensor: "SENSOR"}
 
 // peerContact is a heard node as the firmware offers it before it is a contact: no route yet.
-func peerContact(p *store.Peer) contactInfo {
-	c := contactInfo{advType: advTypes[p.Type], outPathLen: 0xFF, name: p.Name, lastAdvert: p.LastAdvertTS, lastmod: uint32(time.Now().Unix())}
-	copy(c.pubKey[:], p.PubKey)
-	c.lat, c.lon = p.Lat, p.Lon
+func peerContact(p *store.Peer) mc.ContactResponse {
+	c := mc.ContactResponse{Type: advTypes[p.Type], OutPathLen: mc.OutPathUnknown, AdvertName: p.Name,
+		LastAdvert: p.LastAdvertTS, AdvertLatitude: p.Lat, AdvertLongitude: p.Lon, LastModified: uint32(time.Now().Unix())}
+	copy(c.PublicKey[:], p.PubKey)
 	return c
 }
 
 // storedContact is a contact as RESP_CODE_CONTACT carries it; lastmod is when anything in it last changed, as the firmware bumps it.
-func storedContact(k *store.Contact) contactInfo {
+func storedContact(k *store.Contact) mc.ContactResponse {
 	flags := k.Metadata.TelemPerms << 1
 	if k.Metadata.Favourite {
-		flags |= 1
+		flags |= mc.ContactFlagFavourite
 	}
-	c := contactInfo{advType: advTypes[k.Type], flags: flags, outPathLen: 0xFF, outPath: k.OutPath,
-		name: k.Name, lastAdvert: k.LastAdvertTS, lat: k.Lat, lon: k.Lon, lastmod: uint32(k.ModifiedAt.Unix())}
-	copy(c.pubKey[:], k.PeerPubKey)
+	c := mc.ContactResponse{Type: advTypes[k.Type], Flags: flags, OutPathLen: mc.OutPathUnknown,
+		AdvertName: k.Name, LastAdvert: k.LastAdvertTS, AdvertLatitude: k.Lat, AdvertLongitude: k.Lon, LastModified: uint32(k.ModifiedAt.Unix())}
+	copy(c.PublicKey[:], k.PeerPubKey)
+	copy(c.OutPath[:], k.OutPath)
 	if k.OutPath != nil {
 		size := max(k.OutPathHashSize, 1)
-		c.outPathLen = meshcore.MakePathLen(size, uint8(len(k.OutPath)/int(size)))
+		c.OutPathLen = meshcore.MakePathLen(size, uint8(len(k.OutPath)/int(size)))
 	}
 	return c
 }

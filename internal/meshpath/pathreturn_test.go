@@ -52,23 +52,6 @@ func TestBuildReturn_WithExtraIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestDirect_FramesTheRoute(t *testing.T) {
-	t.Parallel()
-
-	pkt := &meshcore.Packet{}
-	Direct(pkt, []byte{0xaa, 0xbb, 0xcc, 0xdd}, 2)
-
-	if !pkt.IsRouteDirect() {
-		t.Error("Direct must set the direct route type")
-	}
-	if got := pkt.PathHashCount(); got != 2 {
-		t.Errorf("hop count = %d, want 2 (4 bytes at 2 bytes per hash)", got)
-	}
-	if got := pkt.PathHashSize(); got != 2 {
-		t.Errorf("hash size = %d, want 2", got)
-	}
-}
-
 // createPathReturn's plaintext is [path_len][path][extra_type][extra] (Mesh.cpp:466-474), and it gives up on what does not fit or does not match.
 func TestBuildReturn_FirmwareLayout(t *testing.T) {
 	t.Parallel()

@@ -78,21 +78,141 @@ func channelText(sender, text string) string {
 	return sender + ": " + text
 }
 
-// AppDMSend is what the app is told about a DM it asked to send.
+// AppDMSend is what the app is told about one attempt at a DM, as the firmware's RESP_CODE_SENT.
 type AppDMSend struct {
 	Flood   bool
 	Timeout time.Duration
-	// Resend is one more attempt at the DM once ours are over, as the app's own retry asks.
-	Resend func(attempt int, done func(node.DMSendResult)) (AppDMSend, error)
+	ACK     uint32
 }
 
-// SendAppDM sends the app's DM as any other is sent and stored, in the app's scope if it chose one; done hears the outcome.
-func (c *Companion) SendAppDM(pubkeyHex, text string, scope *SendScope, done func(node.DMSendResult)) (AppDMSend, error) {
+// appDM is one message the app is sending: its attempts share a stored row and a timestamp, and any attempt's ACK delivers it.
+type appDM struct {
+	msgID   int64
+	channel string
+	sentAt  uint32
+	sent    map[uint32]time.Time
+	acked   func(ack uint32, rt time.Duration)
+	status  string
+	gen     int
+	last    time.Time
+	fail    *time.Timer
+}
+
+// appDMKeep is how long an app DM is remembered after its last attempt, for a late ACK or resend.
+const appDMKeep = 15 * time.Minute
+
+// SendAppDM sends one attempt at the app's DM as the firmware's sendMessage does, the app's own resends being the retries; acked hears each attempt's ACK.
+func (c *Companion) SendAppDM(pubkeyHex, text string, appTimestamp uint32, attempt int, scope *SendScope, acked func(ack uint32, rt time.Duration)) (AppDMSend, error) {
+	pub, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return AppDMSend{}, fmt.Errorf("invalid pubkey hex: %w", err)
+	}
+	peer, err := meshcore.NewIdentityFromBytes(pub)
+	if err != nil {
+		return AppDMSend{}, fmt.Errorf("invalid pubkey: %w", err)
+	}
+	if len(text) > MaxDMTextBytes {
+		return AppDMSend{}, fmt.Errorf("%w: message is %d bytes, over the %d-byte limit", node.ErrTextTooLong, len(text), MaxDMTextBytes)
+	}
 	s := scopeOf(c.contactScopeHex(pubkeyHex))
 	if scope != nil {
 		s = *scope
 	}
-	return c.sendDM(pubkeyHex, text, c.bytesPerHopHex(pubkeyHex), 5*time.Second, s, done)
+	key := fmt.Sprint(pubkeyHex, "|", appTimestamp, "|", text)
+	c.appDMs.Lock()
+	for k, d := range c.appDMs.m {
+		if time.Since(d.last) > appDMKeep {
+			delete(c.appDMs.m, k)
+		}
+	}
+	d := c.appDMs.m[key]
+	c.appDMs.Unlock()
+	if d == nil {
+		d = &appDM{msgID: c.storeDM(pubkeyHex, text, s), channel: "dm:" + pubkeyHex, sent: map[uint32]time.Time{}, status: "sending", last: time.Now()}
+		c.dmsInFlight.begin(d.msgID, func() { c.settleAppDM(d, "failed", -1) })
+		c.appDMs.Lock()
+		if c.appDMs.m == nil {
+			c.appDMs.m = map[string]*appDM{}
+		}
+		c.appDMs.m[key] = d
+		c.appDMs.Unlock()
+	}
+
+	a := node.TextAttempt{Peer: peer, Scope: s.Region, Text: []byte(text), Attempt: attempt, PathHashSize: c.bytesPerHopHex(pubkeyHex)}
+	if outPath, hashSize, ok := c.learnedRoute(pub); ok {
+		a.Path = outPath
+		if len(outPath) > 0 {
+			a.PathHashSize = hashSize
+		}
+	}
+	var sent node.TextSent
+	send := func(ts uint32) error {
+		a.Timestamp = ts
+		sent, err = c.node.SendTextAttempt(a, nil)
+		return err
+	}
+	c.appDMs.Lock()
+	sentAt := d.sentAt
+	c.appDMs.Unlock()
+	first := sentAt == 0
+	if first {
+		err = c.node.SendStamped(func(ts uint32) error { sentAt = ts; return send(ts) })
+	} else {
+		err = send(sentAt)
+	}
+	if err != nil {
+		if first {
+			c.settleAppDM(d, "failed", -1)
+		}
+		return AppDMSend{}, err
+	}
+	c.sentAcks.add(sent.ACK, peer)
+
+	now := time.Now()
+	c.appDMs.Lock()
+	d.sentAt, d.sent[sent.ACK], d.acked, d.last = sentAt, now, acked, now
+	if d.status == "failed" { // under the lock, so an earlier attempt's ACK settles after this, not before
+		c.dmsInFlight.begin(d.msgID, func() { c.settleAppDM(d, "failed", -1) })
+		c.setMessageStatus(d.msgID, d.channel, "sending")
+	}
+	if d.status != "delivered" {
+		d.status = "sending"
+		d.gen++
+		gen := d.gen
+		if d.fail != nil {
+			d.fail.Stop()
+		}
+		d.fail = time.AfterFunc(2*sent.Timeout, func() { c.settleAppDM(d, "failed", gen) })
+	}
+	c.appDMs.Unlock()
+	ack := sent.ACK
+	c.node.ExpectACK(ack, appDMKeep, func(time.Duration) {
+		c.appDMs.Lock()
+		rt, tell := time.Since(d.sent[ack]), d.acked
+		c.appDMs.Unlock()
+		if tell != nil {
+			tell(ack, rt)
+		}
+		c.settleAppDM(d, "delivered", -1)
+	}, nil)
+	return AppDMSend{Flood: sent.Flood, Timeout: sent.Timeout, ACK: ack}, nil
+}
+
+// settleAppDM shows an app DM delivered once any attempt is ACKed, or failed once its last attempt's gen has waited twice its est_timeout with no resend.
+func (c *Companion) settleAppDM(d *appDM, status string, gen int) {
+	c.appDMs.Lock()
+	ok := status == "delivered" && d.status != "delivered" || status == "failed" && d.status == "sending" && (gen < 0 || gen == d.gen)
+	if ok {
+		d.status = status
+		if d.fail != nil {
+			d.fail.Stop()
+		}
+	}
+	c.appDMs.Unlock()
+	if ok {
+		c.dmsInFlight.end(d.msgID)
+		c.setMessageStatus(d.msgID, d.channel, status)
+	}
 }
 
 // SendAppChannelMessage sends the app's channel post by slot, as the firmware addresses channels.
@@ -114,52 +234,6 @@ func (c *Companion) AppRegion(pubkey []byte, scope *SendScope) *meshcore.Region 
 		return scope.Region
 	}
 	return c.contactScope(pubkey).MeshRegion()
-}
-
-// dmAttempts is past every attempt the library's own retries use, so a later one is never a packet relays have seen.
-const dmAttempts = 6
-
-// resendDM sends one more attempt at a DM, as the firmware sends each the app asks for: the first timestamp, so the receiver keeps one message.
-func (c *Companion) resendDM(peer meshcore.Identity, text string, sentAt uint32, attempt int, msgID int64, channelKey string, fallbackHashSize uint8, scope SendScope, done func(node.DMSendResult)) (AppDMSend, error) {
-	pub := peer.PublicKey()
-	outPath, hashSize, haveRoute := c.learnedRoute(pub[:])
-	if !haveRoute {
-		outPath = nil
-	}
-	if len(outPath) == 0 {
-		hashSize = fallbackHashSize
-	}
-	timeout := c.dmAckTimeout(len(text), outPath, hashSize, 5*time.Second)
-	secret, err := c.node.SharedSecret(peer)
-	if err != nil {
-		return AppDMSend{}, err
-	}
-	self := c.node.Identity()
-	plaintext := meshcore.BuildTextPlaintextWithAttempt(time.Unix(int64(sentAt), 0), 0, []byte(text), min(dmAttempts+attempt, 255))
-	msg, err := meshcore.NewTextMessage(self, peer, plaintext, secret)
-	if err != nil {
-		return AppDMSend{}, err
-	}
-	payload, err := msg.ToBytes()
-	if err != nil {
-		return AppDMSend{}, err
-	}
-	crc := meshcore.TextAckHash(plaintext, self.PublicKeyBytes())
-	c.node.ExpectACK(crc, timeout, func(rt time.Duration) {
-		c.setMessageStatus(msgID, channelKey, "delivered")
-		done(node.DMSendResult{Confirmed: true, RoundTrip: rt})
-	}, func() {})
-	pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeTxtMsg, 0), Payload: payload}
-	if outPath != nil {
-		err = c.node.SendDirect(pkt, outPath, hashSize, 0)
-	} else {
-		err = c.node.SendFlood(pkt, scope.Region, hashSize, 0)
-	}
-	if err != nil {
-		c.node.CancelACK(crc)
-		return AppDMSend{}, err
-	}
-	return AppDMSend{Flood: outPath == nil, Timeout: timeout}, nil
 }
 
 // AppSelfTelemetry is the companion's own readings and channel map with every class allowed, as the firmware answers its own app.

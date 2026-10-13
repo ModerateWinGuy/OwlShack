@@ -52,10 +52,10 @@ func TestSend_RefusedMessageIsFailed(t *testing.T) {
 	if got := lastStatus(t, c, ch.Name); got != "failed" {
 		t.Errorf("channel status = %q, want failed", got)
 	}
-	c.pendingOutbound.Lock()
-	echoTo := c.pendingOutbound.msgID
-	c.pendingOutbound.Unlock()
-	if echoTo != 0 {
-		t.Errorf("echoes still go to the failed message %d", echoTo)
+	c.pendingPosts.Lock()
+	left := len(c.pendingPosts.m)
+	c.pendingPosts.Unlock()
+	if left != 0 {
+		t.Errorf("%d failed posts still wait for their packet", left)
 	}
 }

@@ -127,10 +127,7 @@ func TestIncrementalContactsSeeEdits(t *testing.T) {
 }
 
 func addContactFrame(pub []byte, name string, lastAdvert uint32) []byte {
-	b := append([]byte{mc.CmdAddUpdateContact}, pub...)
-	b = append(b, meshcore.AdvertTypeChat, 0, 0xFF)
-	b = append(b, make([]byte, 64)...)
-	return le32(fixed(b, name, 32), lastAdvert)
+	return mc.AddUpdateContactCommand{PublicKey: [32]byte(pub), Type: meshcore.AdvertTypeChat, OutPathLen: mc.OutPathUnknown, Name: name, LastAdvert: lastAdvert}.ToBytes()[:136]
 }
 
 // A heard node added from the app keeps the advert heard, as the REST add does; one never heard takes the frame's, as the firmware does. Only a heard one has an advert path.
@@ -255,6 +252,73 @@ func TestLateAppRetryKeepsTimestamp(t *testing.T) {
 	if bytes.Equal(againPkt.Payload, firstPkt.Payload) {
 		t.Error("the retry is the first attempt again, which relays drop as seen")
 	}
+}
+
+// The app's DM goes as the firmware's sendMessage: one attempt per command, numbered by the app, answered with that attempt's ACK and est_timeout, and kept as one message.
+func TestAppDMOneAttemptPerCommand(t *testing.T) {
+	r := newRig(t)
+	bob := r.contactOf(t, "Bob", "CHAT")
+	a := r.dial(t)
+	self := r.comp.Node().Identity()
+	ts := uint32(time.Now().Unix())
+	est := uint32(node.CalcFloodTimeout(0).Milliseconds())
+	send := func(text string, attempt byte) uint32 {
+		t.Helper()
+		a.send(append(le32([]byte{mc.CmdSendTxtMsg, meshcore.TxtTypePlain, attempt}, ts), append(bob.PublicKeyBytes()[:6], text...)...)...)
+		got, err := mc.ParseResponse(a.next())
+		sent, ok := got.Data.(mc.SentResponse)
+		if err != nil || !ok {
+			t.Fatalf("attempt %d answered %+v, %v", attempt, got.Data, err)
+		}
+		plain := r.opened(t, bob, r.modem.next(t, notType(meshcore.PayloadTypeTxtMsg)))
+		if plain[4]&3 != attempt {
+			t.Errorf("the app's attempt %d went on air as %d", attempt, plain[4]&3)
+		}
+		if crc := meshcore.CalcAckHash(plain[:5+len(text)], self.PublicKeyBytes()); sent.Tag != crc || sent.EstTimeout != est {
+			t.Errorf("attempt %d sent ack %08x timeout %d, want the attempt's ack %08x and est_timeout %d", attempt, sent.Tag, sent.EstTimeout, crc, est)
+		}
+		return sent.Tag
+	}
+	status := func(text, want string) {
+		t.Helper()
+		var got []store.Message
+		for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+			r.st.WriteSync(func() {})
+			all, _ := r.st.Messages.List(context.Background(), r.id, "dm:"+hexOf(bob.PublicKeyBytes()), 10, 0)
+			got = got[:0]
+			for _, m := range all {
+				if m.Text == text {
+					got = append(got, m)
+				}
+			}
+			if len(got) == 1 && got[0].Status != nil && *got[0].Status == want {
+				return
+			}
+		}
+		t.Errorf("%q stored as %d rows, last %+v, want one %s", text, len(got), got, want)
+	}
+
+	first := send("hello bob", 0)
+	send("hello bob", 2)
+	select {
+	case <-r.modem.sent:
+		t.Error("OwlShack sent an attempt the app did not ask for")
+	case <-time.After(1500 * time.Millisecond):
+	}
+	r.modem.hear(t, &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAck, 0), Payload: le32(nil, first)})
+	f := a.frame()
+	for ; f[0] != mc.PushSendConfirmed; f = a.frame() {
+	}
+	if got, _ := mc.ParseResponse(f); got.Data.(mc.PushSendConfirmedResponse).AckCode != first {
+		t.Errorf("confirmed %+v, want the first attempt's ack %08x", got.Data, first)
+	}
+	status("hello bob", "delivered")
+
+	send("anyone there", 0)
+	status("anyone there", "failed")
+	send("anyone there", 1)
+	status("anyone there", "sending")
+	status("anyone there", "failed")
 }
 
 // An app retry after a rebuild goes through the rebuilt companion, not the stopped one its first attempt went through.

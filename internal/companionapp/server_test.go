@@ -540,7 +540,7 @@ func TestAdvertPushes(t *testing.T) {
 	a.next() // connected before the adverts land
 	r.st.WriteSync(func() { r.st.Contacts.Add(bg, r.id, known[:], "Known", "CHAT") })
 	r.srv.AppAdvert(known)
-	if f := a.frame(); !bytes.Equal(f, pubkeyPush(mc.PushAdvert, known)) {
+	if f := a.frame(); !bytes.Equal(f, mc.PushAdvertResponse{PublicKey: known}.ToBytes()) {
 		t.Errorf("contact advert = % x", f)
 	}
 	r.srv.AppAdvert(stranger)
@@ -556,6 +556,8 @@ func TestAdvertPushes(t *testing.T) {
 }
 
 func hexOf(b []byte) string { return hex.EncodeToString(b) }
+
+func le32(b []byte, v uint32) []byte { return binary.LittleEndian.AppendUint32(b, v) }
 
 // Every contact and the end of the list arrive, however many there are: a command's replies wait for room rather than drop.
 func TestManyContacts(t *testing.T) {
@@ -581,10 +583,7 @@ func TestContactRouteChecked(t *testing.T) {
 	a := r.dial(t)
 	peer, _ := meshcore.GenerateLocalIdentity(nil)
 	frame := func(outLen byte) []byte {
-		b := append([]byte{mc.CmdAddUpdateContact}, peer.PublicKeyBytes()...)
-		b = append(b, meshcore.AdvertTypeChat, 0, outLen)
-		b = append(b, make([]byte, 64)...)
-		return append(fixed(b, "Bob", 32), 0, 0, 0, 0)
+		return mc.AddUpdateContactCommand{PublicKey: [32]byte(peer.PublicKeyBytes()), Type: meshcore.AdvertTypeChat, OutPathLen: outLen, Name: "Bob"}.ToBytes()[:136]
 	}
 	illegal := []byte{mc.RespErr, mc.ErrCodeIllegalArg}
 	a.ask(illegal, frame(0x68)...) // 2 bytes x 40 hops
@@ -673,6 +672,15 @@ func TestCompanionSettings(t *testing.T) {
 		t.Error("0,0 kept as a position")
 	}
 
+	a.ask(ok, mc.CmdSetOtherParams, 1, 2) // no policy byte: sharing stays as it is
+	if c := r.row(t); !c.ShareLocation {
+		t.Error("a frame without the policy byte stopped sharing")
+	}
+	saves := r.saved.changes
+	a.ask(ok, mc.CmdSetOtherParams, 1, 2)
+	if r.saved.changes != saves {
+		t.Error("an unchanged frame without the policy byte was saved")
+	}
 	a.ask(ok, mc.CmdSetOtherParams, 1, 2<<4|1<<2|2, 0) // env everyone, position chosen contacts, base everyone; position not shared
 	if c := r.row(t); c.TelemBase != "contacts" || c.TelemLoc != "selected" || c.TelemEnv != "contacts" || c.ShareLocation {
 		t.Errorf("other params saved as %s/%s/%s share %v", c.TelemBase, c.TelemLoc, c.TelemEnv, c.ShareLocation)
@@ -682,11 +690,11 @@ func TestCompanionSettings(t *testing.T) {
 	a.ask(illegal, mc.CmdSetOtherParams, 1, 3)
 
 	nz := meshcore.NewRegion("nz").Key
-	a.ask(ok, append(fixed([]byte{mc.CmdSetDefaultFloodScope}, "nz", 32)[:32], nz[:]...)...)
+	a.ask(ok, mc.SetDefaultFloodScopeCommand{Name: "nz", Key: nz[:]}.ToBytes()...)
 	if got := r.row(t).FloodScope; got != "region:nz" {
 		t.Errorf("scope = %q", got)
 	}
-	a.ask(illegal, append(fixed([]byte{mc.CmdSetDefaultFloodScope}, "zz", 32)[:32], bytes.Repeat([]byte{7}, 16)...)...)
+	a.ask(illegal, mc.SetDefaultFloodScopeCommand{Name: "zz", Key: bytes.Repeat([]byte{7}, 16)}.ToBytes()...)
 }
 
 // Channels set by slot follow the Channels page's rules, and are saved.
@@ -695,7 +703,7 @@ func TestSetChannel(t *testing.T) {
 	a := r.dial(t)
 	ok, illegal := []byte{mc.RespOk}, []byte{mc.RespErr, mc.ErrCodeIllegalArg}
 	set := func(slot byte, name string, key []byte) []byte {
-		return append(fixed([]byte{mc.CmdSetChannel, slot}, name, 32), key...)
+		return mc.SetChannelCommand{ChannelIdx: slot, Name: name, Secret: [16]byte(key)}.ToBytes()
 	}
 	westest := meshcore.NewChannelFromHashtag(meshcore.NormalizeHashtag("#westest")).PSK
 	a.ask(ok, set(1, "#westest", westest)...)
@@ -705,13 +713,13 @@ func TestSetChannel(t *testing.T) {
 	priv := bytes.Repeat([]byte{0x5a}, 16)
 	a.ask(ok, set(3, "Club", priv)...)
 	a.send(mc.CmdGetChannel, 3)
-	if got := a.next(); !bytes.Equal(got, channelInfoFrame(3, "Club", priv)) {
+	if got := a.next(); !bytes.Equal(got, mc.ChannelInfoResponse{ChannelIdx: 3, Name: "Club", Secret: [16]byte(priv)}.ToBytes()) {
 		t.Errorf("slot 3 reads % x", got)
 	}
 	a.ask(illegal, set(4, "Club", priv)...) // a second channel by that name
 	a.ask(ok, set(3, "Renamed", priv)...)   // the same key under a new name is a rename, as on the firmware
 	a.send(mc.CmdGetChannel, 3)
-	if got := a.next(); !bytes.Equal(got, channelInfoFrame(3, "Renamed", priv)) {
+	if got := a.next(); !bytes.Equal(got, mc.ChannelInfoResponse{ChannelIdx: 3, Name: "Renamed", Secret: [16]byte(priv)}.ToBytes()) {
 		t.Errorf("slot 3 after the rename reads % x", got)
 	}
 	a.ask([]byte{mc.RespErr, mc.ErrCodeNotFound}, set(99, "x", priv)...)
@@ -734,18 +742,17 @@ func TestContactRenameAndFavourite(t *testing.T) {
 	r.st.WriteSync(func() { r.st.Contacts.Add(bg, r.id, pk, "Bob", "CHAT") })
 	a := r.dial(t)
 	frame := func(name string, typ, flags byte) []byte {
-		b := append([]byte{mc.CmdAddUpdateContact}, pk...)
-		b = append(b, typ, flags, 0xFF)
-		b = append(b, make([]byte, 64)...)
-		return append(fixed(b, name, 32), 0, 0, 0, 0)
+		return mc.AddUpdateContactCommand{PublicKey: [32]byte(pk), Type: typ, Flags: flags, OutPathLen: mc.OutPathUnknown, Name: name}.ToBytes()[:136]
 	}
-	a.ask([]byte{mc.RespOk}, frame("Robert", meshcore.AdvertTypeChat, 1|2<<1)...)
+	placed := mc.AddUpdateContactCommand{PublicKey: [32]byte(pk), Type: meshcore.AdvertTypeChat, OutPathLen: mc.OutPathUnknown, Name: "Bob", Latitude: -36500000, Longitude: 174500000}
+	a.ask([]byte{mc.RespOk}, placed.ToBytes()...)
+	a.ask([]byte{mc.RespOk}, frame("Robert", meshcore.AdvertTypeChat, 1|2<<1)...) // no position: the one held stays
 	k, _ := r.srv.contact(pk)
-	if k.Name != "Robert" || !k.Metadata.Favourite || k.Metadata.TelemPerms != 2 {
+	if k.Name != "Robert" || !k.Metadata.Favourite || k.Metadata.TelemPerms != 2 || k.Lat != -36500000 || k.Lon != 174500000 {
 		t.Errorf("contact = %+v", k)
 	}
-	if c := storedContact(k); c.flags != 1|2<<1 {
-		t.Errorf("flags read back %b", c.flags)
+	if c := storedContact(k); c.Flags != 1|2<<1 {
+		t.Errorf("flags read back %b", c.Flags)
 	}
 	a.ask([]byte{mc.RespErr, mc.ErrCodeUnsupportedCmd}, frame("Robert", meshcore.AdvertTypeRepeater, 0)...)
 }
@@ -803,7 +810,7 @@ func TestSetChannelRefusedKeepsSlot(t *testing.T) {
 	r := newRig(t)
 	a := r.dial(t)
 	set := func(slot byte, name string, key []byte) []byte {
-		return append(fixed([]byte{mc.CmdSetChannel, slot}, name, 32), key...)
+		return mc.SetChannelCommand{ChannelIdx: slot, Name: name, Secret: [16]byte(key)}.ToBytes()
 	}
 	westest := meshcore.NewChannelFromHashtag(meshcore.NormalizeHashtag("#westest")).PSK
 	a.ask([]byte{mc.RespOk}, set(1, "#westest", westest)...)
@@ -820,10 +827,8 @@ func TestContactFlagsMasked(t *testing.T) {
 	peer, _ := meshcore.GenerateLocalIdentity(nil)
 	pk := peer.PublicKeyBytes()
 	r.st.WriteSync(func() { r.st.Contacts.Add(context.Background(), r.id, pk, "Bob", "CHAT") })
-	b := append([]byte{mc.CmdAddUpdateContact}, pk...)
-	b = append(b, meshcore.AdvertTypeChat, 0x10|0x02, 0xFF)
-	b = append(b, make([]byte, 64)...)
-	r.dial(t).ask([]byte{mc.RespOk}, append(fixed(b, "Bob", 32), 0, 0, 0, 0)...)
+	add := mc.AddUpdateContactCommand{PublicKey: [32]byte(pk), Type: meshcore.AdvertTypeChat, Flags: 0x10 | 0x02, OutPathLen: mc.OutPathUnknown, Name: "Bob"}
+	r.dial(t).ask([]byte{mc.RespOk}, add.ToBytes()[:136]...)
 	if k, _ := r.srv.contact(pk); k.Metadata.TelemPerms != 0x01 {
 		t.Errorf("telemPerms = %#x, want only the base class", k.Metadata.TelemPerms)
 	}
@@ -844,6 +849,96 @@ func TestChangeAndUndoBeforeReload(t *testing.T) {
 func TestGetEmptyChannelSlot(t *testing.T) {
 	r := newRig(t)
 	a := r.dial(t)
-	a.ask(channelInfoFrame(5, "", nil), mc.CmdGetChannel, 5)
+	a.ask(mc.ChannelInfoResponse{ChannelIdx: 5}.ToBytes(), mc.CmdGetChannel, 5)
 	a.ask([]byte{mc.RespErr, mc.ErrCodeNotFound}, mc.CmdGetChannel, maxChannels)
+}
+
+// Frames are read as the firmware reads them: text and names end at a NUL, and a channel name keeps 31 bytes.
+func TestFramesReadAsFirmware(t *testing.T) {
+	r := newRig(t)
+	bg := context.Background()
+	bob := r.contactOf(t, "Bob", "CHAT")
+	a := r.dial(t)
+
+	dm := append(binary.LittleEndian.AppendUint32([]byte{mc.CmdSendTxtMsg, meshcore.TxtTypePlain, 0}, 1700000000), bob.PublicKeyBytes()[:6]...)
+	a.send(append(dm, "hi\x00there"...)...)
+	if f := a.next(); f[0] != mc.RespSent {
+		t.Fatalf("text send answered % x", f)
+	}
+	r.st.WriteSync(func() {})
+	if got, _ := r.st.Messages.List(bg, r.id, "dm:"+hexOf(bob.PublicKeyBytes()), 5, 0); len(got) != 1 || got[0].Text != "hi" {
+		t.Errorf("sent text %+v, want it to end at the NUL", got)
+	}
+
+	a.ask([]byte{mc.RespOk}, mc.AddUpdateContactCommand{PublicKey: [32]byte(bob.PublicKeyBytes()), Type: meshcore.AdvertTypeChat, OutPathLen: mc.OutPathUnknown, Name: "Bo\x00junk"}.ToBytes()...)
+	if k, _ := r.srv.contact(bob.PublicKeyBytes()); k.Name != "Bo" {
+		t.Errorf("contact name %q, want it to end at the NUL", k.Name)
+	}
+
+	long := append(append([]byte{mc.CmdSetChannel, 3}, strings.Repeat("x", 32)...), bytes.Repeat([]byte{0x5a}, 16)...)
+	a.ask([]byte{mc.RespOk}, long...)
+	if ch := r.comp.Node().Channel(3); ch == nil || ch.Name != strings.Repeat("x", 31) {
+		t.Errorf("channel %+v, want a 31-byte name", ch)
+	}
+	accented := append(append([]byte{mc.CmdSetChannel, 4}, strings.Repeat("é", 16)...), bytes.Repeat([]byte{0x5b}, 16)...)
+	a.ask([]byte{mc.RespOk}, accented...)
+	if ch := r.comp.Node().Channel(4); ch == nil || ch.Name != strings.Repeat("é", 15) {
+		t.Errorf("channel %+v, want the character the cut split dropped", ch)
+	}
+}
+
+// What the firmware refuses for its shape is refused with the firmware's code, before OwlShack's own rules.
+func TestFrameShapeRefusals(t *testing.T) {
+	r := newRig(t)
+	a := r.dial(t)
+	illegal, unsupported := []byte{mc.RespErr, mc.ErrCodeIllegalArg}, []byte{mc.RespErr, mc.ErrCodeUnsupportedCmd}
+	nz := meshcore.NewRegion("nz").Key
+	a.ask(illegal, append(append([]byte{mc.CmdSetDefaultFloodScope}, make([]byte, 31)...), nz[:]...)...) // no name
+	a.ask(illegal, mc.SetRadioParamsCommand{Frequency: 869618, Bandwidth: 62500, SpreadFactor: 13, CodingRate: 8}.ToBytes()...)
+	a.ask(unsupported, append([]byte{mc.CmdImportPrivateKey}, make([]byte, 10)...)...)
+	a.ask(illegal, mc.CmdSetDevicePin, 12, 0, 0, 0)
+}
+
+// A name longer than its field is cut as the firmware's strzcpy cuts it (TxtDataHelpers.cpp): at 31 bytes, even mid-character, then NULs.
+func TestLongNameCutAsStrzcpy(t *testing.T) {
+	r := newRig(t)
+	name := strings.Repeat("x", 29) + "\U0001F989"
+	k := r.contactOf(t, name, "CHAT")
+	chName := strings.Repeat("y", 30) + "é"
+	if err := r.comp.AppSetChannel(5, chName, bytes.Repeat([]byte{0x5c}, 16)); err != nil {
+		t.Fatal(err)
+	}
+	strzcpy := func(s string) []byte { return append([]byte(s[:31]), 0) }
+	a := r.dial(t)
+	a.send(append([]byte{mc.CmdGetContactByKey}, k.PublicKeyBytes()...)...)
+	if f := a.next(); !bytes.Equal(f[100:132], strzcpy(name)) {
+		t.Errorf("contact name field % x, want % x", f[100:132], strzcpy(name))
+	}
+	a.send(mc.CmdGetChannel, 5)
+	if f := a.next(); !bytes.Equal(f[2:34], strzcpy(chName)) {
+		t.Errorf("channel name field % x, want % x", f[2:34], strzcpy(chName))
+	}
+}
+
+// A message too long for one frame is cut to fit, as the firmware does, rather than lost.
+func TestLongMessageCut(t *testing.T) {
+	r := newRig(t)
+	pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeGrpTxt, 0)}
+	r.srv.AppMessage(companion.AppMessage{Channel: 0, TxtType: meshcore.TxtTypePlain, Timestamp: 1700000000, Text: strings.Repeat("t", 200), Packet: pkt})
+	r.st.WriteSync(func() {})
+	a := r.dial(t)
+	a.send(mc.CmdDeviceQuery, 3)
+	a.next()
+	a.send(mc.CmdSyncNextMessage)
+	if f := a.next(); f[0] != mc.RespChannelMsgRecvV3 || len(f) != mc.MaxFrameSize {
+		t.Errorf("long message read as %d bytes, code %d", len(f), f[0])
+	}
+}
+
+// The tuning the app reads and writes back unchanged is taken.
+func TestTuningRoundTrip(t *testing.T) {
+	r := newRig(t)
+	a := r.dial(t)
+	a.send(mc.CmdGetTuningParams)
+	a.ask([]byte{mc.RespOk}, append([]byte{mc.CmdSetTuningParams}, a.next()[1:]...)...)
 }

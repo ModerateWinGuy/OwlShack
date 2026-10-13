@@ -122,14 +122,6 @@ type Client struct {
 
 	cliMu      sync.Mutex
 	cliPending map[string]chan string
-
-	sendMu sync.Mutex
-}
-
-// Stamp holds the send order until release, so packets reach the queue in timestamp order: a node drops one below the last it saw.
-func (rm *Client) Stamp() (uint32, func()) {
-	rm.sendMu.Lock()
-	return rm.node.UniqueTimestamp(), sync.OnceFunc(rm.sendMu.Unlock)
 }
 
 func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator, ownHashSize func() uint8, scopeFor func(pubkey []byte) *meshcore.Region) *Client {
@@ -260,61 +252,74 @@ func (rm *Client) routedPacket(peer *node.Peer, payloadType byte, payload []byte
 
 // roundtripRequest awaits the tagged response; a pr carrying the secret is matched without a session.
 func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecret []byte, localPubByte byte, body []byte, timeout time.Duration, label string, pr *pendingRequest) ([]byte, error) {
-	tag, release := rm.Stamp()
-	defer release()
-
-	plaintext := make([]byte, 4+len(body))
-	binary.LittleEndian.PutUint32(plaintext[:4], tag)
-	copy(plaintext[4:], body)
-
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("encrypting %s req: %w", label, err)
-	}
-
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-
-	req := &meshcore.Request{
-		Destination:      peerPub[0],
-		Source:           localPubByte,
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}
-
-	reqBytes, err := req.ToBytes()
-	if err != nil {
-		return nil, fmt.Errorf("encoding request: %w", err)
-	}
-
 	pr.peerPubKeyByte = peerPub[0]
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
-	if pr.discovery {
-		routeType, pathLen := routeForPeer(nil, 0, rm.bytesPerHop(peerPub[:]))
-		pkt.Header = meshcore.MakeHeader(routeType, meshcore.PayloadTypeReq, 0)
-		pkt.PathLength, pkt.Path, outPath = pathLen, nil, nil
-	}
-	return rm.sendAwaitTag(tag, release, pr, pkt, outPath, hashSize, peerPub, timeout, label)
+	return rm.sendAwaitTag(pr, peerPub, timeout, label, func(tag uint32) (*meshcore.Packet, []byte, uint8, error) {
+		encrypted, err := meshcore.EncryptThenMAC(sharedSecret, append(binary.LittleEndian.AppendUint32(nil, tag), body...))
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encrypting %s req: %w", label, err)
+		}
+
+		var mac [2]byte
+		copy(mac[:], encrypted[:2])
+
+		req := &meshcore.Request{
+			Destination:      peerPub[0],
+			Source:           localPubByte,
+			MAC:              mac,
+			EncryptedPayload: encrypted[2:],
+		}
+
+		reqBytes, err := req.ToBytes()
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encoding request: %w", err)
+		}
+
+		pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
+		if pr.discovery {
+			routeType, pathLen := routeForPeer(nil, 0, rm.bytesPerHop(peerPub[:]))
+			pkt.Header = meshcore.MakeHeader(routeType, meshcore.PayloadTypeReq, 0)
+			pkt.PathLength, pkt.Path, outPath = pathLen, nil, nil
+		}
+		return pkt, outPath, hashSize, nil
+	})
 }
 
-// sendAwaitTag sends pkt and waits for the response echoing tag, sizing the wait from the route.
-func (rm *Client) sendAwaitTag(tag uint32, release func(), pr *pendingRequest, pkt *meshcore.Packet, outPath []byte, hashSize uint8, peerPub [32]byte, timeout time.Duration, label string) ([]byte, error) {
+// sendAwaitTag sends what build makes of a unique tag in stamp order, then waits for the response echoing the tag, sizing the wait from the route.
+func (rm *Client) sendAwaitTag(pr *pendingRequest, peerPub [32]byte, timeout time.Duration, label string, build func(tag uint32) (*meshcore.Packet, []byte, uint8, error)) ([]byte, error) {
 	resultCh := make(chan []byte, 1)
 	pr.ch, pr.created = resultCh, time.Now()
-	rm.pendingMu.Lock()
-	rm.pending[tag] = pr
-	rm.pendingMu.Unlock()
 
+	var (
+		tag        uint32
+		registered bool
+		pkt        *meshcore.Packet
+		outPath    []byte
+		hashSize   uint8
+	)
 	defer func() {
-		rm.pendingMu.Lock()
-		delete(rm.pending, tag)
-		rm.pendingMu.Unlock()
+		if registered {
+			rm.pendingMu.Lock()
+			delete(rm.pending, tag)
+			rm.pendingMu.Unlock()
+		}
 	}()
 
-	err := meshpath.Send(rm.node, pkt, rm.floodScope(pr.app, peerPub[:]), 0)
-	release()
+	err := rm.node.SendStamped(func(ts uint32) error {
+		var err error
+		if pkt, outPath, hashSize, err = build(ts); err != nil {
+			return err
+		}
+		tag, registered = ts, true
+		rm.pendingMu.Lock()
+		rm.pending[tag] = pr
+		rm.pendingMu.Unlock()
+		if err := meshpath.Send(rm.node, pkt, rm.floodScope(pr.app, peerPub[:]), 0); err != nil {
+			return fmt.Errorf("sending %s req: %w", label, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("sending %s req: %w", label, err)
+		return nil, err
 	}
 
 	wait := rm.replyTimeout(len(pkt.Payload), outPath, hashSize, timeout)
@@ -352,26 +357,23 @@ func (rm *Client) RequestRegions(pubkeyHex string, timeout time.Duration) (meshc
 	if err != nil {
 		return meshcore.AnonRegionsReply{}, err
 	}
-	tag, release := rm.Stamp()
-	defer release()
-	plaintext := binary.LittleEndian.AppendUint32(nil, tag)
-	plaintext = append(plaintext, body...)
-	req, err := meshcore.NewAnonReq(rm.node.Identity(), peer, plaintext, secret)
-	if err != nil {
-		return meshcore.AnonRegionsReply{}, fmt.Errorf("encrypting regions req: %w", err)
-	}
-	payload, err := req.ToBytes()
-	if err != nil {
-		return meshcore.AnonRegionsReply{}, err
-	}
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0),
-		PathLength: meshcore.MakePathLen(hashSize, 0),
-		Payload:    payload,
-	}
 	pub := peer.PublicKey()
 	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub}
-	data, err := rm.sendAwaitTag(tag, release, pr, pkt, []byte{}, hashSize, pub, timeout, "regions")
+	data, err := rm.sendAwaitTag(pr, pub, timeout, "regions", func(tag uint32) (*meshcore.Packet, []byte, uint8, error) {
+		req, err := meshcore.NewAnonReq(rm.node.Identity(), peer, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encrypting regions req: %w", err)
+		}
+		payload, err := req.ToBytes()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		return &meshcore.Packet{
+			Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0),
+			PathLength: meshcore.MakePathLen(hashSize, 0),
+			Payload:    payload,
+		}, []byte{}, hashSize, nil
+	})
 	if err != nil {
 		return meshcore.AnonRegionsReply{}, err
 	}
@@ -392,29 +394,30 @@ func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Dur
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
-	tag, release := rm.Stamp()
-	defer release()
-	req, err := meshcore.NewAnonReq(rm.node.Identity(), peerID, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
-	if err != nil {
-		return nil, fmt.Errorf("encrypting anon req: %w", err)
-	}
-	payload, err := req.ToBytes()
-	if err != nil {
-		return nil, err
-	}
 	pub := peerID.PublicKey()
-	hashSize := rm.ownHashSize()
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0),
-		PathLength: meshcore.MakePathLen(hashSize, 0),
-		Payload:    payload,
-	}
-	outPath := []byte{}
+	var routed *node.Peer
 	if ct, err := rm.store.Contacts.Get(context.Background(), rm.companionID, pub[:]); err == nil && ct != nil {
-		if peer := rm.node.Peers().Lookup(pub); peer != nil {
-			pkt, outPath, hashSize = rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
-		}
+		routed = rm.node.Peers().Lookup(pub)
 	}
 	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub, app: &app}
-	return rm.sendAwaitTag(tag, release, pr, pkt, outPath, hashSize, pub, timeout, "app-anon")
+	return rm.sendAwaitTag(pr, pub, timeout, "app-anon", func(tag uint32) (*meshcore.Packet, []byte, uint8, error) {
+		req, err := meshcore.NewAnonReq(rm.node.Identity(), peerID, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encrypting anon req: %w", err)
+		}
+		payload, err := req.ToBytes()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if routed != nil {
+			pkt, outPath, hashSize := rm.routedPacket(routed, meshcore.PayloadTypeAnonReq, payload)
+			return pkt, outPath, hashSize, nil
+		}
+		hashSize := rm.ownHashSize()
+		return &meshcore.Packet{
+			Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0),
+			PathLength: meshcore.MakePathLen(hashSize, 0),
+			Payload:    payload,
+		}, []byte{}, hashSize, nil
+	})
 }

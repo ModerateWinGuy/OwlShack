@@ -26,12 +26,11 @@ func TestSendReciprocalPath_SkipsWhatTheLibraryAnswered(t *testing.T) {
 		radio := &countingRadio{}
 		n := node.New(meshcore.NewLocalIdentityFromSeed([32]byte{1}), radio)
 		rm := NewClient(n, nil, 0, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, func() uint8 { return 1 }, func([]byte) *meshcore.Region { return nil })
-		secret, _ := n.Identity().SharedSecret(peer.Identity)
 		pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypePath, 0), PathLength: 1, Path: []byte{0x11}}
 		if marked {
 			pkt.MarkDoNotRetransmit()
 		}
-		rm.sendReciprocalPath(pkt, peer.PublicKeyBytes(), secret, []byte{0x11}, 1)
+		rm.sendReciprocalPath(pkt, peer.PublicKeyBytes(), []byte{0x11}, 1)
 		time.Sleep(700 * time.Millisecond) // past the reciprocal's 500 ms delay
 		n.Stop()
 		if got := radio.sent.Load(); (got > 0) == marked {

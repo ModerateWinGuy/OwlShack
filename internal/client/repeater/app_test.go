@@ -104,7 +104,7 @@ func TestAppFloodsTakeTheAppScope(t *testing.T) {
 			r.rm.AppRequest(r.contactH, []byte{meshcore.ReqTypeGetStatus, 0, 0, 0, 0}, time.Millisecond, app)
 		},
 		"path discovery": func() { r.rm.AppPathDiscovery(r.contactH, time.Millisecond, app) },
-		"CLI":            func() { r.rm.AppCLI(r.contactH, "ver", meshcore.TxtTypeCLIData, 0, time.Millisecond, app) },
+		"CLI":            func() { r.rm.AppCLI(r.contactH, "ver", meshcore.TxtTypeCLIData, 0, app) },
 	} {
 		send()
 		if pkt := r.next(t); !pkt.IsRouteFlood() || !wlg.MatchesPacket(pkt) {
@@ -122,7 +122,8 @@ func TestAppCLINeedsNoSession(t *testing.T) {
 	t.Parallel()
 	r := newAppRig(t)
 	var flood bool
-	if err := r.rm.AppCLI(r.contactH, "get name", meshcore.TxtTypeCLICommand, 2, time.Millisecond, AppSend{Sent: sentFlood(&flood)}); err != nil {
+	var wait time.Duration
+	if err := r.rm.AppCLI(r.contactH, "get name", meshcore.TxtTypeCLICommand, 2, AppSend{Sent: func(_ uint32, w time.Duration, f bool) { wait, flood = w, f }}); err != nil {
 		t.Fatalf("AppCLI without a session: %v", err)
 	}
 	pkt := r.next(t)
@@ -132,6 +133,10 @@ func TestAppCLINeedsNoSession(t *testing.T) {
 	}
 	if pkt.PayloadType() != meshcore.PayloadTypeTxtMsg || plain[4] != meshcore.TxtTypeCLICommand<<2|2 || string(bytes.TrimRight(plain[5:], "\x00")) != "get name" || !flood {
 		t.Errorf("sent type %d flags %#x text %q flood %v", pkt.PayloadType(), plain[4], plain[5:], flood)
+	}
+	// The app is told the firmware's est_timeout for the command it sent (MyMesh.cpp:1176,1195), as sendCommandData reports it.
+	if want := node.CalcFloodTimeout(0); wait != want {
+		t.Errorf("app told to wait %v, want est_timeout %v", wait, want)
 	}
 }
 

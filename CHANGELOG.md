@@ -123,6 +123,17 @@ top until tagged.
 
 ### Fixed
 
+- **Channel posts sent at the same moment each show their own repeats.** When two posts went out
+  together, for example from two open pages or a bot replying as you post, one could show the
+  other's repeats while the other showed none.
+- **A message the radio never sent shows as failed.** A channel post the radio could not send,
+  still held when the radio went down, or lost in a modem reset looked sent; it now shows failed
+  with Retry. A direct message caught by a full queue or a radio restart no longer stays on
+  "sending" for good.
+- **A direct message no longer gives up on a reply that is still coming.** When a message to a
+  contact had to go out by flood, it could be sent again before the reply had time to arrive.
+- **A contact that keeps answering you by flood learns your route again.** Its later replies come
+  straight back, as they do with MeshCore companions.
 - **Your repeater waits its turn before relaying a packet, as firmware repeaters do.** It relayed
   everything the moment it heard it, so it collided with other repeaters relaying the same packet.
 - **Commands sent to a repeater or room close together are all answered.** When two went out
@@ -134,8 +145,6 @@ top until tagged.
   titled just "Room", "Repeater" or "Sensor"; it now uses the name from its advert.
 - **A room server opened from Contacts, Monitoring, the Repeaters list or a message thread shows
   its posts.** It opened as a repeater page, without Posts stored and Posts pushed.
-- **A message that could not be sent shows as failed.** When the radio's queue was full, a
-  direct message stayed "sending" for good and a channel message looked sent.
 - **The noise floor no longer reads 0 dBm before the radio has measured it.** The Radio page
   and MQTT leave it out until the first reading, which on a Pi hat takes a few seconds after
   starting.
@@ -203,8 +212,6 @@ top until tagged.
   the same size however often the radio reconnects.
 - **The Radio page and `/api/health` show how many packets are waiting to go out.** The transmit
   queue always read 0.
-- **Channel messages lost when the modem resets show as failed**, with retry, instead of looking
-  sent.
 - **Changing a channel no longer breaks an open Channels or Bots page.** Adding, removing or
   renaming a channel left other open pages failing with "channel not found" or "no bot with id"
   until you reloaded them.

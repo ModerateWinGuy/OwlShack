@@ -21,9 +21,8 @@ import (
 	"github.com/OwlShack/OwlShack/internal/trigger"
 )
 
-// modemReadings is the slice of the modem a companion needs, so a send and a telemetry reply test without a radio.
+// modemReadings is the slice of the modem a companion needs, so a telemetry reply tests without a radio.
 type modemReadings interface {
-	EstAirtimeMs(packetLen int) uint32
 	// CachedStats is the last poll, never a fresh one: this is read on the packet path.
 	CachedStats() modem.DeviceStats
 }
@@ -60,16 +59,16 @@ type Companion struct {
 
 	echoTracker *echo.Tracker
 	repeaters   *repeater.Client
-	// stats is narrowed to what a send and a telemetry reply need: modem.StatsProvider satisfies it.
+	// stats is narrowed to what a telemetry reply needs: modem.StatsProvider satisfies it.
 	stats modemReadings
 
 	// telemetry is the operator's channel map and the readings behind it; nil publishes no sensors.
 	telemetry func() ([]sensor.ChannelEntry, []sensor.Status)
 
-	pendingOutbound struct {
+	// pendingPosts is each channel post not yet handed to the radio, by its unique timestamp, so each takes only its own packet.
+	pendingPosts struct {
 		sync.Mutex
-		msgID   int64
-		channel string
+		m map[uint32]echo.Sent
 	}
 
 	traceWaiters traceWaiters
@@ -86,7 +85,13 @@ type Companion struct {
 	chanEditMu sync.Mutex
 
 	// dmSeen collapses a sender's retransmissions of one message; see recentDM.
-	dmSeen dmSeen
+	dmSeen      dmSeen
+	dmsInFlight dmsInFlight
+	sentAcks    sentAcks
+	appDMs      struct {
+		sync.Mutex
+		m map[string]*appDM
+	}
 
 	triggers []triggerEntry
 
@@ -236,6 +241,7 @@ func (c *Companion) Stop() error {
 	}
 
 	c.node.Stop()
+	c.dmsInFlight.abortAll()
 	return nil
 }
 
