@@ -29,12 +29,16 @@ func (r *timedRadio) Enqueue(d []byte, p uint8, delay time.Duration) bool {
 
 func (r *timedRadio) SetDataHandler(h func(*meshcore.Packet)) { r.rx = h }
 
+func (r *timedRadio) SetPacketFilter(node.PacketFilter) {}
+
 // timedCompanion is hashSizeCompanion on a timedRadio whose airtime estimate is 100 ms, with friend a 0-hop neighbour.
 func timedCompanion(t *testing.T) (*Companion, *timedRadio, meshcore.LocalIdentity, meshcore.LocalIdentity) {
 	t.Helper()
 	c, _, self, friend := hashSizeCompanion(t)
 	radio := &timedRadio{}
 	c.node = node.New(self, radio, node.WithAirtimeEstimator(func(int) uint32 { return 100 }))
+	var mr node.MuxRadio = radio
+	c.radio = &mr
 	t.Cleanup(c.node.Stop)
 	c.node.Peers().Insert(&node.Peer{Identity: friend.Identity, Name: "friend", OutPath: []byte{}, OutPathHashSize: 2})
 	return c, radio, self, friend
@@ -112,7 +116,7 @@ func TestSendDM_AttemptsAlongTheRouteThenFloodEachOnItsOwnWait(t *testing.T) {
 func TestFloodACK_ResendsOurRouteAfter3s(t *testing.T) {
 	t.Parallel()
 	c, radio, self, friend := timedCompanion(t)
-	c.node.OnPacket(meshcore.PayloadTypeAck, c.handleAck)
+	c.registerPacketHandlers()
 	friendHex := hex.EncodeToString(friend.PublicKeyBytes())
 	if err := c.SendContactMessage(friendHex, "hi"); err != nil {
 		t.Fatal(err)

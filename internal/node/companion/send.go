@@ -106,7 +106,7 @@ func (c *Companion) sendGroup(ch *meshcore.ChannelEntry, text string, hashSize u
 		},
 	)
 	if err != nil { // never sent, so the row already shown must not read as sent, nor take an earlier post's echoes
-		if _, unhanded := c.takePendingPost(payload.Timestamp); unhanded { // one the radio took is settled by its transmit result
+		if _, notHanded := c.takePendingPost(payload.Timestamp); notHanded { // one the radio took is settled by its transmit result
 			c.setMessageStatus(msgID, ch.Name, "failed")
 		}
 	}
@@ -148,35 +148,6 @@ func (c *Companion) SendContactMessage(pubkeyHex, text string) error {
 // sendDMReply is a DM trigger's answer: the trigger's pathHashSize frames it only when no route is stored, since a stored path already fixes its own hash width.
 func (c *Companion) sendDMReply(pubkeyHex, text string, hashSize uint8, ackTimeout time.Duration, scope config.FloodScope) error {
 	return c.sendDM(pubkeyHex, text, hashSize, ackTimeout, scopeOf(scope))
-}
-
-// dmAckTimeout mirrors the firmware's calcFloodTimeoutMillisFor / calcDirectTimeoutMillisFor
-// (MyMesh.cpp:851-858): the wait has to scale with airtime and hop count or a slow preset gives up
-// before the ack can physically arrive. floor keeps the caller's configured value as a minimum,
-// and is used outright when the radio params are unknown and airtime reads 0.
-func (c *Companion) dmAckTimeout(textLen int, outPath []byte, hashSize uint8, floor time.Duration) time.Duration {
-	if c.stats == nil {
-		return floor
-	}
-	// [4 ts][1 flags][text] padded to an AES block, plus dest+src+MAC, header and path-length byte.
-	cipherLen := 5 + textLen
-	if rem := cipherLen % 16; rem != 0 {
-		cipherLen += 16 - rem
-	}
-	airtime := c.stats.EstAirtimeMs(2 + len(outPath) + 4 + cipherLen)
-	if airtime == 0 {
-		return floor
-	}
-
-	timeout := node.CalcFloodTimeout(airtime)
-	if outPath != nil { // non-nil, even empty, routes direct
-		hops := 0
-		if hashSize > 0 {
-			hops = len(outPath) / int(hashSize)
-		}
-		timeout = node.CalcDirectTimeout(airtime, uint8(min(hops, 255)))
-	}
-	return max(timeout, floor)
 }
 
 // sendDM stores, shows and sends a DM, retrying it as the app would.

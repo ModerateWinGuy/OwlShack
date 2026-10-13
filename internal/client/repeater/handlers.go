@@ -5,9 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
+
+	"github.com/OwlShack/OwlShack/internal/meshpath"
 )
 
 func (rm *Client) HandlePathPacket(pkt *meshcore.Packet) bool {
@@ -312,9 +313,6 @@ func (rm *Client) HandleTextPacket(pkt *meshcore.Packet) bool {
 	return false
 }
 
-// reciprocalPathDelay is the firmware's 500 ms on a reciprocal path return (Mesh.cpp:177).
-const reciprocalPathDelay = 500 * time.Millisecond
-
 // sendReciprocalPath teaches a peer its route back to us after it taught us ours, sent direct down
 // that fresh route. Firmware Mesh.cpp:173-178 does this for any flood PATH; without it the remote
 // keeps flooding every response at us.
@@ -327,15 +325,12 @@ func (rm *Client) sendReciprocalPath(pkt *meshcore.Packet, peerPubKey, learnedPa
 	if err != nil {
 		return
 	}
-	if err := rm.node.SendReciprocalPath(peer, pkt, learnedPath, hashSize, reciprocalPathDelay); err != nil {
+	if err := rm.node.SendReciprocalPath(peer, pkt, learnedPath, hashSize, meshpath.ReciprocalDelay); err != nil {
 		rm.log.Debug("failed to send reciprocal path return", "error", err)
 		return
 	}
 	rm.log.Debug("sent reciprocal path return", "peer", hex.EncodeToString(peerPubKey[:min(6, len(peerPubKey))]), "hops", len(learnedPath)/int(max(hashSize, 1)))
 }
-
-// returnPathRetryDelay is the firmware's 3 s on handleReturnPathRetry (BaseChatMesh.cpp:389).
-const returnPathRetryDelay = 3 * time.Second
 
 // retryReciprocalPath answers a FLOOD response from a peer we already hold a route to: they are
 // not using the route we taught them, so BaseChatMesh.cpp:332-337 resends it direct.
@@ -348,7 +343,7 @@ func (rm *Client) retryReciprocalPath(pkt *meshcore.Packet, peerPubKey [32]byte)
 	if outPath == nil {
 		return // no route of ours for them to be ignoring
 	}
-	if err := rm.node.SendReciprocalPath(peer.Identity, pkt, outPath, hashSize, returnPathRetryDelay); err != nil {
+	if err := rm.node.SendReciprocalPath(peer.Identity, pkt, outPath, hashSize, meshpath.ReturnRetryDelay); err != nil {
 		rm.log.Debug("failed to send return path retry", "error", err)
 		return
 	}

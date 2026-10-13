@@ -3,9 +3,16 @@ package meshpath
 
 import (
 	"fmt"
+	"time"
 
 	meshcore "github.com/OwlShack/meshcore-go"
 )
+
+// ReciprocalDelay is the firmware's 500 ms on a reciprocal path return (Mesh.cpp:177).
+const ReciprocalDelay = 500 * time.Millisecond
+
+// ReturnRetryDelay is the firmware's 3 s on handleReturnPathRetry (BaseChatMesh.cpp:389).
+const ReturnRetryDelay = 3 * time.Second
 
 // BuildReturn is the firmware's createPathReturn, refusing what it refuses: a path not matching
 // pathLenByte, or path and extra past MAX_COMBINED_PATH (Mesh.cpp:452).

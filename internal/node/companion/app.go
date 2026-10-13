@@ -171,7 +171,10 @@ func (c *Companion) SendAppDM(pubkeyHex, text string, appTimestamp uint32, attem
 	now := time.Now()
 	c.appDMs.Lock()
 	d.sentAt, d.sent[sent.ACK], d.acked, d.last = sentAt, now, acked, now
-	resumed := d.status == "failed"
+	if d.status == "failed" { // under the lock, so an earlier attempt's ACK settles after this, not before
+		c.dmsInFlight.begin(d.msgID, func() { c.settleAppDM(d, "failed", -1) })
+		c.setMessageStatus(d.msgID, d.channel, "sending")
+	}
 	if d.status != "delivered" {
 		d.status = "sending"
 		d.gen++
@@ -182,10 +185,6 @@ func (c *Companion) SendAppDM(pubkeyHex, text string, appTimestamp uint32, attem
 		d.fail = time.AfterFunc(2*sent.Timeout, func() { c.settleAppDM(d, "failed", gen) })
 	}
 	c.appDMs.Unlock()
-	if resumed {
-		c.dmsInFlight.begin(d.msgID, func() { c.settleAppDM(d, "failed", -1) })
-		c.setMessageStatus(d.msgID, d.channel, "sending")
-	}
 	ack := sent.ACK
 	c.node.ExpectACK(ack, appDMKeep, func(time.Duration) {
 		c.appDMs.Lock()

@@ -21,9 +21,8 @@ import (
 	"github.com/OwlShack/OwlShack/internal/trigger"
 )
 
-// modemReadings is the slice of the modem a companion needs, so a send and a telemetry reply test without a radio.
+// modemReadings is the slice of the modem a companion needs, so a telemetry reply tests without a radio.
 type modemReadings interface {
-	EstAirtimeMs(packetLen int) uint32
 	// CachedStats is the last poll, never a fresh one: this is read on the packet path.
 	CachedStats() modem.DeviceStats
 }
@@ -60,7 +59,7 @@ type Companion struct {
 
 	echoTracker *echo.Tracker
 	repeaters   *repeater.Client
-	// stats is narrowed to what a send and a telemetry reply need: modem.StatsProvider satisfies it.
+	// stats is narrowed to what a telemetry reply needs: modem.StatsProvider satisfies it.
 	stats modemReadings
 
 	// telemetry is the operator's channel map and the readings behind it; nil publishes no sensors.

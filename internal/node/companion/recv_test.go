@@ -86,50 +86,12 @@ func TestRecentDM_DistinctTextsInOneSecondBothSurvive(t *testing.T) {
 	}
 }
 
-// fakeStats reports a fixed airtime, standing in for the modem's radio params.
+// fakeStats stands in for the modem's last poll.
 type fakeStats struct {
-	airtime uint32
-	device  modem.DeviceStats
+	device modem.DeviceStats
 }
-
-func (f fakeStats) EstAirtimeMs(int) uint32 { return f.airtime }
 
 func (f fakeStats) CachedStats() modem.DeviceStats { return f.device }
-
-func TestDMAckTimeout(t *testing.T) {
-	t.Parallel()
-
-	const floor = 5 * time.Second
-
-	// No stats and unknown radio params both fall back to the caller's floor rather than guessing.
-	if got := (&Companion{}).dmAckTimeout(20, nil, 1, floor); got != floor {
-		t.Errorf("no stats: got %v, want the floor %v", got, floor)
-	}
-	c0 := &Companion{stats: fakeStats{airtime: 0}}
-	if got := c0.dmAckTimeout(20, nil, 1, floor); got != floor {
-		t.Errorf("zero airtime: got %v, want the floor %v", got, floor)
-	}
-
-	// 460ms is roughly a 100-byte packet at SF7/62.5kHz, the bench preset.
-	c := &Companion{stats: fakeStats{airtime: 460}}
-
-	flood := c.dmAckTimeout(20, nil, 1, floor)
-	if flood <= floor {
-		t.Errorf("flood timeout %v did not exceed the 5s floor, which is the bug this fixes", flood)
-	}
-
-	// A direct route waits longer the more hops it has to traverse.
-	direct0 := c.dmAckTimeout(20, []byte{}, 1, floor)
-	direct2 := c.dmAckTimeout(20, []byte{0xaa, 0xbb}, 1, floor)
-	if direct2 <= direct0 {
-		t.Errorf("2-hop %v must exceed 0-hop %v", direct2, direct0)
-	}
-
-	// A generous operator setting still wins.
-	if got := c.dmAckTimeout(20, nil, 1, 60*time.Second); got != 60*time.Second {
-		t.Errorf("configured floor ignored: got %v", got)
-	}
-}
 
 // A room server floods its posts in a region, which the live post shows as a DM or channel message does.
 func TestRoomPost_LivePostCarriesItsRegion(t *testing.T) {
