@@ -80,11 +80,9 @@ func (s *Service) Start(filter byte, since time.Time) error {
 	}
 	tag := binary.LittleEndian.Uint32(tagB[:])
 
-	data := make([]byte, 9)
-	data[0] = filter
-	binary.LittleEndian.PutUint32(data[1:5], tag)
+	req := meshcore.DiscoverRequest{TypeFilter: filter, Tag: tag}
 	if !since.IsZero() {
-		binary.LittleEndian.PutUint32(data[5:9], uint32(since.Unix()))
+		req.Since = uint32(since.Unix())
 	}
 
 	s.mu.Lock()
@@ -92,10 +90,7 @@ func (s *Service) Start(filter byte, since time.Time) error {
 	s.results = map[string]Result{}
 	s.mu.Unlock()
 
-	payload, err := (&meshcore.Control{
-		Flags: byte(meshcore.ControlSubTypeDiscoverReq << 4), // prefix_only=0: we want the full key
-		Data:  data,
-	}).ToBytes()
+	payload, err := meshcore.NewDiscoverRequest(req).ToBytes()
 	if err != nil {
 		return err
 	}

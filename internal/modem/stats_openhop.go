@@ -107,7 +107,7 @@ func (p *openhopStatsProvider) LinkStats() LinkStats {
 }
 
 func (p *openhopStatsProvider) EstAirtimeMs(packetLen int) uint32 {
-	return p.modem.AirtimeEstimator()(packetLen)
+	return p.modem.EstAirtime(packetLen)
 }
 
 func (p *openhopStatsProvider) PacketScore(snrDB float64, packetLen int) float64 {

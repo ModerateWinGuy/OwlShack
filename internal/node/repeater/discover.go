@@ -11,30 +11,20 @@ import (
 
 // Node discovery (firmware CTL_TYPE_NODE_DISCOVER_REQ/RESP): a zero-hop request whose matching responses become neighbours.
 
-const (
-	discoverReqFlags   = byte(meshcore.ControlSubTypeDiscoverReq << 4) // 0x80, prefix_only=0
-	discoverWindow     = 60 * time.Second                              // collect responses this long (firmware)
-	discoverTypeFilter = byte(1 << meshcore.AdvertTypeRepeater)        // discover repeaters
-)
+const discoverWindow = 60 * time.Second // collect responses this long (firmware)
 
-// sendDiscover broadcasts a zero-hop NODE_DISCOVER_REQ; control data is [filter:1][tag:4][since:4].
+// sendDiscover broadcasts a zero-hop NODE_DISCOVER_REQ for repeaters.
 func (r *Repeater) sendDiscover() error {
 	var tagB [4]byte
 	_, _ = crand.Read(tagB[:])
 	tag := binary.LittleEndian.Uint32(tagB[:])
-
-	data := make([]byte, 9)
-	data[0] = discoverTypeFilter
-	binary.LittleEndian.PutUint32(data[1:5], tag)
-	// data[5:9] = since (0)
 
 	r.discover.Lock()
 	r.discover.tag = tag
 	r.discover.until = time.Now().Add(discoverWindow)
 	r.discover.Unlock()
 
-	ctl := meshcore.Control{Flags: discoverReqFlags, Data: data}
-	payload, err := ctl.ToBytes()
+	payload, err := meshcore.NewDiscoverRequest(meshcore.DiscoverRequest{TypeFilter: 1 << meshcore.AdvertTypeRepeater, Tag: tag}).ToBytes()
 	if err != nil {
 		return err
 	}
@@ -61,7 +51,7 @@ func (r *Repeater) handleControl(pkt *meshcore.Packet) {
 	}
 }
 
-// answerDiscover replies [flags=0x90|type][snr x4][tag:4][pubkey], gated on relaying being enabled and rate-limited 4/2min.
+// answerDiscover replies with our key, gated on relaying being enabled and rate-limited 4/2min.
 func (r *Repeater) answerDiscover(pkt *meshcore.Packet, ctl *meshcore.Control) {
 	req, err := ctl.DiscoverRequest()
 	if err != nil || req.TypeFilter&(1<<meshcore.AdvertTypeRepeater) == 0 {
@@ -73,19 +63,11 @@ func (r *Repeater) answerDiscover(pkt *meshcore.Packet, ctl *meshcore.Control) {
 	// ponytail: firmware's discovery_mod_timestamp freshness gate isn't modelled — we always answer.
 
 	pub := r.node.Identity().PublicKeyBytes()
-	data := make([]byte, 5, 5+len(pub))
+	resp := meshcore.DiscoverResponse{NodeType: meshcore.AdvertTypeRepeater, Tag: req.Tag, PubKey: pub[:]}
 	if pkt.HasSignalInfo {
-		data[0] = byte(meshcore.SNRToWire(pkt.SNR))
+		resp.SNR = pkt.SNR
 	}
-	binary.LittleEndian.PutUint32(data[1:5], req.Tag)
-	data = append(data, pub[:]...)
-	if req.PrefixOnly {
-		data = data[:5+8] // firmware replies with an 8-byte pubkey prefix
-	}
-	payload, err := (&meshcore.Control{
-		Flags: byte(meshcore.ControlSubTypeDiscoverResp<<4 | meshcore.AdvertTypeRepeater),
-		Data:  data,
-	}).ToBytes()
+	payload, err := meshcore.NewDiscoverResponse(resp, req.PrefixOnly).ToBytes()
 	if err != nil {
 		return
 	}

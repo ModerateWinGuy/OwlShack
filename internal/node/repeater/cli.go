@@ -30,9 +30,8 @@ const (
 	neighborsTextMax = 134
 	// Firmware RegionMap::exportTo(reply, 160): the tree is cut at 159 bytes.
 	regionTreeMax = 159
-	// Firmware exportNamesTo max_len: 160 for `region list`, sizeof(reply_data)-12 for the anon REGIONS reply.
-	regionListMax   = 160
-	regionsReplyMax = meshcore.MaxPacketPayload - 12
+	// Firmware exportNamesTo max_len for `region list`.
+	regionListMax = 160
 
 	// Firmware NodePrefs buffer sizes (StrHelper::strncpy truncates to size-1).
 	maxNameLen          = 31
@@ -380,9 +379,9 @@ func (r *Repeater) advertAfterReply(flood bool) {
 
 // sendText replies as a TXT_MSG datagram, never a PATH-return, with a timestamp never equal to the command's (firmware CLI-view workaround).
 func (r *Repeater) sendText(reqPkt *meshcore.Packet, clientPub [32]byte, secret []byte, senderTS uint32, text string) error {
-	ts := r.uniqueTimestamp()
+	ts := r.node.UniqueTimestamp()
 	if ts == senderTS {
-		ts = r.uniqueTimestamp()
+		ts = r.node.UniqueTimestamp()
 	}
 	me := r.node.Identity().PublicKey()
 	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), meshcore.TxtTypeCLIData<<2, []byte(text))
@@ -680,7 +679,7 @@ func (r *Repeater) cliRegion(cmd string) string {
 	case n >= 3 && sub == "list":
 		switch arg {
 		case "allowed", "denied":
-			if names := regionNames(cfg.Regions, arg == "denied", regionListMax); names != "" {
+			if names := regionList(cfg.Regions, arg == "denied"); names != "" {
 				return names
 			}
 			return "-none-"
@@ -941,13 +940,6 @@ func (r *Repeater) regionLoadLine(line string) (string, bool) {
 	return "", true
 }
 
-// cfgRegions is safe to iterate after unlocking because ApplyRegions replaces the slice rather than mutating it.
-func (r *Repeater) cfgRegions() []config.RepeaterRegion {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cfg.Regions
-}
-
 // cfgSnapshot copies the config under the lock (scalar reads like FloodScope).
 func (r *Repeater) cfgSnapshot() config.RepeaterConfig {
 	r.mu.Lock()
@@ -955,15 +947,26 @@ func (r *Repeater) cfgSnapshot() config.RepeaterConfig {
 	return r.cfg
 }
 
-// regionNames renders RegionMap::exportNamesTo(mask=DENY_FLOOD): names matching `denied`, "*" first, leading "#" stripped, and a name that doesn't fit maxLen skipped.
-func regionNames(regions []config.RepeaterRegion, denied bool, maxLen int) string {
-	var b []byte
+// floodRegionNames is what RegionMap::exportNamesTo(mask=DENY_FLOOD) lists: the names whose DenyFlood is denied, "*" first.
+func floodRegionNames(regions []config.RepeaterRegion, denied bool) []string {
+	var names []string
 	if regionDenies(regions, config.WildcardRegion) == denied {
-		b = append(b, "*,"...)
+		names = append(names, config.WildcardRegion)
 	}
 	for _, rg := range regions {
-		name := strings.TrimPrefix(rg.Name, "#")
-		if rg.Name != config.WildcardRegion && rg.DenyFlood == denied && len(b)+len(name)+2 < maxLen {
+		if rg.Name != config.WildcardRegion && rg.DenyFlood == denied {
+			names = append(names, rg.Name)
+		}
+	}
+	return names
+}
+
+// regionList is the `region list` reply: exportNamesTo into the CLI's 160 bytes, leading "#" stripped and a name that does not fit skipped.
+func regionList(regions []config.RepeaterRegion, denied bool) string {
+	var b []byte
+	for _, name := range floodRegionNames(regions, denied) {
+		name = strings.TrimPrefix(name, "#")
+		if len(b)+len(name)+2 < regionListMax {
 			b = append(append(b, name...), ',')
 		}
 	}

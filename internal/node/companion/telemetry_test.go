@@ -438,7 +438,7 @@ func TestContactHashSize_FramesACKsAndDMs(t *testing.T) {
 	if hs := floodHashSize(t, radio); hs != 3 {
 		t.Errorf("the ACK flooded with %d-byte hashes, want the contact's 3", hs)
 	}
-	c.repeaters = repeater.NewClient(c.node, c.store, c.cfg.ID, c.log, nil, c.pathHashSize, func([]byte) *meshcore.Region { return nil }) // owns the timestamp counter DMs share
+	c.repeaters = repeater.NewClient(c.node, c.store, c.cfg.ID, c.log, nil, c.pathHashSize, func([]byte) *meshcore.Region { return nil }) // owns the send-order lock DMs take
 	if err := c.SendContactMessage(hex.EncodeToString(friend.PublicKeyBytes()), "hi"); err != nil {
 		t.Fatal(err)
 	}

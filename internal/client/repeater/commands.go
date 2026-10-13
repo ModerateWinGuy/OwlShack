@@ -47,7 +47,9 @@ func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 		return ErrNoDirectRoute
 	}
 
-	plaintext := meshcore.BuildTaggedPlaintext(rm.UniqueTimestamp(), meshcore.BuildKeepAliveRequest(since))
+	ts, release := rm.Stamp()
+	defer release()
+	plaintext := meshcore.BuildTaggedPlaintext(ts, meshcore.BuildKeepAliveRequest(since))
 	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
 	if err != nil {
 		return fmt.Errorf("encrypting keep-alive: %w", err)
@@ -207,7 +209,9 @@ func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout 
 	if err != nil {
 		return fmt.Errorf("deriving shared secret: %w", err)
 	}
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.UniqueTimestamp()), 0), txtType<<2|attempt&3, []byte(text))
+	ts, release := rm.Stamp()
+	defer release()
+	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), txtType<<2|attempt&3, []byte(text))
 	msg, err := meshcore.NewTextMessage(rm.node.Identity(), peerIdentity, plaintext, secret)
 	if err != nil {
 		return fmt.Errorf("encrypting CLI: %w", err)
@@ -217,7 +221,9 @@ func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, timeout 
 		return fmt.Errorf("encoding CLI: %w", err)
 	}
 	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
-	if err := meshpath.Send(rm.node, pkt, app.Scope, 0); err != nil {
+	err = meshpath.Send(rm.node, pkt, app.Scope, 0)
+	release()
+	if err != nil {
 		return fmt.Errorf("sending CLI: %w", err)
 	}
 	app.Sent(0, rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout), outPath == nil)
@@ -306,7 +312,9 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 		rm.cliMu.Unlock()
 	}()
 
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.UniqueTimestamp()), 0), meshcore.TxtTypeCLIData<<2, []byte(framedCommand))
+	ts, release := rm.Stamp()
+	defer release()
+	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), meshcore.TxtTypeCLIData<<2, []byte(framedCommand))
 
 	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
 	if err != nil {
@@ -331,7 +339,9 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
 
 	pub := peer.Identity.PublicKey()
-	if err := meshpath.Send(rm.node, pkt, rm.scopeFor(pub[:]), 0); err != nil {
+	err = meshpath.Send(rm.node, pkt, rm.scopeFor(pub[:]), 0)
+	release()
+	if err != nil {
 		return "", fmt.Errorf("sending CLI: %w", err)
 	}
 

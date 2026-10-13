@@ -12,11 +12,13 @@ import (
 	"github.com/OwlShack/OwlShack/internal/config"
 	"github.com/OwlShack/OwlShack/internal/store"
 	"github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/hardware"
 	"github.com/OwlShack/meshcore-go/node"
 )
 
-// relayModem hands the mux received packets and notes when each transmit leaves.
+// relayModem hands the mux received packets, notes when each transmit leaves, and knows its airtime as every real modem does.
 type relayModem struct {
+	node.AirtimeSource
 	mu      sync.Mutex
 	handler func([]byte, float32, int8, bool)
 	sent    []time.Time
@@ -35,6 +37,10 @@ func (m *relayModem) SetDataHandler(h func([]byte, float32, int8, bool)) {
 }
 func (m *relayModem) AddOutboundHandler(func([]byte)) {}
 
+type estAirtime func(int) uint32
+
+func (e estAirtime) EstAirtime(n int) uint32 { return e(n) }
+
 // Firmware waits rand(0..4) slots of the packet's airtime before relaying a flood; with no airtime every relay went out at once.
 func TestRelay_WaitsItsAirtimeSlots(t *testing.T) {
 	ctx := context.Background()
@@ -47,7 +53,7 @@ func TestRelay_WaitsItsAirtimeSlots(t *testing.T) {
 	if err := st.Settings.Set(ctx, &store.Settings{ConnectionType: "kiss", PacketRetentionDays: 7, Freq: &freq, BW: &bw, SF: &sf, CR: &cr}); err != nil {
 		t.Fatal(err)
 	}
-	m := &relayModem{}
+	m := &relayModem{AirtimeSource: estAirtime(hardware.LoRaAirtimeEstimator(&hardware.RadioConfig{FreqHz: 917_375_000, BwHz: 62_500, SF: 7, CR: 5}))}
 	mux := node.NewRadioMux(m)
 	t.Cleanup(mux.Stop)
 	r, err := NewRepeater(config.RepeaterConfig{Name: "rp", PrivateKey: strings.Repeat("22", 32), AdminPassword: "pw"}, mux, st, nil, Hooks{})

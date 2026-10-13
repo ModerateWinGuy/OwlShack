@@ -98,7 +98,7 @@ func (r *Repeater) buildReqResponse(client *store.RepeaterACLEntry, req []byte, 
 		}
 		body, dropped := sensor.BuildReply(perms, r.selfReadings(), entries, statuses, maxBody)
 		if dropped {
-			r.log.Error("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
+			r.log.Info("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
 		}
 		return body, true
 	default:

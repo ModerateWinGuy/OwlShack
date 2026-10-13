@@ -87,7 +87,7 @@ func TestTelemetry_AGuestGetsTheNodesOwnChannelOnly(t *testing.T) {
 	}
 }
 
-// Checked against the packet the send path builds and the frame the requester's companion hands its app: one byte more and one of them drops it.
+// Checked against the path return, the packet the send path builds and the frame the requester's companion hands its app: one byte more and one of them drops it.
 func TestMaxReplyBody_IsTheMostTheRequestersAppReceives(t *testing.T) {
 	secret := bytes.Repeat([]byte{0x5A}, 32)
 	for _, path := range []int{-1, 0, 1, 2, 3, 17, 40} {
@@ -98,6 +98,12 @@ func TestMaxReplyBody_IsTheMostTheRequestersAppReceives(t *testing.T) {
 			route = 1 + path + 1
 		}
 		received := func(body int) bool {
+			if path >= 0 {
+				pp := meshcore.PathPayload{PathLength: meshcore.MakePathLen(1, uint8(path)), Path: req.Path, ExtraType: meshcore.PayloadTypeResponse, Extra: make([]byte, sensor.ReplyTagLen+body)}
+				if _, err := pp.ToBytes(); err != nil {
+					return false
+				}
+			}
 			payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
 				return (&meshcore.Response{Destination: 1, Source: 2, MAC: mac, EncryptedPayload: enc}).ToBytes()
 			}, make([]byte, route+sensor.ReplyTagLen+body))

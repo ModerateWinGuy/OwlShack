@@ -10,6 +10,7 @@ import (
 	"github.com/OwlShack/meshcore-go/node"
 
 	"github.com/OwlShack/OwlShack/internal/buildinfo"
+	"github.com/OwlShack/OwlShack/internal/config"
 	"github.com/OwlShack/OwlShack/internal/sensor"
 	"github.com/OwlShack/OwlShack/internal/store"
 )
@@ -124,4 +125,115 @@ func returned(t *testing.T, radio *recordingRadio, secret, path []byte, pathLen 
 	}
 	t.Fatal("no path return sent")
 	return nil
+}
+
+// anonRepeater answers anon sub-requests from client over a recording radio.
+func anonRepeater(t *testing.T, regions ...config.RepeaterRegion) (*Repeater, *recordingRadio, meshcore.LocalIdentity) {
+	t.Helper()
+	radio := &recordingRadio{}
+	r := telemetryRepeater(t, nil)
+	r.cfg.Name, r.cfg.OwnerInfo, r.cfg.Regions = "Owly", "Wes\nAkl", regions
+	r.node = node.New(meshcore.NewLocalIdentityFromSeed([32]byte{1}), radio)
+	t.Cleanup(r.node.Stop)
+	r.anonLimiter = newRateLimiter(100, time.Minute)
+	return r, radio, meshcore.NewLocalIdentityFromSeed([32]byte{2})
+}
+
+// anonReply sends a direct anon sub-request asking for a reply along path, and gives the reply after its tag and clock.
+func anonReply(t *testing.T, r *Repeater, radio *recordingRadio, client meshcore.LocalIdentity, subType byte, pathLen byte, path []byte) []byte {
+	t.Helper()
+	secret, err := client.SharedSecret(r.node.Identity().Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := append(binary.LittleEndian.AppendUint32(nil, 4242), subType, pathLen)
+	payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
+		return (&meshcore.AnonReq{Destination: r.node.Identity().PublicKey()[0], EphemeralPubKey: client.PublicKey(), MAC: mac, EncryptedPayload: enc}).ToBytes()
+	}, append(plain, path...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	radio.take()
+	before := uint32(time.Now().Unix())
+	r.handleAnonReq(&meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0), Payload: payload})
+	sent := radio.take()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d packets for anon request %d, want 1", len(sent), subType)
+	}
+	pkt, err := meshcore.PacketFromBytes(sent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pkt.IsRouteDirect() || pkt.PathLength != pathLen || !bytes.Equal(pkt.Path, path) || pkt.PayloadType() != meshcore.PayloadTypeResponse {
+		t.Fatalf("reply route %d path_len %#x path %x type %d, want direct %#x %x RESPONSE", pkt.RouteType(), pkt.PathLength, pkt.Path, pkt.PayloadType(), pathLen, path)
+	}
+	resp, err := meshcore.ResponseFromBytes(pkt.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.TrimRight(resp.Decrypt(secret), "\x00")
+	if len(body) < 8 || binary.LittleEndian.Uint32(body) != 4242 || binary.LittleEndian.Uint32(body[4:]) < before {
+		t.Fatalf("reply %x, want [4242][our clock][body]", body)
+	}
+	return body[8:]
+}
+
+// The anon REGIONS, OWNER and BASIC replies are laid out as simple_repeater's handleAnon*Req (MyMesh.cpp:146-205) and go back along the path the request carried.
+func TestAnonSubRequests_FirmwareLayout(t *testing.T) {
+	r, radio, client := anonRepeater(t, config.RepeaterRegion{Name: "#alpha"}, config.RepeaterRegion{Name: "bravo", DenyFlood: true}, config.RepeaterRegion{Name: "*"})
+	path := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}
+	if got := anonReply(t, r, radio, client, meshcore.AnonReqTypeRegions, meshcore.MakePathLen(3, 2), path); string(got) != "*,alpha" {
+		t.Errorf("regions = %q, want *,alpha", got)
+	}
+	if got := anonReply(t, r, radio, client, meshcore.AnonReqTypeOwner, meshcore.MakePathLen(1, 1), path[:1]); string(got) != "Owly\nWes\nAkl" {
+		t.Errorf("owner = %q, want Owly\\nWes\\nAkl", got)
+	}
+	off := true
+	r.cfg.DisableFwd = &off
+	if got := anonReply(t, r, radio, client, meshcore.AnonReqTypeBasic, 0, nil); !bytes.Equal(got, []byte{0x80}) {
+		t.Errorf("basic with forwarding off = %x, want 80", got)
+	}
+}
+
+// A discover request and our answers are laid out as simple_repeater's (MyMesh.cpp:806-813, 846-859): 0x90|type, SNR quarter-dB, the tag, then the key or its 8-byte prefix.
+func TestDiscover_FirmwareLayout(t *testing.T) {
+	r, radio, _ := anonRepeater(t)
+	r.discoverLimiter = newRateLimiter(100, time.Minute)
+	if err := r.sendDiscover(); err != nil {
+		t.Fatal(err)
+	}
+	sent := radio.take()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d packets, want 1", len(sent))
+	}
+	// Zero-hop: a direct header and an empty path, then [0x80][filter][tag:4][since:4].
+	want := append([]byte{meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeControl, 0), 0, 0x80, 1 << meshcore.AdvertTypeRepeater}, binary.LittleEndian.AppendUint32(nil, r.discover.tag)...)
+	if want = append(want, 0, 0, 0, 0); !bytes.Equal(sent[0], want) {
+		t.Errorf("request = %x, want %x", sent[0], want)
+	}
+
+	pub := r.node.Identity().PublicKeyBytes()
+	for _, prefixOnly := range []bool{false, true} {
+		flags := byte(0x80)
+		if prefixOnly {
+			flags |= 1
+		}
+		r.handleControl(&meshcore.Packet{
+			Header:  meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeControl, 0),
+			Payload: []byte{flags, 1 << meshcore.AdvertTypeRepeater, 0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0},
+			SNR:     -6.25, HasSignalInfo: true,
+		})
+		sent = radio.take()
+		if len(sent) != 1 {
+			t.Fatalf("prefixOnly %v: sent %d answers, want 1", prefixOnly, len(sent))
+		}
+		key := pub[:]
+		if prefixOnly {
+			key = pub[:8]
+		}
+		want = append([]byte{0x90 | meshcore.AdvertTypeRepeater, 0xE7, 0x78, 0x56, 0x34, 0x12}, key...)
+		if got := sent[0][2:]; !bytes.Equal(got, want) {
+			t.Errorf("prefixOnly %v: answer = %x (%d bytes), want %x", prefixOnly, got, len(got), want)
+		}
+	}
 }

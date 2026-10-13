@@ -326,21 +326,15 @@ func TestRateLimiter(t *testing.T) {
 	}
 }
 
-// Pins the anon REGIONS reply body against firmware exportNamesTo(mask=DENY_FLOOD).
-func TestRegionsExport(t *testing.T) {
-	r := &Repeater{cfg: config.RepeaterConfig{Regions: []config.RepeaterRegion{
-		{Name: "alpha"}, {Name: "bravo", DenyFlood: true}, {Name: "*"},
-	}}}
-	if got := r.regionsExport(); got != "*,alpha" {
-		t.Errorf("export = %q, want %q", got, "*,alpha")
-	}
-	r.cfg.Regions = nil // no "*" entry ⇒ the wildcard allows flood, as on firmware
-	if got := r.regionsExport(); got != "*" {
+// With no "*" entry the wildcard allows flood, as on firmware, so it is listed alone.
+func TestAnonRegions_NoRegions(t *testing.T) {
+	r, radio, client := anonRepeater(t)
+	if got := anonReply(t, r, radio, client, meshcore.AnonReqTypeRegions, 0, nil); string(got) != "*" {
 		t.Errorf("empty export = %q, want %q", got, "*")
 	}
 }
 
-// exportNamesTo skips a name that doesn't fit and carries on: `region list` gets 160 bytes, the anon REGIONS reply sizeof(reply_data)-12.
+// exportNamesTo skips a name that doesn't fit and carries on: `region list` gets 160 bytes.
 func TestRegionNames_CappedAsFirmware(t *testing.T) {
 	a, b, c, d, e := strings.Repeat("a", 30), strings.Repeat("b", 30), strings.Repeat("c", 30), strings.Repeat("d", 30), strings.Repeat("e", 30)
 	r := newRegionRepeater(t, config.RepeaterRegion{Name: "*"})
@@ -350,9 +344,6 @@ func TestRegionNames_CappedAsFirmware(t *testing.T) {
 	// After "*,", four 30-byte names and a 12-byte one, 139 bytes are written: e needs 171 < max, "nz" 143.
 	if got, want := r.runCLI("region list allowed"), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,nz"; got != want {
 		t.Errorf("list allowed = %q\nwant           %q", got, want)
-	}
-	if got, want := r.regionsExport(), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,"+e; got != want {
-		t.Errorf("anon export = %q\nwant          %q", got, want)
 	}
 	if got := r.runCLI("region list denied"); got != "denied" {
 		t.Errorf("list denied = %q", got)
@@ -807,19 +798,6 @@ func testReconfigure(r *Repeater) func(func(*config.RepeaterConfig)) error {
 		}
 		r.cfg = c
 		return nil
-	}
-}
-
-// Pins the send-order flip: a flood request's accumulated path lists the client's neighbour first.
-func TestReverseHops(t *testing.T) {
-	if got := reverseHops([]byte{1, 2, 3}, 1); string(got) != string([]byte{3, 2, 1}) {
-		t.Errorf("1-byte = %x", got)
-	}
-	if got := reverseHops([]byte{1, 2, 3, 4}, 2); string(got) != string([]byte{3, 4, 1, 2}) {
-		t.Errorf("2-byte = %x", got)
-	}
-	if got := reverseHops(nil, 0); len(got) != 0 {
-		t.Errorf("empty = %x", got)
 	}
 }
 
