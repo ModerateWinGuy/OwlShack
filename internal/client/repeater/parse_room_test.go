@@ -7,7 +7,7 @@ import (
 
 // Pins the ServerStats trailer: bytes 48-52 are n_posted and n_post_push, not rx_air_time_secs.
 func TestParseRoomStatus(t *testing.T) {
-	b := make([]byte, 52)
+	b := make([]byte, 60)                         // 52 bytes padded to the cipher block, as every reply arrives
 	binary.LittleEndian.PutUint16(b[0:2], 4100)   // batt mV
 	binary.LittleEndian.PutUint32(b[20:24], 3600) // uptime
 	binary.LittleEndian.PutUint16(b[42:44], 42)   // last_snr x4 → 10.5

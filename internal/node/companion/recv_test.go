@@ -1,7 +1,6 @@
 package companion
 
 import (
-	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -16,63 +15,6 @@ import (
 	"github.com/OwlShack/OwlShack/internal/api"
 	"github.com/OwlShack/OwlShack/internal/modem"
 )
-
-// plaintext builds a TXT_MSG body the way BaseChatMesh::composeMsgPacket does: attempts 0-3 ride
-// in the flags byte, and a retry past 3 appends a NUL terminator plus the attempt.
-func plaintext(text string, attempt byte) []byte {
-	b := append([]byte{0, 0, 0, 0, attempt & 3}, text...)
-	if attempt > 3 {
-		b = append(b, 0x00, attempt)
-	}
-	return b
-}
-
-func TestParseTextPlaintext(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		in          []byte
-		wantText    string
-		wantAttempt byte
-	}{
-		{"no retry suffix", plaintext("!ping", 0), "!ping", 0},
-		{"attempt 3 still rides in the flags byte", plaintext("!ping", 3), "!ping", 0},
-		{"attempt 4 is hidden after the terminator", plaintext("!ping", 4), "!ping", 4},
-		{"attempt 5", plaintext("!ping", 5), "!ping", 5},
-		{"zero padding is not part of the text", append(plaintext("hi", 0), 0, 0, 0), "hi", 0},
-		{"empty text", plaintext("", 0), "", 0},
-		{"text with spaces survives intact", plaintext("hello there", 7), "hello there", 7},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			text, attempt := parseTextPlaintext(tt.in)
-			if text != tt.wantText {
-				t.Errorf("text = %q, want %q", text, tt.wantText)
-			}
-			if attempt != tt.wantAttempt {
-				t.Errorf("attempt = %d, want %d", attempt, tt.wantAttempt)
-			}
-		})
-	}
-}
-
-// The ack is hashed over [header][text] only, so a retry's suffix must not extend the slice: get
-// this wrong and the sender rejects every ack and retries until it gives up.
-func TestParseTextPlaintext_AckSliceExcludesRetrySuffix(t *testing.T) {
-	t.Parallel()
-
-	for attempt := byte(0); attempt <= 6; attempt++ {
-		pt := plaintext("!ping", attempt)
-		text, _ := parseTextPlaintext(pt)
-		got := len(pt[:5+len(text)])
-		if want := 5 + len("!ping"); got != want {
-			t.Errorf("attempt %d: ack plaintext is %d bytes, want %d", attempt, got, want)
-		}
-	}
-}
 
 func TestRecentDM_CollapsesRetriesOfOneMessage(t *testing.T) {
 	t.Parallel()
@@ -213,9 +155,13 @@ func TestRoomPost_LivePostCarriesItsRegion(t *testing.T) {
 	c.hub = srv.Hub()
 	c.floodScopeOf = func(*meshcore.Packet) string { return "region:nz" }
 
-	body := append(binary.LittleEndian.AppendUint32(nil, uint32(time.Now().Unix())), 0, 1, 2, 3, 4)
+	body := meshcore.BuildSignedTextPlaintext(time.Now(), [4]byte{1, 2, 3, 4}, []byte("hello room"), 0)
+	post, err := meshcore.ParseTextPlaintext(body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pkt := &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeTxtMsg, 0)}
-	c.handleRoomPush(pkt, room.PublicKeyBytes(), hex.EncodeToString(room.PublicKeyBytes()), make([]byte, 32), append(body, "hello room"...))
+	c.handleRoomPush(pkt, room.PublicKeyBytes(), hex.EncodeToString(room.PublicKeyBytes()), make([]byte, 32), body, post)
 
 	var got struct {
 		Data map[string]any `json:"data"`

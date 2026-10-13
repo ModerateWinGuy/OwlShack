@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
@@ -75,7 +76,7 @@ func sentTag(t *testing.T, pkt *meshcore.Packet) uint32 {
 // The request must go out zero-hop, or it is answered by nodes we cannot actually hear.
 func TestStart_SendsZeroHopRequestWithTheTypeFilter(t *testing.T) {
 	f, s, _ := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater, TypeSensor), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater), int(meshcore.AdvertTypeSensor)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.sent) != 1 {
@@ -93,11 +94,23 @@ func TestStart_SendsZeroHopRequestWithTheTypeFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.TypeFilter != 1<<TypeRepeater|1<<TypeSensor {
-		t.Errorf("filter = %#x, want repeaters and sensors (%#x)", req.TypeFilter, 1<<TypeRepeater|1<<TypeSensor)
+	if req.TypeFilter != 1<<meshcore.AdvertTypeRepeater|1<<meshcore.AdvertTypeSensor {
+		t.Errorf("filter = %#x, want repeaters and sensors (%#x)", req.TypeFilter, 1<<meshcore.AdvertTypeRepeater|1<<meshcore.AdvertTypeSensor)
 	}
 	if req.PrefixOnly {
 		t.Error("prefix_only set: the responder would send 8 key bytes and we need the whole key")
+	}
+}
+
+// The request is laid out as simple_repeater's (MyMesh.cpp:846-859): [0x80][filter][tag:4][since:4].
+func TestStart_FirmwareLayout(t *testing.T) {
+	f, s, _ := newFake(t)
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeSensor)), time.Unix(0x01020304, 0)); err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte{0x80, 1 << meshcore.AdvertTypeSensor}, binary.LittleEndian.AppendUint32(nil, sentTag(t, f.sent[0]))...)
+	if want = append(want, 0x04, 0x03, 0x02, 0x01); !bytes.Equal(f.sent[0].Payload, want) {
+		t.Errorf("request = %x, want %x", f.sent[0].Payload, want)
 	}
 }
 
@@ -105,12 +118,12 @@ func TestStart_SendsZeroHopRequestWithTheTypeFilter(t *testing.T) {
 // silently fills our results with nodes we never asked about.
 func TestHandle_IgnoresAnotherScansTag(t *testing.T) {
 	f, s, got := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	pub := make([]byte, 32)
 	pub[0] = 0xAA
-	f.h(resp(t, TypeRepeater, sentTag(t, f.sent[0])+1, pub, 40))
+	f.h(resp(t, meshcore.AdvertTypeRepeater, sentTag(t, f.sent[0])+1, pub, 40))
 	if len(*got) != 0 {
 		t.Errorf("recorded %d results for a foreign tag, want 0", len(*got))
 	}
@@ -119,18 +132,18 @@ func TestHandle_IgnoresAnotherScansTag(t *testing.T) {
 // The filter is advisory on the wire: a responder can answer with a type we did not ask for.
 func TestHandle_DropsATypeTheScanDidNotAskFor(t *testing.T) {
 	f, s, got := newFake(t)
-	if err := s.Start(FilterFor(TypeSensor), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeSensor)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	tag := sentTag(t, f.sent[0])
 	pub := make([]byte, 32)
 	pub[0] = 0xBB
-	f.h(resp(t, TypeRepeater, tag, pub, 40))
+	f.h(resp(t, meshcore.AdvertTypeRepeater, tag, pub, 40))
 	if len(*got) != 0 {
 		t.Fatalf("a repeater answered a sensor-only scan and was recorded: %+v", *got)
 	}
 	pub[0] = 0xCC
-	f.h(resp(t, TypeSensor, tag, pub, 40))
+	f.h(resp(t, meshcore.AdvertTypeSensor, tag, pub, 40))
 	if len(*got) != 1 {
 		t.Fatalf("the sensor was not recorded, got %d results", len(*got))
 	}
@@ -140,12 +153,12 @@ func TestHandle_DropsATypeTheScanDidNotAskFor(t *testing.T) {
 // again would report a link four times better than it is.
 func TestHandle_RecordsBothDirectionsInRealDB(t *testing.T) {
 	f, s, got := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	pub := make([]byte, 32)
 	pub[0] = 0xDD
-	f.h(resp(t, TypeRepeater, sentTag(t, f.sent[0]), pub, 26)) // 26 quarter-dB = 6.5 dB
+	f.h(resp(t, meshcore.AdvertTypeRepeater, sentTag(t, f.sent[0]), pub, 26)) // 26 quarter-dB = 6.5 dB
 	if len(*got) != 1 {
 		t.Fatalf("got %d results, want 1", len(*got))
 	}
@@ -164,11 +177,11 @@ func TestHandle_RecordsBothDirectionsInRealDB(t *testing.T) {
 // Our own node answers a broadcast it hears; recording it would show every operator a phantom neighbour.
 func TestHandle_SkipsOurself(t *testing.T) {
 	f, s, got := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	self := f.id.Identity.PublicKey()
-	f.h(resp(t, TypeRepeater, sentTag(t, f.sent[0]), self[:], 40))
+	f.h(resp(t, meshcore.AdvertTypeRepeater, sentTag(t, f.sent[0]), self[:], 40))
 	if len(*got) != 0 {
 		t.Errorf("recorded ourselves as a neighbour: %+v", *got)
 	}
@@ -177,12 +190,12 @@ func TestHandle_SkipsOurself(t *testing.T) {
 // A flooded control frame is not zero-hop, so it says nothing about radio range.
 func TestHandle_IgnoresARoutedResponse(t *testing.T) {
 	f, s, got := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	pub := make([]byte, 32)
 	pub[0] = 0xEE
-	pkt := resp(t, TypeRepeater, sentTag(t, f.sent[0]), pub, 40)
+	pkt := resp(t, meshcore.AdvertTypeRepeater, sentTag(t, f.sent[0]), pub, 40)
 	pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeControl, 0)
 	f.h(pkt)
 	if len(*got) != 0 {
@@ -193,14 +206,14 @@ func TestHandle_IgnoresARoutedResponse(t *testing.T) {
 // The same node answering twice must not fire the live-update callback twice.
 func TestHandle_PublishesEachNodeOnce(t *testing.T) {
 	f, s, got := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	tag := sentTag(t, f.sent[0])
 	pub := make([]byte, 32)
 	pub[0] = 0xFF
-	f.h(resp(t, TypeRepeater, tag, pub, 40))
-	f.h(resp(t, TypeRepeater, tag, pub, 44))
+	f.h(resp(t, meshcore.AdvertTypeRepeater, tag, pub, 40))
+	f.h(resp(t, meshcore.AdvertTypeRepeater, tag, pub, 44))
 	if len(*got) != 1 {
 		t.Errorf("published %d times for one node, want 1", len(*got))
 	}
@@ -213,14 +226,14 @@ func TestHandle_PublishesEachNodeOnce(t *testing.T) {
 // The results live in a map, so without an explicit order the table reshuffles on every page load.
 func TestState_OrdersNewestFirst(t *testing.T) {
 	f, s, _ := newFake(t)
-	if err := s.Start(FilterFor(TypeRepeater), time.Time{}); err != nil {
+	if err := s.Start(FilterFor(int(meshcore.AdvertTypeRepeater)), time.Time{}); err != nil {
 		t.Fatal(err)
 	}
 	tag := sentTag(t, f.sent[0])
 	for _, b := range []byte{0x11, 0x22, 0x33} {
 		pub := make([]byte, 32)
 		pub[0] = b
-		f.h(resp(t, TypeRepeater, tag, pub, 40))
+		f.h(resp(t, meshcore.AdvertTypeRepeater, tag, pub, 40))
 	}
 	_, _, results := s.State()
 	if len(results) != 3 {

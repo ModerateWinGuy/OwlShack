@@ -79,9 +79,9 @@ func (c *Companion) telemetryPermissions(granted byte) byte {
 		mode *string
 		bit  byte
 	}{
-		{c.conf().TelemetryBase, sensor.PermBase},
-		{c.conf().TelemetryLocation, sensor.PermLocation},
-		{c.conf().TelemetryEnvironment, sensor.PermEnvironment},
+		{c.conf().TelemetryBase, meshcore.TelemPermBase},
+		{c.conf().TelemetryLocation, meshcore.TelemPermLocation}, // the firmware sends position only from a GPS module, and no host here has one
+		{c.conf().TelemetryEnvironment, meshcore.TelemPermEnvironment},
 	}
 	var perms byte
 	for _, cl := range classes {
@@ -98,7 +98,7 @@ func (c *Companion) telemetryPermissions(granted byte) byte {
 // telemetryReply is the node's own readings then the operator's map; false is the silence the firmware keeps without base permission.
 func (c *Companion) telemetryReply(granted, mask byte, req *meshcore.Packet) ([]byte, bool) {
 	perms := c.telemetryPermissions(granted) &^ mask
-	if perms&sensor.PermBase == 0 {
+	if perms&meshcore.TelemPermBase == 0 {
 		return nil, false
 	}
 
@@ -110,7 +110,7 @@ func (c *Companion) telemetryReply(granted, mask byte, req *meshcore.Packet) ([]
 	maxBody := sensor.MaxReplyBody(req)
 	body, dropped := sensor.BuildReply(perms, c.selfReadings(), entries, statuses, maxBody)
 	if dropped {
-		c.log.Error("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
+		c.log.Info("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
 	}
 	return body, true
 }

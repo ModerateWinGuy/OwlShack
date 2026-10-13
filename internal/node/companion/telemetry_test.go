@@ -110,7 +110,7 @@ func TestTelemetry_ClassModes(t *testing.T) {
 				TelemetryBase:        mode(config.TelemetryContacts),
 				TelemetryEnvironment: mode(config.TelemetrySelected),
 			},
-			granted: sensor.PermEnvironment,
+			granted: meshcore.TelemPermEnvironment,
 			want:    "01740190026700E1",
 		},
 		{
@@ -119,7 +119,7 @@ func TestTelemetry_ClassModes(t *testing.T) {
 				TelemetryBase:        mode(config.TelemetryContacts),
 				TelemetryEnvironment: mode(config.TelemetryContacts),
 			},
-			mask: sensor.PermEnvironment,
+			mask: meshcore.TelemPermEnvironment,
 			want: "01740190",
 		},
 		{
@@ -438,7 +438,7 @@ func TestContactHashSize_FramesACKsAndDMs(t *testing.T) {
 	if hs := floodHashSize(t, radio); hs != 3 {
 		t.Errorf("the ACK flooded with %d-byte hashes, want the contact's 3", hs)
 	}
-	c.repeaters = repeater.NewClient(c.node, c.store, c.cfg.ID, c.log, nil, c.pathHashSize, func([]byte) *meshcore.Region { return nil }) // owns the timestamp counter DMs share
+	c.repeaters = repeater.NewClient(c.node, c.store, c.cfg.ID, c.log, nil, c.pathHashSize, func([]byte) *meshcore.Region { return nil }) // owns the send-order lock DMs take
 	if err := c.SendContactMessage(hex.EncodeToString(friend.PublicKeyBytes()), "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ func TestTelemetry_AGrantCannotOpenADeniedClass(t *testing.T) {
 		Latitude:             &lat, Longitude: &lon,
 	}, oneRow(2, meshcore.LPPTemperature, sensor.Temperature, 22.5))
 
-	got, _ := replyHex(t, c, sensor.PermLocation|sensor.PermEnvironment, 0)
+	got, _ := replyHex(t, c, meshcore.TelemPermLocation|meshcore.TelemPermEnvironment, 0)
 	if strings.Contains(got, "0188") {
 		t.Errorf("reply %s carries a position the operator denied", got)
 	}

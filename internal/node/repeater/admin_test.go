@@ -248,7 +248,7 @@ func TestTelemetryBody(t *testing.T) {
 	ds := DeviceStats{BatteryMV: 4168, HaveBattery: true}
 	r := &Repeater{boardStats: func() DeviceStats { return ds }}
 
-	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	if !ok {
 		t.Fatal("telemetry request answered nothing")
 	}
@@ -265,7 +265,7 @@ func TestTelemetryBody(t *testing.T) {
 	}
 
 	ds.MCUTempC, ds.HaveMCUTemp = 22.7, true
-	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	readings, err = meshcore.LPPDecode(body)
 	if err != nil {
 		t.Fatalf("LPPDecode with temp: %v", err)
@@ -288,8 +288,7 @@ func TestNeighboursBody(t *testing.T) {
 	r.neighbors.m[a] = &neighbor{pubkey: a, snr: 5.0, heard: now}
 	r.neighbors.m[b] = &neighbor{pubkey: b, snr: -2.5, heard: now.Add(-30 * time.Second)}
 
-	// params: [version:1][count:1][offset:2][order_by:1][prefix_len:1]
-	params := []byte{0, 10, 0, 0, 2, 6}
+	params := meshcore.NeighboursRequest{Count: 10, OrderBy: 2, PrefixLen: 6}
 	body := r.neighboursBody(params)
 
 	if total := binary.LittleEndian.Uint16(body[0:2]); total != 2 {
@@ -327,21 +326,15 @@ func TestRateLimiter(t *testing.T) {
 	}
 }
 
-// Pins the anon REGIONS reply body against firmware exportNamesTo(mask=DENY_FLOOD).
-func TestRegionsExport(t *testing.T) {
-	r := &Repeater{cfg: config.RepeaterConfig{Regions: []config.RepeaterRegion{
-		{Name: "alpha"}, {Name: "bravo", DenyFlood: true}, {Name: "*"},
-	}}}
-	if got := r.regionsExport(); got != "*,alpha" {
-		t.Errorf("export = %q, want %q", got, "*,alpha")
-	}
-	r.cfg.Regions = nil // no "*" entry ⇒ the wildcard allows flood, as on firmware
-	if got := r.regionsExport(); got != "*" {
+// With no "*" entry the wildcard allows flood, as on firmware, so it is listed alone.
+func TestAnonRegions_NoRegions(t *testing.T) {
+	r, radio, client := anonRepeater(t)
+	if got := anonReply(t, r, radio, client, meshcore.AnonReqTypeRegions, 0, nil); string(got) != "*" {
 		t.Errorf("empty export = %q, want %q", got, "*")
 	}
 }
 
-// exportNamesTo skips a name that doesn't fit and carries on: `region list` gets 160 bytes, the anon REGIONS reply sizeof(reply_data)-12.
+// exportNamesTo skips a name that doesn't fit and carries on: `region list` gets 160 bytes.
 func TestRegionNames_CappedAsFirmware(t *testing.T) {
 	a, b, c, d, e := strings.Repeat("a", 30), strings.Repeat("b", 30), strings.Repeat("c", 30), strings.Repeat("d", 30), strings.Repeat("e", 30)
 	r := newRegionRepeater(t, config.RepeaterRegion{Name: "*"})
@@ -351,9 +344,6 @@ func TestRegionNames_CappedAsFirmware(t *testing.T) {
 	// After "*,", four 30-byte names and a 12-byte one, 139 bytes are written: e needs 171 < max, "nz" 143.
 	if got, want := r.runCLI("region list allowed"), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,nz"; got != want {
 		t.Errorf("list allowed = %q\nwant           %q", got, want)
-	}
-	if got, want := r.regionsExport(), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,"+e; got != want {
-		t.Errorf("anon export = %q\nwant          %q", got, want)
 	}
 	if got := r.runCLI("region list denied"); got != "denied" {
 		t.Errorf("list denied = %q", got)
@@ -372,7 +362,7 @@ func TestNeighboursOrderBy(t *testing.T) {
 	r.neighbors.m[c] = &neighbor{pubkey: c, snr: 0.0, heard: now.Add(-30 * time.Second)}
 
 	firstPrefix := func(orderBy byte) byte {
-		params := []byte{0, 10, 0, 0, orderBy, 6}
+		params := meshcore.NeighboursRequest{Count: 10, OrderBy: orderBy, PrefixLen: 6}
 		return r.neighboursBody(params)[4]
 	}
 	if got := firstPrefix(0); got != 0x02 {
@@ -588,7 +578,7 @@ func TestNeighboursBodyCap(t *testing.T) {
 		k[0] = byte(i)
 		r.neighbors.m[k] = &neighbor{pubkey: k, heard: now}
 	}
-	body := r.neighboursBody([]byte{0, 255, 0, 0, 0, 6})
+	body := r.neighboursBody(meshcore.NeighboursRequest{Count: 255, PrefixLen: 6})
 	if total := binary.LittleEndian.Uint16(body[0:2]); total != 40 {
 		t.Errorf("total = %d, want 40", total)
 	}
@@ -611,6 +601,9 @@ func TestStatusBodyCounters(t *testing.T) {
 	}
 
 	b := r.statusBody()
+	if len(b) != 56 {
+		t.Fatalf("status body is %d bytes, want the firmware's 56 (MyMesh.h:44-60)", len(b))
+	}
 	for _, c := range []struct {
 		name string
 		off  int
@@ -808,19 +801,6 @@ func testReconfigure(r *Repeater) func(func(*config.RepeaterConfig)) error {
 	}
 }
 
-// Pins the send-order flip: a flood request's accumulated path lists the client's neighbour first.
-func TestReverseHops(t *testing.T) {
-	if got := reverseHops([]byte{1, 2, 3}, 1); string(got) != string([]byte{3, 2, 1}) {
-		t.Errorf("1-byte = %x", got)
-	}
-	if got := reverseHops([]byte{1, 2, 3, 4}, 2); string(got) != string([]byte{3, 4, 1, 2}) {
-		t.Errorf("2-byte = %x", got)
-	}
-	if got := reverseHops(nil, 0); len(got) != 0 {
-		t.Errorf("empty = %x", got)
-	}
-}
-
 // Pins the firmware's unknown-command reply strings and the parsing helpers behind `set`.
 func TestCLIFirmwareReplies(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{Name: "rp"}}
@@ -925,13 +905,13 @@ func TestTelemetryHonoursTheRequestersInverseMask(t *testing.T) {
 	}{
 		{"no params means everything", nil, 2},
 		{"zero mask means everything", []byte{0x00}, 2},
-		{"excluding environment leaves base alone", []byte{sensor.PermEnvironment}, 2},
-		{"excluding location leaves base alone", []byte{sensor.PermLocation}, 2},
-		{"excluding base still sends it", []byte{sensor.PermBase}, 2},
+		{"excluding environment leaves base alone", []byte{meshcore.TelemPermEnvironment}, 2},
+		{"excluding location leaves base alone", []byte{meshcore.TelemPermLocation}, 2},
+		{"excluding base still sends it", []byte{meshcore.TelemPermBase}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, ok := newRepeater().buildReqResponse(
-				&store.RepeaterACLEntry{Permissions: permGuest}, meshcore.ReqTypeGetTelemetryData, tc.params, sensor.MaxReplyBody(nil))
+				&store.RepeaterACLEntry{Permissions: permGuest}, append([]byte{meshcore.ReqTypeGetTelemetryData}, tc.params...), sensor.MaxReplyBody(nil))
 			if !ok {
 				t.Fatal("telemetry request was not answered; the firmware answers a guest too")
 			}
@@ -956,7 +936,7 @@ func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
 	ds := DeviceStats{MCUTempC: 35.2, HaveMCUTemp: true} // no battery, as on a Raspberry Pi
 	r := &Repeater{boardStats: func() DeviceStats { return ds }}
 
-	body, _ := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	body, _ := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	readings, err := meshcore.LPPDecode(body)
 	if err != nil {
 		t.Fatalf("LPPDecode: %v", err)
@@ -968,7 +948,7 @@ func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
 
 	// A board that does report a battery still publishes it.
 	ds.BatteryMV, ds.HaveBattery = 4168, true
-	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, meshcore.ReqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	readings, _ = meshcore.LPPDecode(body)
 	// LPP voltage has 0.01 V resolution and the encoder rounds, so 4168 mV comes back as 4.17.
 	if len(readings) != 2 || readings[0].Value != 4.17 {

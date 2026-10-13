@@ -529,10 +529,7 @@ func (b *backend) radioStats(poll bool) (api.RadioStatsInfo, bool) {
 		out.TxRequeued = tx.BusyRequeued
 		out.TxDroppedBusy = tx.BusyDropped
 		out.TxDroppedQueue = tx.QueueRejected
-		// ponytail: a throwaway radio, as meshcore-go v1.7.0 gives the mux's queue length only to a radio on it; read the mux once it exports it.
-		r := b.mux.NewRadio()
-		out.TxQueueLen = r.TxQueueLen()
-		r.Close()
+		out.TxQueueLen = b.mux.TxQueueLen()
 	}
 	return out, true
 }

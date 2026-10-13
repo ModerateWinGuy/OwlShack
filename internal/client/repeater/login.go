@@ -58,22 +58,17 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	}
 
 	// The firmware's sendLogin sends at most 15 bytes, all a node keeps of a password.
-	password = password[:min(len(password), 15)]
-	var plaintext []byte
+	req := meshcore.LoginRequest{Password: password[:min(len(password), 15)]}
 	if roomSyncSince != nil {
-		// Room login: [timestamp:4][sync_since:4][password:N]
-		plaintext = make([]byte, 8+len(password))
-		binary.LittleEndian.PutUint32(plaintext[:4], rm.UniqueTimestamp())
-		binary.LittleEndian.PutUint32(plaintext[4:8], *roomSyncSince)
-		copy(plaintext[8:], password)
-	} else {
-		// Repeater login: [timestamp:4][password:N]
-		plaintext = make([]byte, 4+len(password))
-		binary.LittleEndian.PutUint32(plaintext[:4], rm.UniqueTimestamp())
-		copy(plaintext[4:], password)
+		req.SyncSince = *roomSyncSince
 	}
-
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, plaintext)
+	body, err := meshcore.BuildLoginRequest(req, roomSyncSince != nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrRejected, err)
+	}
+	ts, release := rm.Stamp()
+	defer release()
+	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(ts, body))
 	if err != nil {
 		return nil, fmt.Errorf("encrypting login: %w", err)
 	}
@@ -119,7 +114,9 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
 
 	pub := peer.Identity.PublicKey()
-	if err := meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0); err != nil {
+	err = meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0)
+	release()
+	if err != nil {
 		return nil, fmt.Errorf("sending login: %w", err)
 	}
 

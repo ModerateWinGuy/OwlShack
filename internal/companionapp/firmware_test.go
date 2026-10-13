@@ -3,6 +3,7 @@ package companionapp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"io"
 	"strings"
 	"testing"
@@ -337,5 +338,73 @@ func TestNewKeyDropsApp(t *testing.T) {
 	a.nc.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := a.nc.Read(make([]byte, 1)); err != io.EOF {
 		t.Errorf("read after the new key: %v, want the app dropped", err)
+	}
+}
+
+// A DM's ACK is sha256 of [timestamp][flags][text] and the sender's key, the extended attempt and a random byte (BaseChatMesh.cpp:241-248); a room push's is the bare hash keyed by ours (:290).
+func TestReceivedTextAcks_FirmwareLayout(t *testing.T) {
+	r := newRig(t)
+	bob := r.contactOf(t, "Bob", "CHAT")
+	room := r.contactOf(t, "Room", "ROOM")
+	self := r.comp.Node().Identity()
+	hear := func(from meshcore.LocalIdentity, plain []byte) []byte {
+		t.Helper()
+		secret, err := from.SharedSecret(self.Identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := meshcore.NewTextMessage(from, self.Identity, plain, secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, _ := msg.ToBytes()
+		r.modem.hear(t, &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeTxtMsg, 0), Payload: payload})
+		return r.modem.next(t, notType(meshcore.PayloadTypeAck)).Payload
+	}
+	hash := func(data, pub []byte) []byte {
+		h := sha256.Sum256(append(append([]byte(nil), data...), pub...))
+		return h[:4]
+	}
+
+	// Attempt 5 rides as 1 in the flags and in full after the text's terminator.
+	dm := append(le32(nil, 1700000000), 1)
+	dm = append(append(dm, "hi bob"...), 0, 5)
+	if ack := hear(bob, dm); len(ack) != 6 || !bytes.Equal(ack[:4], hash(dm[:11], bob.PublicKeyBytes())) || ack[4] != 5 {
+		t.Errorf("DM ack = % x, want hash % x then attempt 05", ack, hash(dm[:11], bob.PublicKeyBytes()))
+	}
+	post := append(le32(nil, 1700000001), meshcore.TextFlags(meshcore.TxtTypeSignedPlain)|2, 1, 2, 3, 4)
+	post = append(post, "a post"...)
+	if ack := hear(room, post); !bytes.Equal(ack, hash(post, self.PublicKeyBytes())) {
+		t.Errorf("room push ack = % x, want % x", ack, hash(post, self.PublicKeyBytes()))
+	}
+}
+
+// The app's status and telemetry requests carry the firmware's 9-byte body with its random tail (BaseChatMesh.cpp:690-698).
+func TestAppRequestBodiesHaveRandomTail(t *testing.T) {
+	r := newRig(t)
+	rpt := r.contactOf(t, "Rpt", "REPEATER")
+	a := r.dial(t)
+	for _, tc := range []struct {
+		reqType byte
+		frame   []byte
+	}{
+		{meshcore.ReqTypeGetStatus, append([]byte{mc.CmdSendStatusReq}, rpt.PublicKeyBytes()...)},
+		{meshcore.ReqTypeGetTelemetryData, append([]byte{mc.CmdSendTelemetryReq, 0, 0, 0}, rpt.PublicKeyBytes()...)},
+	} {
+		var tails [][]byte
+		for range 2 {
+			a.send(tc.frame...)
+			if f := a.next(); f[0] != mc.RespSent {
+				t.Fatalf("request %d answered % x", tc.reqType, f)
+			}
+			body := r.opened(t, rpt, r.modem.next(t, notType(meshcore.PayloadTypeReq)))[4:]
+			if !bytes.Equal(body[:5], []byte{tc.reqType, 0, 0, 0, 0}) || !bytes.Equal(body[9:], make([]byte, len(body)-9)) {
+				t.Errorf("request %d body = % x, want type, four zeros, four random", tc.reqType, body)
+			}
+			tails = append(tails, body[5:9])
+		}
+		if bytes.Equal(tails[0], tails[1]) {
+			t.Errorf("request %d: two sends carried the same tail % x", tc.reqType, tails[0])
+		}
 	}
 }

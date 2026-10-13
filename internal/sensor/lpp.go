@@ -12,19 +12,14 @@ import (
 // ChannelSelf is the channel the firmware keeps for a node's own readings; sensors start above it.
 const ChannelSelf = 1
 
-// MaxTelemetryPayload leaves the node's own 8 bytes (voltage and temperature) in 153, the least MaxReplyBody gives a direct route or a flood path of up to 17 bytes.
+// MaxTelemetryPayload leaves the node's own 8 bytes (voltage and temperature) in 153, the least MaxReplyBody gives a direct route or a flood path of up to 4 bytes; a longer path sends the node's own readings only.
 const MaxTelemetryPayload = 153 - 8
 
 // MaxChannel is the highest channel offered; the firmware stops at 17 (MAX_ACTIVE_SENSORS of 16).
 const MaxChannel = 32
 
-// Telemetry permission classes (firmware SensorManager.h); a requester masks classes out, not in.
-const (
-	PermBase        byte = 0x01 // the node itself: battery, MCU temperature
-	PermLocation    byte = 0x02 // position, which the firmware sends only from a GPS module, and no host here has one
-	PermEnvironment byte = 0x04 // everything the operator attached
-	PermAll         byte = 0xFF
-)
+// PermAll is every meshcore.TelemPerm* class; a requester masks classes out, not in.
+const PermAll byte = 0xFF
 
 // Reply framing, from the firmware's reply_data buffer and the requesting companion's push to its app.
 const (
@@ -32,18 +27,23 @@ const (
 	cipherBlock   = 16
 	maxFrame      = 176 // MAX_FRAME_SIZE: the requester's companion drops a longer frame to its app
 	pushHeaderLen = 8   // PUSH_CODE_TELEMETRY_RESPONSE, a reserved byte and a 6-byte key prefix
+	// maxCombinedPath is the firmware's MAX_COMBINED_PATH: createPathReturn refuses path + reply + 5 past it (Mesh.cpp:440,452).
+	maxCombinedPath = meshcore.MaxPacketPayload - 2 - cipherBlock
 	// ReplyTagLen is the client timestamp a reply reflects back, ahead of the body.
 	ReplyTagLen = 4
 )
 
-// MaxReplyBody is one reply's body in whole cipher blocks, within the packet and within the requester's frame, which carries them less the route and tag.
+// MaxReplyBody is one reply's body in whole cipher blocks, within the packet and within the requester's frame, which carries them less the route and tag; a flood reply also fits its path return.
 func MaxReplyBody(pkt *meshcore.Packet) int {
 	route := 0
 	if pkt != nil && pkt.IsRouteFlood() {
 		route = 1 + len(pkt.Path) + 1 // path length byte, the path, the wrapped payload type
 	}
 	plain := min(meshcore.MaxPacketPayload-respHeaderLen, maxFrame-pushHeaderLen+route+ReplyTagLen) / cipherBlock * cipherBlock
-	return plain - route - ReplyTagLen
+	if route == 0 {
+		return plain - ReplyTagLen
+	}
+	return min(plain-route, maxCombinedPath-5-len(pkt.Path)) - ReplyTagLen
 }
 
 // LPPType is one CayenneLPP type a reading can be published as; only single-value types are listed.

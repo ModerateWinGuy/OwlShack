@@ -119,12 +119,27 @@ func TestParseSeries_BlockPadding(t *testing.T) {
 	}
 }
 
-// The firmware decodes into a uint32, so a 6- or 9-byte value keeps only its low 4 bytes (LPPDataHelpers.h getFloat).
-func TestLPPGetFloat_KeepsTheLowFourBytesLikeFirmware(t *testing.T) {
-	if got := lppGetFloat([]byte{0xAA, 0xBB, 0x00, 0x00, 0x01, 0x00}, 100, true); got != 2.56 {
-		t.Errorf("6-byte value = %v, want 2.56", got)
+// Firmware putFloat holds a value in a uint32, so a 6-byte gyrometer reading has two zero top bytes; channel 0 ends the data (LPPReader::readHeader).
+func TestParseSeries_FirmwareGolden(t *testing.T) {
+	body := []byte{0x00, 0xF1, 0x53, 0x65}                                          // now = 1700000000
+	body = append(body, 1, meshcore.LPPVoltage, 0x01, 0x73, 0x01, 0xA0, 0x01, 0x8E) // 3.71 / 4.16 / 3.98 V
+	body = append(body, 2, meshcore.LPPGyrometer,
+		0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // 256, multiplier 1
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x64, // 100
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // 0
+	body = append(body, 0, meshcore.LPPVoltage, 0x01, 0x73, 0x01, 0xA0, 0x01, 0x8E)
+
+	s, err := ParseSeries(body)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := lppGetFloat([]byte{0xFF, 0xFE}, 100, true); got != -0.02 {
-		t.Errorf("signed 2-byte value = %v, want -0.02", got)
+	if s.NodeTime != 1_700_000_000 || len(s.Entries) != 2 {
+		t.Fatalf("got time %d and %d entries, want 1700000000 and 2: %+v", s.NodeTime, len(s.Entries), s.Entries)
+	}
+	if e := s.Entries[0]; e.Channel != 1 || e.Min != 3.71 || e.Max != 4.16 || e.Avg != 3.98 || e.Unit != "V" {
+		t.Errorf("voltage = %+v", e)
+	}
+	if e := s.Entries[1]; e.Channel != 2 || e.Min != 256 || e.Max != 100 || e.Avg != 0 {
+		t.Errorf("gyrometer = %+v", e)
 	}
 }

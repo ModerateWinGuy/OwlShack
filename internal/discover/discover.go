@@ -15,17 +15,6 @@ import (
 	"github.com/OwlShack/meshcore-go/node"
 )
 
-// Firmware ADV_TYPE_* (AdvertDataHelpers.h); the request's filter byte is a bitmask over these.
-// Only TypeRepeater and TypeSensor can actually answer: simple_room_server inherits the empty base
-// Mesh::onControlDataRecv, and companion_radio hands the frame to its phone app without replying.
-// The other two stay defined because a response carries its type and we still label what arrives.
-const (
-	TypeChat     = 1
-	TypeRepeater = 2
-	TypeRoom     = 3
-	TypeSensor   = 4
-)
-
 // Window is how long responses are collected. Responders answer after a random delay widened x4
 // (getRetransmitDelay*4) because many reply to one request; that worst case is ten times the
 // packet's airtime, so this has to stay well clear of it on the slowest presets.
@@ -68,7 +57,7 @@ func New(send Sender, log *slog.Logger, onResult func(Result)) *Service {
 	return s
 }
 
-// FilterFor builds the request's type bitmask. One request can ask for several types at once.
+// FilterFor builds the request's bitmask over meshcore.AdvertType*. One request can ask for several types at once.
 func FilterFor(types ...int) byte {
 	var f byte
 	for _, t := range types {
@@ -82,7 +71,8 @@ func FilterFor(types ...int) byte {
 // after it. Zero asks everyone.
 func (s *Service) Start(filter byte, since time.Time) error {
 	if filter == 0 {
-		filter = FilterFor(TypeRepeater, TypeSensor)
+		// Only these answer: simple_room_server inherits the empty Mesh::onControlDataRecv, and companion_radio hands the frame to its app.
+		filter = FilterFor(int(meshcore.AdvertTypeRepeater), int(meshcore.AdvertTypeSensor))
 	}
 	var tagB [4]byte
 	if _, err := crand.Read(tagB[:]); err != nil {
@@ -90,11 +80,9 @@ func (s *Service) Start(filter byte, since time.Time) error {
 	}
 	tag := binary.LittleEndian.Uint32(tagB[:])
 
-	data := make([]byte, 9)
-	data[0] = filter
-	binary.LittleEndian.PutUint32(data[1:5], tag)
+	req := meshcore.DiscoverRequest{TypeFilter: filter, Tag: tag}
 	if !since.IsZero() {
-		binary.LittleEndian.PutUint32(data[5:9], uint32(since.Unix()))
+		req.Since = uint32(since.Unix())
 	}
 
 	s.mu.Lock()
@@ -102,10 +90,7 @@ func (s *Service) Start(filter byte, since time.Time) error {
 	s.results = map[string]Result{}
 	s.mu.Unlock()
 
-	payload, err := (&meshcore.Control{
-		Flags: byte(meshcore.ControlSubTypeDiscoverReq << 4), // prefix_only=0: we want the full key
-		Data:  data,
-	}).ToBytes()
+	payload, err := meshcore.NewDiscoverRequest(req).ToBytes()
 	if err != nil {
 		return err
 	}

@@ -36,7 +36,7 @@ func BuildReply(perms byte, self SelfReadings, entries []ChannelEntry, statuses 
 	}
 	build := func(sensors bool) []byte {
 		enc := meshcore.NewLPPEncoder()
-		if perms&PermBase != 0 {
+		if perms&meshcore.TelemPermBase != 0 {
 			// Always a voltage, as the firmware always sends one: a mains-powered node says 0, not nothing.
 			if mapped[meshcore.LPPVoltage] {
 				own(enc, meshcore.LPPVoltage)
@@ -44,10 +44,10 @@ func BuildReply(perms byte, self SelfReadings, entries []ChannelEntry, statuses 
 				enc.AddVoltage(ChannelSelf, self.BatteryVolts)
 			}
 		}
-		if sensors && perms&PermEnvironment != 0 {
+		if sensors && perms&meshcore.TelemPermEnvironment != 0 {
 			encodeEntries(enc, entries, statuses, func(e ChannelEntry) bool { return e.Channel != ChannelSelf })
 		}
-		if perms&PermBase != 0 {
+		if perms&meshcore.TelemPermBase != 0 {
 			if mapped[meshcore.LPPTemperature] {
 				own(enc, meshcore.LPPTemperature)
 			} else if self.TempC != nil {
