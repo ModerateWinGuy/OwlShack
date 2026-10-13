@@ -26,7 +26,7 @@ regenerates `web/frontend/src/data/radio-presets.json` from it; don't hand-edit)
 |---|---|
 | Backend | Go 1.27+, **no CGO**, `modernc.org/sqlite`, `embed.FS` for the SPA |
 | Frontend | **React 19** (not Preact) + Vite 6 + TS 5.7, Tailwind v4, shadcn/ui (new-york), `react-router-dom@7`, `sonner`, Leaflet |
-| Mesh proto | `github.com/OwlShack/meshcore-go` v1.8.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
+| Mesh proto | `github.com/OwlShack/meshcore-go` v1.9.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
 | Real-time | WS `/api/ws`, topics `peers` `packets` `messages` `traces` `repeaterNeighbors` `discovered` `sensors` |
 | Local sensors | `periph.io/x/conn` + `periph.io/x/host` for I2C; `github.com/expr-lang/expr` for derived sensors |
 | Config | SQLite relational tables; config files are one-time imports |
@@ -108,9 +108,9 @@ MeshCore feed (a feed that is down or unusable only warns).
 node's counter; the repeater node has its own. Remote firmware drops a
 timestamp `<=` the last one it saw as a replay, and treats an equal CLI
 timestamp as a retry it never answers, so two sends in one second silently lose
-the second. The stamp only orders stamps, not sends: a remote-admin send takes
-`Client.Stamp()` and releases it right after the enqueue, or two concurrent sends
-can reach the queue out of order and the lower one is dropped.
+the second. The stamp only orders stamps, not sends: a remote-admin send stamps
+and enqueues inside `node.SendStamped`, or two concurrent sends can reach the
+queue out of order and the lower one is dropped.
 
 **`internal/api` never imports the domain.** The seam is the `api.Backend`
 interface ([`internal/api/backend.go`](./internal/api/backend.go)), implemented
