@@ -123,6 +123,8 @@ top until tagged.
 
 ### Fixed
 
+- **Your repeater waits its turn before relaying a packet, as firmware repeaters do.** It relayed
+  everything the moment it heard it, so it collided with other repeaters relaying the same packet.
 - **A room, repeater or sensor you haven't added as a contact shows its own name.** Its page was
   titled just "Room", "Repeater" or "Sensor"; it now uses the name from its advert.
 - **A room server opened from Contacts, Monitoring, the Repeaters list or a message thread shows
