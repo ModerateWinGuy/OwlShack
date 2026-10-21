@@ -10,28 +10,32 @@ import (
 	"sync"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/meshpath"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 const (
-	reqTypeGetStatus        = 0x01
-	reqTypeKeepAlive        = 0x02 // rooms: resume the post push stream
-	reqTypeGetTelemetryData = 0x03
-	reqTypeGetAvgMinMax     = 0x04 // sensors only
-	reqTypeGetAccessList    = 0x05
-	reqTypeGetNeighbors     = 0x06
-	reqTypeGetOwnerInfo     = 0x07
-	txtTypeCliData          = 1
-	cliPrefixLen            = 3
-	respServerLoginOK       = 0 // login reply byte 4
+	cliPrefixLen = 3
 )
 
-// isLoginReply: byte 4 alone also matches a status body with a zero batt low byte, so check byte 5's always-zero legacy field too.
-func isLoginReply(data []byte) bool {
-	return len(data) >= 13 && data[4] == respServerLoginOK && data[5] == 0
+// isLoginReply takes every firmware login reply, an old repeater's bare "OK" and a room's keep-alive byte included; a reply
+// echoing a tag we sent that node is that request's answer, which is how a status body that parses as a login is told apart.
+// Only that node's tags count: a login reply opens with the node's clock, which can equal a tag sent elsewhere the same second.
+func (rm *Client) isLoginReply(data []byte, from byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	rm.pendingMu.Lock()
+	pr, isRequest := rm.pending[binary.LittleEndian.Uint32(data[:4])]
+	rm.pendingMu.Unlock()
+	if isRequest && pr.peerPubKeyByte == from {
+		return false
+	}
+	_, err := meshcore.ParseLoginReply(data[4:])
+	return err == nil
 }
 
 type Session struct {
@@ -54,6 +58,32 @@ type pendingRequest struct {
 	sharedSecret   []byte
 	peerPubKeyByte byte
 	peerPubKey     [32]byte
+
+	// app is set for the MeshCore app's requests, nil for OwlShack's own.
+	app *AppSend
+	// discovery is the app's path discovery: always flooded, and the paths go to onPath, not into the route (firmware onContactPathRecv).
+	discovery bool
+	onPath    func(out, in PathBytes)
+}
+
+// AppSend is how a MeshCore app request goes out: a flood goes in Scope, the region the app chose (nil unscoped) rather than the contact's, and Sent hears it leave.
+type AppSend struct {
+	Scope *meshcore.Region
+	Sent  func(tag uint32, wait time.Duration, flood bool)
+}
+
+// floodScope is the region a flood to pub goes in: the app's choice for its requests, else the contact's.
+func (rm *Client) floodScope(app *AppSend, pub []byte) *meshcore.Region {
+	if app != nil {
+		return app.Scope
+	}
+	return rm.scopeFor(pub)
+}
+
+// PathBytes is a path as the firmware frames it: its length byte, which carries the hash size, then the hashes.
+type PathBytes struct {
+	Len  byte
+	Hops []byte
 }
 
 type pendingLogin struct {
@@ -78,6 +108,8 @@ type Client struct {
 	stats       airtimeEstimator
 	// ownHashSize is the companion's bytes per hop, for a node that is not a contact; required.
 	ownHashSize func() uint8
+	// scopeFor is the region floods to a node go in; required, and nil from it sends unscoped.
+	scopeFor func(pubkey []byte) *meshcore.Region
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -91,25 +123,16 @@ type Client struct {
 	cliMu      sync.Mutex
 	cliPending map[string]chan string
 
-	tsMu   sync.Mutex
-	lastTS uint32
+	subsMu  sync.Mutex
+	subs    map[uint32]Subscription // by the push tag the sensor sends
+	refused map[string]bool         // sensors whose last subscribe was refused, by pubkey hex
+	onPush  TelemetryPushHandler
 }
 
-// UniqueTimestamp mirrors the firmware's getCurrentTimeUnique(): a remote node drops a timestamp <= the last one it saw.
-func (rm *Client) UniqueTimestamp() uint32 {
-	rm.tsMu.Lock()
-	defer rm.tsMu.Unlock()
-	ts := uint32(time.Now().Unix())
-	if ts <= rm.lastTS {
-		ts = rm.lastTS + 1
-	}
-	rm.lastTS = ts
-	return ts
-}
-
-func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator, ownHashSize func() uint8) *Client {
+func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator, ownHashSize func() uint8, scopeFor func(pubkey []byte) *meshcore.Region) *Client {
 	return &Client{
 		ownHashSize: ownHashSize,
+		scopeFor:    scopeFor,
 		node:        n,
 		store:       st,
 		companionID: companionID,
@@ -118,6 +141,8 @@ func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logge
 		sessions:    make(map[string]*Session),
 		pending:     make(map[uint32]*pendingRequest),
 		cliPending:  make(map[string]chan string),
+		subs:        make(map[uint32]Subscription),
+		refused:     make(map[string]bool),
 	}
 }
 
@@ -152,10 +177,10 @@ func routeForPeer(path []byte, routeHashSize, bytesPerHop uint8) (routeType byte
 		if path == nil {
 			routeType = meshcore.RouteTypeFlood
 		}
-		return routeType, (max(bytesPerHop, 1) - 1) << 6
+		return routeType, meshcore.MakePathLen(max(bytesPerHop, 1), 0)
 	}
 	hs := max(routeHashSize, 1)
-	return meshcore.RouteTypeDirect, (hs-1)<<6 | uint8(len(path)/int(hs))
+	return meshcore.RouteTypeDirect, meshcore.MakePathLen(hs, uint8(len(path)/int(hs)))
 }
 
 func (rm *Client) Session(pubkeyHex string) *Session {
@@ -174,28 +199,28 @@ func (rm *Client) Logout(pubkeyHex string) {
 func (rm *Client) sendBinaryRequest(pubkeyHex string, body []byte, timeout time.Duration, label string) ([]byte, error) {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid pubkey hex: %w", err)
+		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
 	}
 
 	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid pubkey: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrBadPubkey, err)
 	}
 
 	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
 	if peer == nil {
-		return nil, fmt.Errorf("peer not found in peer table")
+		return nil, ErrUnknownPeer
 	}
 
 	rm.mu.Lock()
 	sess := rm.sessions[pubkeyHex]
 	rm.mu.Unlock()
 	if sess == nil || sess.sharedSecret == nil {
-		return nil, fmt.Errorf("not logged in to this repeater")
+		return nil, fmt.Errorf("%w to this repeater", ErrNotLoggedIn)
 	}
 
 	// The session decrypts the response, so the pending entry needn't carry the secret.
-	return rm.roundtripRequest(peerIdentity.PublicKey(), peer, sess.sharedSecret, sess.localPubKey[0], body, timeout, label, false)
+	return rm.roundtripRequest(peerIdentity.PublicKey(), peer, sess.sharedSecret, sess.localPubKey[0], body, timeout, label, &pendingRequest{})
 }
 
 // replyTimeout sizes the wait on a repeater's reply from airtime, as the firmware sizes its ACK
@@ -222,72 +247,184 @@ func (rm *Client) routedPacket(peer *node.Peer, payloadType byte, payload []byte
 	outPath, hashSize := learnedRoute(peer)
 	pub := peer.Identity.PublicKey()
 	routeType, pathLen := routeForPeer(outPath, hashSize, rm.bytesPerHop(pub[:]))
-	return &meshcore.Packet{
+	pkt := &meshcore.Packet{
 		Header:     meshcore.MakeHeader(routeType, payloadType, 0),
 		PathLength: pathLen,
 		Path:       outPath,
 		Payload:    payload,
-	}, outPath, hashSize
+	}
+	pkt.SetScope(rm.scopeFor(pub[:]))
+	return pkt, outPath, hashSize
 }
 
-// roundtripRequest awaits the tagged response; storeSecret puts the secret on the pending entry for sessionless matching.
-func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecret []byte, localPubByte byte, body []byte, timeout time.Duration, label string, storeSecret bool) ([]byte, error) {
-	tag := rm.UniqueTimestamp()
+// roundtripRequest awaits the tagged response; a pr carrying the secret is matched without a session.
+func (rm *Client) roundtripRequest(peerPub [32]byte, peer *node.Peer, sharedSecret []byte, localPubByte byte, body []byte, timeout time.Duration, label string, pr *pendingRequest) ([]byte, error) {
+	pr.peerPubKeyByte = peerPub[0]
+	return rm.sendAwaitTag(pr, peerPub, timeout, label, func(tag uint32) (*meshcore.Packet, []byte, uint8, error) {
+		encrypted, err := meshcore.EncryptThenMAC(sharedSecret, append(binary.LittleEndian.AppendUint32(nil, tag), body...))
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encrypting %s req: %w", label, err)
+		}
 
-	plaintext := make([]byte, 4+len(body))
-	binary.LittleEndian.PutUint32(plaintext[:4], tag)
-	copy(plaintext[4:], body)
+		var mac [2]byte
+		copy(mac[:], encrypted[:2])
 
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("encrypting %s req: %w", label, err)
-	}
+		req := &meshcore.Request{
+			Destination:      peerPub[0],
+			Source:           localPubByte,
+			MAC:              mac,
+			EncryptedPayload: encrypted[2:],
+		}
 
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
+		reqBytes, err := req.ToBytes()
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encoding request: %w", err)
+		}
 
-	req := &meshcore.Request{
-		Destination:      peerPub[0],
-		Source:           localPubByte,
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}
+		pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
+		if pr.discovery {
+			routeType, pathLen := routeForPeer(nil, 0, rm.bytesPerHop(peerPub[:]))
+			pkt.Header = meshcore.MakeHeader(routeType, meshcore.PayloadTypeReq, 0)
+			pkt.PathLength, pkt.Path, outPath = pathLen, nil, nil
+		}
+		return pkt, outPath, hashSize, nil
+	})
+}
 
-	reqBytes, err := req.ToBytes()
-	if err != nil {
-		return nil, fmt.Errorf("encoding request: %w", err)
-	}
-
+// sendAwaitTag sends what build makes of a unique tag in stamp order, then waits for the response echoing the tag, sizing the wait from the route.
+func (rm *Client) sendAwaitTag(pr *pendingRequest, peerPub [32]byte, timeout time.Duration, label string, build func(tag uint32) (*meshcore.Packet, []byte, uint8, error)) ([]byte, error) {
 	resultCh := make(chan []byte, 1)
-	pr := &pendingRequest{ch: resultCh, created: time.Now()}
-	if storeSecret {
-		pr.sharedSecret = sharedSecret
-		pr.peerPubKeyByte = peerPub[0]
-		pr.peerPubKey = peerPub
-	}
-	rm.pendingMu.Lock()
-	rm.pending[tag] = pr
-	rm.pendingMu.Unlock()
+	pr.ch, pr.created = resultCh, time.Now()
 
+	var (
+		tag        uint32
+		registered bool
+		pkt        *meshcore.Packet
+		outPath    []byte
+		hashSize   uint8
+	)
 	defer func() {
-		rm.pendingMu.Lock()
-		delete(rm.pending, tag)
-		rm.pendingMu.Unlock()
+		if registered {
+			rm.pendingMu.Lock()
+			delete(rm.pending, tag)
+			rm.pendingMu.Unlock()
+		}
 	}()
 
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
-
-	if err := rm.node.SendPacket(pkt); err != nil {
-		return nil, fmt.Errorf("sending %s req: %w", label, err)
+	err := rm.node.SendStamped(func(ts uint32) error {
+		var err error
+		if pkt, outPath, hashSize, err = build(ts); err != nil {
+			return err
+		}
+		tag, registered = ts, true
+		rm.pendingMu.Lock()
+		rm.pending[tag] = pr
+		rm.pendingMu.Unlock()
+		if err := meshpath.Send(rm.node, pkt, rm.floodScope(pr.app, peerPub[:]), 0); err != nil {
+			return fmt.Errorf("sending %s req: %w", label, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	wait := rm.replyTimeout(len(reqBytes), outPath, hashSize, timeout)
+	wait := rm.replyTimeout(len(pkt.Payload), outPath, hashSize, timeout)
 	rm.log.Debug(label+" req sent", "peer", fmt.Sprintf("%x", peerPub[:6]), "tag", fmt.Sprintf("%08x", tag), "wait", wait)
+	if pr.app != nil {
+		pr.app.Sent(tag, wait, outPath == nil)
+	}
 
 	select {
 	case data := <-resultCh:
 		return data, nil
 	case <-time.After(wait):
-		return nil, fmt.Errorf("%s request timed out after %s", label, wait)
+		return nil, fmt.Errorf("%s request timed out after %s: %w", label, wait, ErrNoReply)
 	}
+}
+
+// RequestRegions asks a node in radio range which regions it floods (an anon REGIONS request). The
+// firmware answers only a direct request, so it goes zero-hop; it also rate-limits these, so a
+// timeout can mean it is throttling us rather than out of range.
+func (rm *Client) RequestRegions(pubkeyHex string, timeout time.Duration) (meshcore.AnonRegionsReply, error) {
+	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return meshcore.AnonRegionsReply{}, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
+	}
+	peer, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
+	if err != nil {
+		return meshcore.AnonRegionsReply{}, fmt.Errorf("%w: %w", ErrBadPubkey, err)
+	}
+	secret, err := rm.node.SharedSecret(peer)
+	if err != nil {
+		return meshcore.AnonRegionsReply{}, fmt.Errorf("deriving shared secret: %w", err)
+	}
+	hashSize := rm.ownHashSize()
+	body, err := meshcore.BuildAnonRegionsRequest(nil, hashSize) // empty reply path: answer zero-hop
+	if err != nil {
+		return meshcore.AnonRegionsReply{}, err
+	}
+	pub := peer.PublicKey()
+	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub}
+	data, err := rm.sendAwaitTag(pr, pub, timeout, "regions", func(tag uint32) (*meshcore.Packet, []byte, uint8, error) {
+		req, err := meshcore.NewAnonReq(rm.node.Identity(), peer, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encrypting regions req: %w", err)
+		}
+		payload, err := req.ToBytes()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		return &meshcore.Packet{
+			Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0),
+			PathLength: meshcore.MakePathLen(hashSize, 0),
+			Payload:    payload,
+		}, []byte{}, hashSize, nil
+	})
+	if err != nil {
+		return meshcore.AnonRegionsReply{}, err
+	}
+	return meshcore.ParseAnonRegionsReply(data)
+}
+
+// AppAnonRequest is the MeshCore app's anonymous request: routed as the contact is, or zero-hop to a node only heard, as the firmware sends it.
+func (rm *Client) AppAnonRequest(pubkeyHex string, body []byte, timeout time.Duration, app AppSend) ([]byte, error) {
+	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
+	}
+	peerID, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBadPubkey, err)
+	}
+	secret, err := rm.node.SharedSecret(peerID)
+	if err != nil {
+		return nil, fmt.Errorf("deriving shared secret: %w", err)
+	}
+	pub := peerID.PublicKey()
+	var routed *node.Peer
+	if ct, err := rm.store.Contacts.Get(context.Background(), rm.companionID, pub[:]); err == nil && ct != nil {
+		routed = rm.node.Peers().Lookup(pub)
+	}
+	pr := &pendingRequest{sharedSecret: secret, peerPubKeyByte: pub[0], peerPubKey: pub, app: &app}
+	return rm.sendAwaitTag(pr, pub, timeout, "app-anon", func(tag uint32) (*meshcore.Packet, []byte, uint8, error) {
+		req, err := meshcore.NewAnonReq(rm.node.Identity(), peerID, append(binary.LittleEndian.AppendUint32(nil, tag), body...), secret)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("encrypting anon req: %w", err)
+		}
+		payload, err := req.ToBytes()
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if routed != nil {
+			pkt, outPath, hashSize := rm.routedPacket(routed, meshcore.PayloadTypeAnonReq, payload)
+			return pkt, outPath, hashSize, nil
+		}
+		hashSize := rm.ownHashSize()
+		return &meshcore.Packet{
+			Header:     meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAnonReq, 0),
+			PathLength: meshcore.MakePathLen(hashSize, 0),
+			Payload:    payload,
+		}, []byte{}, hashSize, nil
+	})
 }

@@ -31,8 +31,18 @@ import {
   type Broker,
   type BrokerInput,
   type ConfigCompanion,
+  type ConfigRepeater,
+  type MqttInput,
   type MqttSettings,
 } from "@/lib/configApi";
+
+// The Node picker's value for the repeater; a companion is its id.
+const REPEATER_NODE = "repeater";
+
+// Mirrors config.ValidateFeed on the server.
+const IATA_RE = /^[A-Za-z0-9_-]*$/;
+const MIN_STATUS_INTERVAL = 60;
+const MAX_STATUS_INTERVAL = 3600;
 
 // GET /api/mqtt/status, keyed by broker name — the observer never sees the config surrogate id.
 interface BrokerStatus {
@@ -150,10 +160,16 @@ export function MqttPage() {
     error: brokersError,
     reload: reloadBrokers,
   } = useApiList<Broker>("/api/config/mqtt/brokers", "Failed to load brokers");
-  const { items: companions } = useApiList<ConfigCompanion>(
-    "/api/config/companions",
-    "Failed to load companions",
-  );
+  const {
+    items: companions,
+    error: companionsError,
+    reload: reloadCompanions,
+  } = useApiList<ConfigCompanion>("/api/config/companions", "Failed to load companions");
+  const {
+    item: repeater,
+    error: repeaterError,
+    reload: reloadRepeater,
+  } = useApiObject<ConfigRepeater>("/api/config/repeater", "Failed to load the repeater");
 
   const [savingFeed, setSavingFeed] = useState(false);
   const [enabled, setEnabled] = useState(true);
@@ -168,23 +184,58 @@ export function MqttPage() {
   useEffect(() => {
     if (!mqtt) return;
     setEnabled(mqtt.enabled !== false);
-    setNodeId(mqtt.nodeCompanionId != null ? String(mqtt.nodeCompanionId) : "");
+    setNodeId(mqtt.nodeKind === "repeater" ? REPEATER_NODE : mqtt.nodeCompanionId != null ? String(mqtt.nodeCompanionId) : "");
     setIataCode(mqtt.iataCode ?? "");
     setOwner(mqtt.owner ?? "");
     setEmail(mqtt.email ?? "");
     setStatusInterval(String(mqtt.statusInterval ?? 300));
   }, [mqtt]);
 
-  // Default the feed node to the first companion when none is stored yet.
+  // Default the feed node to the first companion, or the repeater when there is none, when nothing is stored yet.
   useEffect(() => {
-    if (nodeId === "" && companions && companions.length > 0) {
-      setNodeId(String(companions[0].id));
-    }
-  }, [companions, nodeId]);
+    if (nodeId !== "" || !companions) return;
+    const first = companions.length > 0 ? String(companions[0].id) : repeater?.configured ? REPEATER_NODE : "";
+    if (first !== "") setNodeId((cur) => (cur === "" ? first : cur));
+  }, [companions, repeater, nodeId]);
 
   const list = brokers ?? [];
   const loading = mqttLoading || brokersLoading;
-  const error = mqttError || brokersError;
+  const error = mqttError || brokersError || companionsError || repeaterError;
+
+  const nodeOptions = [
+    ...(companions ?? []).map((c) => ({ value: String(c.id), label: c.name })),
+    ...(repeater?.configured || nodeId === REPEATER_NODE
+      ? [{ value: REPEATER_NODE, label: repeater?.name ? `${repeater.name} (repeater)` : "repeater" }]
+      : []),
+  ];
+  const iataInvalid = !IATA_RE.test(iataCode);
+  // Blank is the server's default of 300.
+  const interval = statusInterval.trim() === "" ? null : Number(statusInterval);
+  const intervalInvalid =
+    interval !== null && (!Number.isInteger(interval) || interval < MIN_STATUS_INTERVAL || interval > MAX_STATUS_INTERVAL);
+  const feedInput = (): MqttInput => ({
+    enabled,
+    nodeKind: nodeId === REPEATER_NODE ? "repeater" : "companion",
+    nodeCompanionId: nodeId === "" || nodeId === REPEATER_NODE ? null : parseInt(nodeId, 10),
+    iataCode: iataCode || null,
+    owner: owner || null,
+    email: email || null,
+    statusInterval: interval,
+  });
+
+  // A fresh install stores no node, and MQTT can't publish without one, so the first broker also saves the feed as the page shows it.
+  const shownNode = nodeOptions.find((o) => o.value === nodeId);
+  const pendingNode =
+    mqtt && mqtt.nodeKind !== "repeater" && mqtt.nodeCompanionId == null && shownNode
+      ? {
+          label: shownNode.label,
+          invalid: iataInvalid || intervalInvalid,
+          save: async () => {
+            await configApi.putMqtt(feedInput());
+            reloadMqtt();
+          },
+        }
+      : undefined;
 
   // Connection state is runtime, not config, so it polls rather than riding the config reload.
   const [status, setStatus] = useState<MqttStatus | null>(null);
@@ -218,14 +269,7 @@ export function MqttPage() {
   const saveFeed = async () => {
     setSavingFeed(true);
     try {
-      await configApi.putMqtt({
-        enabled,
-        nodeCompanionId: nodeId === "" ? null : parseInt(nodeId, 10),
-        iataCode: iataCode || null,
-        owner: owner || null,
-        email: email || null,
-        statusInterval: parseInt(statusInterval, 10) || 300,
-      });
+      await configApi.putMqtt(feedInput());
       toast.success("MQTT settings saved");
       reloadMqtt();
     } catch (e) {
@@ -268,7 +312,7 @@ export function MqttPage() {
           )
         }
         actions={
-          <HeaderButton tone="primary" icon={Save} busy={savingFeed} onClick={saveFeed} disabled={savingFeed || loading || !mqtt}>
+          <HeaderButton tone="primary" icon={Save} busy={savingFeed} onClick={saveFeed} disabled={savingFeed || loading || !mqtt || !companions || !repeater || iataInvalid || intervalInvalid}>
             {savingFeed ? "saving" : "save"}
           </HeaderButton>
         }
@@ -278,8 +322,10 @@ export function MqttPage() {
         <LoadErrorAlert
           message={error}
           onRetry={() => {
-            reloadMqtt();
-            reloadBrokers();
+            if (mqttError) reloadMqtt();
+            if (brokersError) reloadBrokers();
+            if (companionsError) reloadCompanions();
+            if (repeaterError) reloadRepeater();
           }}
         />
       )}
@@ -301,19 +347,23 @@ export function MqttPage() {
                 <SelectField
                   label="Node"
                   value={nodeId}
-                  options={(companions ?? []).map((c) => ({
-                    value: String(c.id),
-                    label: c.name,
-                  }))}
+                  options={nodeOptions}
                   onChange={setNodeId}
-                  hint="one node feeds MQTT — its identity signs the feed"
+                  hint="one node feeds MQTT; brokers see its name and key"
                 />
                 <TextField
                   label="IATA code"
                   value={iataCode}
                   onChange={setIataCode}
                   placeholder="AKL"
-                  hint="region tag in the topic path"
+                  invalid={iataInvalid}
+                  hint={
+                    iataInvalid ? (
+                      <span className="text-destructive">use only letters, digits, - and _, as it is one level of every topic</span>
+                    ) : (
+                      "region tag in the topic path"
+                    )
+                  }
                 />
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -329,6 +379,12 @@ export function MqttPage() {
                   value={statusInterval}
                   onChange={setStatusInterval}
                   placeholder="300"
+                  invalid={intervalInvalid}
+                  hint={
+                    <span className={cn(intervalInvalid && "text-destructive")}>
+                      {MIN_STATUS_INTERVAL} to {MAX_STATUS_INTERVAL} whole seconds; blank = 300
+                    </span>
+                  }
                 />
               </div>
             </div>
@@ -430,6 +486,7 @@ export function MqttPage() {
       {editing !== null && (
         <BrokerEditor
           broker={editing === "new" ? null : editing}
+          pendingNode={pendingNode}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -443,10 +500,13 @@ export function MqttPage() {
 
 function BrokerEditor({
   broker,
+  pendingNode,
   onClose,
   onSaved,
 }: {
   broker: Broker | null;
+  // The feed as the page shows it, with a node it hasn't stored, saved before the broker.
+  pendingNode?: { label: string; invalid: boolean; save: () => Promise<void> };
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -491,6 +551,7 @@ function BrokerEditor({
     if (password !== "") input.password = password;
     setSaving(true);
     try {
+      if (pendingNode) await pendingNode.save();
       await configApi.saveBroker(input, broker?.id);
       toast.success(isNew ? `Broker "${b.name}" added` : "Broker saved");
       onSaved();
@@ -511,6 +572,11 @@ function BrokerEditor({
         </DialogHeader>
 
         <div className="space-y-4">
+          {pendingNode?.invalid && (
+            <p className="font-mono text-[11px] text-destructive">
+              Fix the feed settings first: saving a broker saves them too.
+            </p>
+          )}
           {isNew && (
             <SelectField
               label="Preset"
@@ -654,6 +720,11 @@ function BrokerEditor({
             />
           </div>
 
+          {pendingNode && !pendingNode.invalid && (
+            <p className="font-mono text-[11px] text-muted-foreground">
+              Saving also saves the feed settings as the page shows them, with {pendingNode.label} as the node MQTT speaks as.
+            </p>
+          )}
           <div className="flex justify-end gap-2 pt-1">
             <Button
               variant="ghost"
@@ -666,7 +737,7 @@ function BrokerEditor({
             <Button
               size="sm"
               onClick={submit}
-              disabled={saving || !valid}
+              disabled={saving || !valid || pendingNode?.invalid}
               className="rounded-none font-mono text-[11px] uppercase tracking-[0.12em]"
             >
               {saving ? (

@@ -24,9 +24,24 @@ type ContactMetadata struct {
 	MonitorRetrySecs int64 `json:"monitorRetrySecs,omitempty"`
 	// MonitorMaxRetries bounds consecutive retries before the node falls back to its normal interval; 0 = the poller's built-in default.
 	MonitorMaxRetries int `json:"monitorMaxRetries,omitempty"`
+	// MonitorPush has a monitored 1.18+ sensor push its readings when one changes, between polls.
+	MonitorPush bool `json:"monitorPush,omitempty"`
+	// MonitorPushDeltas are the readings the sensor watches and the change on each that sends a push.
+	MonitorPushDeltas []PushDelta `json:"monitorPushDeltas,omitempty"`
 
 	// TelemPerms is which classes this contact may read (sensor.Perm* bits), read only where the mode is "selected".
 	TelemPerms uint8 `json:"telemPerms,omitempty"`
+	// Favourite is the MeshCore app's star, kept for it; the firmware's contact flags bit 0.
+	Favourite bool `json:"favourite,omitempty"`
+}
+
+// PushDelta is one watched sensor reading; Name and Unit are the sensor's own labels, kept for display.
+type PushDelta struct {
+	Channel int     `json:"channel"`
+	Type    int     `json:"type"`
+	Value   float64 `json:"value"`
+	Name    string  `json:"name"`
+	Unit    string  `json:"unit"`
 }
 
 type Contact struct {
@@ -47,23 +62,26 @@ type Contact struct {
 	LastSeen     time.Time // zero when never heard
 	LastAdvertTS uint32
 	AddedAt      time.Time
-	Metadata     ContactMetadata
+	// ModifiedAt is when anything in the row last changed, the firmware's lastmod.
+	ModifiedAt time.Time
+	Metadata   ContactMetadata
+	// FloodScope is the region floods to this contact go in: "inherit", "everywhere" or "region:<name>".
+	FloodScope string
 }
 
 const contactColumns = `companion_id, peer_pubkey, name, type, lat, lon,
 	feat1, feat2, out_path, out_path_hash_size, path_hash_size, last_seen, last_advert_ts,
-	added_at, metadata`
+	added_at, modified_at, metadata, flood_scope`
 
 func scanContact(s interface{ Scan(...any) error }) (*Contact, error) {
 	var c Contact
 	var metaStr string
 	var feat1, feat2, lastAdvertTS int64
-	var lastSeen sql.NullTime
 	var outPath sql.NullString
 	if err := s.Scan(
 		&c.CompanionID, &c.PeerPubKey, &c.Name, &c.Type, &c.Lat, &c.Lon,
-		&feat1, &feat2, &outPath, &c.OutPathHashSize, &c.PathHashSize, &lastSeen, &lastAdvertTS,
-		&c.AddedAt, &metaStr,
+		&feat1, &feat2, &outPath, &c.OutPathHashSize, &c.PathHashSize, unixMS(&c.LastSeen), &lastAdvertTS,
+		unixMS(&c.AddedAt), unixMS(&c.ModifiedAt), &metaStr, &c.FloodScope,
 	); err != nil {
 		return nil, err
 	}
@@ -71,9 +89,6 @@ func scanContact(s interface{ Scan(...any) error }) (*Contact, error) {
 	c.Feat1 = uint16(feat1)
 	c.Feat2 = uint16(feat2)
 	c.LastAdvertTS = uint32(lastAdvertTS)
-	if lastSeen.Valid {
-		c.LastSeen = lastSeen.Time
-	}
 	json.Unmarshal([]byte(metaStr), &c.Metadata)
 	return &c, nil
 }
@@ -85,16 +100,17 @@ type ContactRepo struct {
 func (r *ContactRepo) Add(ctx context.Context, companionID int64, peerPubKey []byte, name, contactType string) error {
 	// A re-add keeps a known name and type, and bytes per hop is set only here, from the advert heard or else the node's own size.
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO companion_contacts (companion_id, peer_pubkey, name, type, path_hash_size)
-		VALUES (?1, ?2, ?3, ?4, COALESCE(
+		INSERT INTO companion_contacts (companion_id, peer_pubkey, name, type, added_at, modified_at, path_hash_size)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?5, COALESCE(
 			(SELECT out_path_hash_size FROM discovered_peers WHERE pubkey = ?2 AND out_path_hash_size BETWEEN 1 AND 3),
 			(SELECT path_hash_size FROM companions WHERE id = ?1 AND path_hash_size BETWEEN 1 AND 3),
 			(SELECT path_hash_size FROM settings WHERE id = 1 AND path_hash_size BETWEEN 1 AND 3),
 			1))
 		ON CONFLICT(companion_id, peer_pubkey) DO UPDATE SET
 			name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE companion_contacts.name END,
-			type = CASE WHEN excluded.type <> '' THEN excluded.type ELSE companion_contacts.type END`,
-		companionID, peerPubKey, name, contactType,
+			type = CASE WHEN excluded.type <> '' THEN excluded.type ELSE companion_contacts.type END,
+			modified_at = excluded.modified_at`,
+		companionID, peerPubKey, name, contactType, time.Now().UnixMilli(),
 	)
 	if err != nil {
 		return fmt.Errorf("adding contact: %w", err)
@@ -110,17 +126,24 @@ func (r *ContactRepo) Restore(ctx context.Context, c *Contact) error {
 	}
 	var lastSeen any
 	if !c.LastSeen.IsZero() {
-		lastSeen = c.LastSeen
+		lastSeen = c.LastSeen.UnixMilli()
 	}
 	addedAt := c.AddedAt
 	if addedAt.IsZero() {
 		addedAt = time.Now()
 	}
+	modifiedAt := c.ModifiedAt
+	if modifiedAt.IsZero() {
+		modifiedAt = addedAt
+		if c.LastSeen.After(modifiedAt) {
+			modifiedAt = c.LastSeen
+		}
+	}
 	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO companion_contacts (
 			companion_id, peer_pubkey, name, type, lat, lon, feat1, feat2,
-			out_path, out_path_hash_size, path_hash_size, last_seen, last_advert_ts, added_at, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			out_path, out_path_hash_size, path_hash_size, last_seen, last_advert_ts, added_at, modified_at, metadata, flood_scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(companion_id, peer_pubkey) DO UPDATE SET
 			name = excluded.name, type = excluded.type,
 			lat = excluded.lat, lon = excluded.lon,
@@ -131,9 +154,11 @@ func (r *ContactRepo) Restore(ctx context.Context, c *Contact) error {
 			last_seen = excluded.last_seen,
 			last_advert_ts = excluded.last_advert_ts,
 			added_at = excluded.added_at,
-			metadata = excluded.metadata`,
+			modified_at = excluded.modified_at,
+			metadata = excluded.metadata,
+			flood_scope = excluded.flood_scope`,
 		c.CompanionID, c.PeerPubKey, c.Name, c.Type, c.Lat, c.Lon, c.Feat1, c.Feat2,
-		c.OutPath, c.OutPathHashSize, max(c.PathHashSize, 1), lastSeen, c.LastAdvertTS, addedAt, string(meta),
+		c.OutPath, c.OutPathHashSize, max(c.PathHashSize, 1), lastSeen, c.LastAdvertTS, addedAt.UnixMilli(), modifiedAt.UnixMilli(), string(meta), scopeOrInherit(c.FloodScope),
 	)
 	if err != nil {
 		return fmt.Errorf("restoring contact: %w", err)
@@ -157,11 +182,12 @@ func (r *ContactRepo) RefreshFromAdvert(
 			feat1          = ?,
 			feat2          = ?,
 			last_seen      = ?,
-			last_advert_ts = ?
+			last_advert_ts = ?,
+			modified_at    = max(modified_at, ?)
 		WHERE peer_pubkey = ?`,
 		name, name, contactType, contactType,
 		hasLocation, lat, hasLocation, lon,
-		feat1, feat2, lastSeen, lastAdvertTS,
+		feat1, feat2, lastSeen.UnixMilli(), lastAdvertTS, lastSeen.UnixMilli(),
 		peerPubKey,
 	)
 	if err != nil {
@@ -173,9 +199,9 @@ func (r *ContactRepo) RefreshFromAdvert(
 // UpdateOutPath scopes a learned route by companion_id: companions never share a route to a peer.
 func (r *ContactRepo) UpdateOutPath(ctx context.Context, companionID int64, peerPubKey []byte, path []byte, hashSize uint8) error {
 	_, err := r.db.ExecContext(ctx, `
-		UPDATE companion_contacts SET out_path = ?, out_path_hash_size = ?
+		UPDATE companion_contacts SET modified_at = ?, out_path = ?, out_path_hash_size = ?
 		WHERE companion_id = ? AND peer_pubkey = ?`,
-		path, hashSize, companionID, peerPubKey,
+		time.Now().UnixMilli(), path, hashSize, companionID, peerPubKey,
 	)
 	if err != nil {
 		return fmt.Errorf("updating contact out_path: %w", err)
@@ -193,9 +219,9 @@ func (r *ContactRepo) SetRoute(ctx context.Context, companionID int64, peerPubKe
 		outHashSize = 0
 	}
 	res, err := r.db.ExecContext(ctx, `
-		UPDATE companion_contacts SET out_path = ?, out_path_hash_size = ?, path_hash_size = ?
+		UPDATE companion_contacts SET modified_at = ?, out_path = ?, out_path_hash_size = ?, path_hash_size = ?
 		WHERE companion_id = ? AND peer_pubkey = ?`,
-		path, outHashSize, hashSize, companionID, peerPubKey,
+		time.Now().UnixMilli(), path, outHashSize, hashSize, companionID, peerPubKey,
 	)
 	if err != nil {
 		return fmt.Errorf("setting contact route: %w", err)
@@ -206,15 +232,77 @@ func (r *ContactRepo) SetRoute(ctx context.Context, companionID int64, peerPubKe
 	return nil
 }
 
+// RegionScoped lists the contacts whose floods go in a named region, for the check that a region in use stays listed.
+func (r *ContactRepo) RegionScoped(ctx context.Context) ([]Contact, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+contactColumns+` FROM companion_contacts WHERE flood_scope LIKE 'region:%'`)
+	if err != nil {
+		return nil, fmt.Errorf("listing region-scoped contacts: %w", err)
+	}
+	defer rows.Close()
+	var out []Contact
+	for rows.Next() {
+		c, err := scanContact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// SetFloodScope saves the region floods to this contact go in.
+func (r *ContactRepo) SetFloodScope(ctx context.Context, companionID int64, peerPubKey []byte, scope string) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE companion_contacts SET modified_at = ?, flood_scope = ? WHERE companion_id = ? AND peer_pubkey = ?`,
+		time.Now().UnixMilli(), scope, companionID, peerPubKey,
+	)
+	if err != nil {
+		return fmt.Errorf("setting contact region: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotContact
+	}
+	return nil
+}
+
+// SetName renames a contact until its next advert names it again, as the firmware does.
+func (r *ContactRepo) SetName(ctx context.Context, companionID int64, peerPubKey []byte, name string) error {
+	res, err := r.db.ExecContext(ctx, `UPDATE companion_contacts SET modified_at = ?, name = ? WHERE companion_id = ? AND peer_pubkey = ?`, time.Now().UnixMilli(), name, companionID, peerPubKey)
+	if err != nil {
+		return fmt.Errorf("renaming contact: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotContact
+	}
+	return nil
+}
+
 // SetLocation hand-sets a location; a later advert carrying a position overwrites it (RefreshFromAdvert).
 func (r *ContactRepo) SetLocation(ctx context.Context, companionID int64, peerPubKey []byte, lat, lon int32) error {
 	_, err := r.db.ExecContext(ctx, `
-		UPDATE companion_contacts SET lat = ?, lon = ?
+		UPDATE companion_contacts SET modified_at = ?, lat = ?, lon = ?
 		WHERE companion_id = ? AND peer_pubkey = ?`,
-		lat, lon, companionID, peerPubKey,
+		time.Now().UnixMilli(), lat, lon, companionID, peerPubKey,
 	)
 	if err != nil {
 		return fmt.Errorf("setting contact location: %w", err)
+	}
+	return nil
+}
+
+// SetLastAdvert sets a contact's last advert and when it was heard, a zero lastSeen leaving it never heard.
+func (r *ContactRepo) SetLastAdvert(ctx context.Context, companionID int64, peerPubKey []byte, lastSeen time.Time, ts uint32) error {
+	var seen any
+	if !lastSeen.IsZero() {
+		seen = lastSeen.UnixMilli()
+	}
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE companion_contacts SET modified_at = ?, last_seen = coalesce(?, last_seen), last_advert_ts = ?
+		WHERE companion_id = ? AND peer_pubkey = ?`,
+		time.Now().UnixMilli(), seen, ts, companionID, peerPubKey,
+	)
+	if err != nil {
+		return fmt.Errorf("setting contact last advert: %w", err)
 	}
 	return nil
 }
@@ -250,9 +338,9 @@ func (r *ContactRepo) UpdateMetadata(ctx context.Context, companionID int64, pee
 		return fmt.Errorf("marshaling contact metadata: %w", err)
 	}
 	_, err = r.db.ExecContext(ctx, `
-		UPDATE companion_contacts SET metadata = ?
+		UPDATE companion_contacts SET modified_at = ?, metadata = ?
 		WHERE companion_id = ? AND peer_pubkey = ?`,
-		string(metaJSON), companionID, peerPubKey,
+		time.Now().UnixMilli(), string(metaJSON), companionID, peerPubKey,
 	)
 	if err != nil {
 		return fmt.Errorf("updating contact metadata: %w", err)

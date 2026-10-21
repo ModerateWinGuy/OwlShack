@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/logging"
-	"github.com/meshcore-go/meshcore-go/hardware"
+	"github.com/OwlShack/OwlShack/internal/logging"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/hardware"
 )
 
 type RadioInfo struct {
@@ -21,7 +23,9 @@ type RadioInfo struct {
 }
 
 type DeviceStats struct {
-	NoiseFloor int16
+	// NoiseFloor is dBm; HaveNoiseFloor is false until the radio has measured one, so an unmeasured 0 never reads as a reading.
+	NoiseFloor     int16
+	HaveNoiseFloor bool
 	// HaveBattery is false when there is no cell at all; a KISS board answering 0 still sets it.
 	BatteryMV   uint16
 	HaveBattery bool
@@ -31,6 +35,11 @@ type DeviceStats struct {
 	// 0 °C is distinguishable from unknown.
 	MCUTempC    float64
 	HaveMCUTemp bool
+	// Sensors is what the board's own sensors read, one LPP channel each; HaveSensors is false until it answers the query.
+	Sensors     []meshcore.LPPReading
+	HaveSensors bool
+	// BatteryAt, MCUTempAt and SensorsAt are when the board gave each reading, which is how old a sample is.
+	BatteryAt, MCUTempAt, SensorsAt time.Time
 }
 
 // LinkStats mirrors hardware.ModemStats. Throughout, nil means the transport cannot measure that
@@ -92,15 +101,22 @@ type kissStatsProvider struct {
 	mu          sync.Mutex
 	fwCounters  *hardware.FirmwareStats // nil until the modem answers HW_CMD_GET_STATS
 	noiseFloor  int16
+	haveNoise   bool
 	batteryMV   uint16
 	haveBattery bool
 	mcuTempC    float64
 	haveMCUTemp bool
+	sensors     []meshcore.LPPReading
+	haveSensors bool
+	// Each reading's own last answer, as the board's other answers don't vouch for it.
+	noiseAt, batteryAt, mcuTempAt, sensorsAt time.Time
 }
 
-// StaleReadingAfter is how long a board reading survives without the modem answering. Longer than
-// one probe interval so a single dropped reply does not flap the value in and out of the payload.
+// StaleReadingAfter is how long a board reading outlives its query's last answer, past one probe so a single lost reply does not flap it.
 const StaleReadingAfter = 45 * time.Second
+
+// kissQueryTimeout bounds one stats poll's board queries together.
+const kissQueryTimeout = 3 * time.Second
 
 // ConnectedAt is when this link was set up, the start of a silence for a board that has never answered.
 func (p *kissStatsProvider) ConnectedAt() time.Time { return p.startTime }
@@ -178,55 +194,72 @@ func (p *kissStatsProvider) PacketScore(snrDB float64, packetLen int) float64 {
 }
 
 func (p *kissStatsProvider) Stats(ctx context.Context) DeviceStats {
-	// Must run before the queries below: the waiter takes any non-TX_BUSY HW_RESP_ERROR, so a battery query's HW_ERR_NO_CALLBACK would fail this one.
+	// Each query returns before the reply handlers run, so its answer is recorded here; the deadline keeps a lost reply from stalling the poll.
+	ctx, cancel := context.WithTimeout(ctx, kissQueryTimeout)
+	defer cancel()
+	record := func(set func()) {
+		p.lastReply.Store(time.Now().UnixNano())
+		p.mu.Lock()
+		set()
+		p.mu.Unlock()
+	}
 	if fw, err := p.modem.FirmwareCounters(ctx); err != nil {
 		p.log.Debug("firmware counters unavailable", "error", err)
 	} else {
-		p.mu.Lock()
-		p.fwCounters = &fw
-		p.mu.Unlock()
+		record(func() { p.fwCounters = &fw })
 	}
-	if err := p.modem.GetNoiseFloor(); err != nil {
-		p.log.Error("get noise floor", "error", err)
+	if nf, err := p.modem.NoiseFloor(ctx); err != nil {
+		p.log.Debug("noise floor unavailable", "error", err)
+	} else {
+		record(func() { p.noiseFloor, p.haveNoise, p.noiseAt = nf, nf != 0, time.Now() }) // the firmware answers 0 until it has sampled
 	}
-	if err := p.modem.GetBattery(); err != nil {
-		p.log.Error("get battery", "error", err)
+	if mv, err := p.modem.Battery(ctx); err != nil {
+		p.log.Debug("battery unavailable", "error", err)
+	} else {
+		record(func() { p.batteryMV, p.haveBattery, p.batteryAt = mv, true, time.Now() })
 	}
-	if err := p.modem.GetMCUTemp(); err != nil {
-		p.log.Error("get mcu temp", "error", err)
+	if c, err := p.modem.MCUTemp(ctx); err != nil {
+		p.log.Debug("mcu temperature unavailable", "error", err)
+	} else {
+		record(func() { p.mcuTempC, p.haveMCUTemp, p.mcuTempAt = math.Round(float64(c)*10)/10, true, time.Now() })
 	}
-
-	// Give the modem a moment to respond.
-	select {
-	case <-ctx.Done():
-	case <-time.After(500 * time.Millisecond):
+	// Last, as the firmware reads every sensor before it answers, so a slow one can't cost the poll the rest.
+	if lpp, err := p.modem.Sensors(ctx, meshcore.TelemPermEnvironment); err != nil {
+		p.log.Debug("board sensors unavailable", "error", err)
+	} else if rs, err := meshcore.LPPDecode(lpp); err != nil {
+		p.log.Debug("board sensors undecodable", "error", err)
+		record(func() { p.sensors, p.haveSensors = nil, false })
+	} else {
+		record(func() { p.sensors, p.haveSensors, p.sensorsAt = rs, true, time.Now() })
 	}
 
 	ds := p.snapshot()
 	p.log.Log(ctx, logging.LevelTrace, "stats polled",
 		"noise_floor", ds.NoiseFloor, "battery_mv", ds.BatteryMV,
-		"mcu_temp_c", ds.MCUTempC, "uptime_secs", ds.UptimeSecs,
+		"mcu_temp_c", ds.MCUTempC, "board_sensors", len(ds.Sensors), "uptime_secs", ds.UptimeSecs,
 		"readings_current", ds.HaveBattery || ds.HaveMCUTemp)
 	return ds
 }
 
-// snapshot builds the reading set without touching the modem, so a board reading is only reported
-// while the modem is still answering. The reply flags are sticky: a modem whose serial port had gone
-// away kept publishing its last battery voltage and temperature, so a consumer saw a healthy 4.1 V
-// board at the moment the port was closed.
+// snapshot reports a board reading only while the board still answers its query, as the sticky reply flags kept a closed port's 4.1 V.
 func (p *kissStatsProvider) snapshot() DeviceStats {
-	last := p.LastReply()
-	fresh := !last.IsZero() && time.Since(last) <= StaleReadingAfter
+	fresh := func(at time.Time) bool { return !at.IsZero() && time.Since(at) <= StaleReadingAfter }
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return DeviceStats{
-		NoiseFloor:  p.noiseFloor,
-		BatteryMV:   p.batteryMV,
-		HaveBattery: p.haveBattery && fresh,
-		UptimeSecs:  uint32(time.Since(p.startTime).Seconds()),
-		MCUTempC:    p.mcuTempC,
-		HaveMCUTemp: p.haveMCUTemp && fresh,
+		NoiseFloor:     p.noiseFloor,
+		HaveNoiseFloor: p.haveNoise && fresh(p.noiseAt),
+		BatteryMV:      p.batteryMV,
+		HaveBattery:    p.haveBattery && fresh(p.batteryAt),
+		UptimeSecs:     uint32(time.Since(p.startTime).Seconds()),
+		MCUTempC:       p.mcuTempC,
+		HaveMCUTemp:    p.haveMCUTemp && fresh(p.mcuTempAt),
+		Sensors:        p.sensors,
+		HaveSensors:    p.haveSensors && fresh(p.sensorsAt),
+		BatteryAt:      p.batteryAt,
+		MCUTempAt:      p.mcuTempAt,
+		SensorsAt:      p.sensorsAt,
 	}
 }
 
@@ -237,6 +270,7 @@ func (p *kissStatsProvider) onNoiseFloor(_ byte, data []byte) {
 	p.lastReply.Store(time.Now().UnixNano())
 	p.mu.Lock()
 	p.noiseFloor = int16(binary.LittleEndian.Uint16(data[:2]))
+	p.haveNoise, p.noiseAt = p.noiseFloor != 0, time.Now()
 	p.mu.Unlock()
 }
 
@@ -248,7 +282,7 @@ func (p *kissStatsProvider) onMCUTemp(_ byte, data []byte) {
 	p.lastReply.Store(time.Now().UnixNano())
 	p.mu.Lock()
 	p.mcuTempC = float64(int16(binary.LittleEndian.Uint16(data[:2]))) / 10
-	p.haveMCUTemp = true
+	p.haveMCUTemp, p.mcuTempAt = true, time.Now()
 	p.mu.Unlock()
 }
 
@@ -259,6 +293,6 @@ func (p *kissStatsProvider) onBattery(_ byte, data []byte) {
 	p.lastReply.Store(time.Now().UnixNano())
 	p.mu.Lock()
 	p.batteryMV = binary.LittleEndian.Uint16(data[:2])
-	p.haveBattery = true
+	p.haveBattery, p.batteryAt = true, time.Now()
 	p.mu.Unlock()
 }

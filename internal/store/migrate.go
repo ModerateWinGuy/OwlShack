@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -18,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // migrationFiles holds one file per user_version, named NNN_what.sql; a shipped file is frozen by migrations.sum.
@@ -107,13 +109,16 @@ func loadMigrations(fsys fs.FS) ([]migration, error) {
 	return out, nil
 }
 
-// apply runs the file without the version bump or the checksum row; 004 also runs a Go step, frozen like the files, for what SQL cannot do.
+// apply runs the file without the version bump or the checksum row; 004 and 024 also run a Go step, frozen like the files, for what SQL cannot do.
 func (m migration) apply(ctx context.Context, db dbExecer) error {
 	if _, err := db.ExecContext(ctx, m.sql); err != nil {
 		return err
 	}
-	if m.version == 4 {
+	switch m.version {
+	case 4:
 		return backfillPacketFields(ctx, db)
+	case 24:
+		return timesToUnixMS(ctx, db)
 	}
 	return nil
 }
@@ -285,7 +290,12 @@ func (s *Store) copyBeforeUpgrade(ctx context.Context, version int) (string, err
 	}
 	var unfinished *upgradeCopy
 	for i, c := range copies {
-		if c.to > version && (unfinished == nil || c.from < unfinished.from) {
+		// Each file commits with its version, so a database still at a copy's from version ran none of that upgrade: the copy is a rollback's leftover.
+		if c.from >= version || c.to <= version {
+			continue
+		}
+		// Of two from one version, the one taken for a newer build came after a rollback left the other.
+		if unfinished == nil || c.from < unfinished.from || c.from == unfinished.from && c.to > unfinished.to {
 			unfinished = &copies[i]
 		}
 	}
@@ -295,21 +305,27 @@ func (s *Store) copyBeforeUpgrade(ctx context.Context, version int) (string, err
 	}
 
 	dst := fmt.Sprintf("%s.pre-v%d-to-v%d", s.path, version, LatestSchemaVersion())
-	if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("replacing the pre-upgrade copy: %w", err)
+	// Written aside and renamed over dst, so a copy that fails keeps the one a rollback left there.
+	tmp := dst + ".partial"
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("clearing a partial pre-upgrade copy: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", dst); err != nil {
-		os.Remove(dst)
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmp); err != nil {
+		os.Remove(tmp)
 		return "", fmt.Errorf("copying the database to %s, which needs about the database's size free on disk: %w", dst, err)
 	}
 	// VACUUM INTO does not sync its output, and a power cut soon after an upgrade would truncate the one way back.
-	toSync := []string{dst}
+	if err := syncPath(tmp); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("syncing the pre-upgrade copy: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return "", fmt.Errorf("replacing the pre-upgrade copy: %w", err)
+	}
 	// Windows refuses to flush a directory opened read-only, and NTFS journals the entry itself.
 	if runtime.GOOS != "windows" {
-		toSync = append(toSync, filepath.Dir(dst))
-	}
-	for _, p := range toSync {
-		if err := syncPath(p); err != nil {
+		if err := syncPath(filepath.Dir(dst)); err != nil {
 			return "", fmt.Errorf("syncing the pre-upgrade copy: %w", err)
 		}
 	}
@@ -349,7 +365,7 @@ func restoreHint(dbPath string) string {
 	var hint string
 	copies, _ := upgradeCopies(dbPath)
 	if len(copies) > 0 {
-		latest := slices.MaxFunc(copies, func(a, b upgradeCopy) int { return a.from - b.from })
+		latest := slices.MaxFunc(copies, func(a, b upgradeCopy) int { return cmp.Or(a.from-b.from, a.to-b.to) })
 		hint += ", or stop OwlShack and move " + latest.path + " back to " + dbPath + " (the copy taken before the last upgrade)"
 	}
 	if _, err := os.Stat(dbPath + ".replaced"); err == nil {
@@ -394,4 +410,63 @@ func backfillPacketFields(ctx context.Context, tx dbExecer) error {
 		}
 	}
 	return nil
+}
+
+// timesToUnixMS rewrites each time Go stored as host-zone text, which the driver parses on read, as UTC unix milliseconds.
+func timesToUnixMS(ctx context.Context, tx dbExecer) error {
+	for _, c := range []struct{ table, col string }{
+		{"packets", "received_at"},
+		{"discovered_peers", "last_seen"},
+		{"companion_contacts", "last_seen"},
+		{"companion_contacts", "added_at"},
+		{"messages", "timestamp"},
+		{"message_echoes", "received_at"},
+	} {
+		rows, err := tx.QueryContext(ctx, "SELECT rowid, "+c.col+" FROM "+c.table)
+		if err != nil {
+			return fmt.Errorf("reading %s.%s: %w", c.table, c.col, err)
+		}
+		type row struct{ id, ms int64 }
+		var todo []row
+		for rows.Next() {
+			var id int64
+			var v any
+			if err := rows.Scan(&id, &v); err != nil {
+				rows.Close()
+				return fmt.Errorf("scanning %s.%s: %w", c.table, c.col, err)
+			}
+			if s, ok := v.(string); ok {
+				if t, err := parseTimeString(s); err == nil {
+					v = t
+				}
+			}
+			switch v := v.(type) {
+			case time.Time:
+				todo = append(todo, row{id, v.UnixMilli()})
+			case int64, nil:
+			default:
+				rows.Close()
+				return fmt.Errorf("%s.%s row %d holds %T %v, not a time", c.table, c.col, id, v, v)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterating %s.%s: %w", c.table, c.col, err)
+		}
+		for _, r := range todo {
+			if _, err := tx.ExecContext(ctx, "UPDATE "+c.table+" SET "+c.col+" = ? WHERE rowid = ?", r.ms, r.id); err != nil {
+				return fmt.Errorf("rewriting %s.%s row %d: %w", c.table, c.col, r.id, err)
+			}
+		}
+	}
+	return nil
+}
+
+// parseTimeString reads Go's time.String() by its numeric offset, as the driver cannot parse a zone named by digits, such as Kathmandu's "+0545 +0545".
+func parseTimeString(s string) (time.Time, error) {
+	f := strings.Fields(s)
+	if len(f) < 3 {
+		return time.Time{}, fmt.Errorf("%q is not a Go time", s)
+	}
+	return time.Parse("2006-01-02 15:04:05.999999999 -0700", f[0]+" "+f[1]+" "+f[2])
 }

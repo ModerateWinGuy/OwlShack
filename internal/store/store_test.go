@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 // newTestStore opens a fresh temp-file store per test, closed at test end.
@@ -51,6 +51,7 @@ func TestMessageRepo_InsertRoundTrip(t *testing.T) {
 
 	ts := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	want := &Message{
+		FloodScope:   "region:nz",
 		CompanionID:  cid,
 		Channel:      "public",
 		ChannelHash:  0x2a,
@@ -58,6 +59,7 @@ func TestMessageRepo_InsertRoundTrip(t *testing.T) {
 		Text:         "hello mesh",
 		Direction:    "rx",
 		Timestamp:    ts,
+		ReceivedAt:   ts,
 		SNR:          f64(7.25),
 		RSSI:         i8(-95),
 		PathHashes:   []byte{0x01, 0x02, 0x03},
@@ -127,7 +129,7 @@ func TestMessageRepo_NullableFields(t *testing.T) {
 	st := newTestStore(t)
 	cid := mkCompanion(t, st, "alpha")
 
-	m := &Message{CompanionID: cid, Channel: "public", Direction: "tx", Timestamp: time.Now()}
+	m := &Message{FloodScope: "everywhere", CompanionID: cid, Channel: "public", Direction: "tx", Timestamp: time.Now(), ReceivedAt: time.Now()}
 	if err := st.Messages.Insert(t.Context(), m); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
@@ -167,7 +169,7 @@ func insertN(t *testing.T, st *Store, cid int64, channel, direction string, n in
 	t.Helper()
 	ids := make([]int64, n)
 	for i := 0; i < n; i++ {
-		m := &Message{CompanionID: cid, Channel: channel, Direction: direction, Timestamp: time.Now()}
+		m := &Message{FloodScope: "everywhere", CompanionID: cid, Channel: channel, Direction: direction, Timestamp: time.Now(), ReceivedAt: time.Now()}
 		if err := st.Messages.Insert(t.Context(), m); err != nil {
 			t.Fatalf("Insert #%d: %v", i, err)
 		}
@@ -262,7 +264,7 @@ func TestMessageRepo_UpdateStatus(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)
 	cid := mkCompanion(t, st, "alpha")
-	m := &Message{CompanionID: cid, Channel: "public", Direction: "tx", Timestamp: time.Now()}
+	m := &Message{FloodScope: "everywhere", CompanionID: cid, Channel: "public", Direction: "tx", Timestamp: time.Now(), ReceivedAt: time.Now()}
 	if err := st.Messages.Insert(t.Context(), m); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
@@ -282,7 +284,7 @@ func TestMessageRepo_IncrementRepeatCount(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)
 	cid := mkCompanion(t, st, "alpha")
-	m := &Message{CompanionID: cid, Channel: "public", Direction: "tx", Timestamp: time.Now()}
+	m := &Message{FloodScope: "everywhere", CompanionID: cid, Channel: "public", Direction: "tx", Timestamp: time.Now(), ReceivedAt: time.Now()}
 	if err := st.Messages.Insert(t.Context(), m); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
@@ -783,10 +785,125 @@ func TestPacketRepo_ListFilter(t *testing.T) {
 	}
 }
 
+// A packet stamped in another zone still ages by the instant, and one stamped ahead by a wrong clock stays until it is old.
+func TestPacketRepo_PruneBatchBeforeAcrossZones(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := t.Context()
+
+	nz := time.FixedZone("NZDT", 13*3600)
+	now := time.Now()
+	cutoff := now.Add(-2 * time.Hour)
+	ages := []time.Duration{-time.Hour, 5 * time.Hour, 3 * time.Hour, 90 * time.Minute, 10 * time.Minute}
+	for _, age := range ages {
+		raw := []byte{meshcore.MakeHeader(meshcore.RouteTypeFlood, 4, 0), 0x00, 0xDE, 0xAD}
+		rt, pt := meshcore.RouteTypeFlood, uint8(4)
+		rec := &PacketRecord{ReceivedAt: now.Add(-age).In(nz), Direction: "rx", Raw: raw, RouteType: &rt, PayloadType: &pt}
+		if err := st.Packets.Insert(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if n, err := st.Packets.PruneBatchBefore(ctx, cutoff, 1); err != nil || n != 1 {
+		t.Fatalf("batch of 1: pruned %d err=%v, want 1", n, err)
+	}
+	if n, err := st.Packets.PruneBatchBefore(ctx, cutoff, 500); err != nil || n != 1 {
+		t.Fatalf("second batch: pruned %d err=%v, want the 1 left older than the cutoff", n, err)
+	}
+
+	var got []time.Time
+	if err := st.Packets.ScanFloodRxSince(ctx, now.Add(-24*time.Hour), func(p *PacketRecord) {
+		got = append(got, p.ReceivedAt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("kept %d packets, want the 2 newer than the cutoff and the future-stamped one", len(got))
+	}
+	for _, at := range got {
+		if at.Before(cutoff) {
+			t.Errorf("kept a packet from %v, older than cutoff %v", at, cutoff)
+		}
+	}
+
+	got = nil
+	if err := st.Packets.ScanFloodRxSince(ctx, now.Add(-time.Hour), func(p *PacketRecord) {
+		got = append(got, p.ReceivedAt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("last hour scanned %d packets, want the 10-minute one and the future-stamped one", len(got))
+	}
+}
+
+func TestPacketRepo_SentSince(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := t.Context()
+
+	now := time.Now()
+	for _, p := range []struct {
+		age  time.Duration
+		dir  string
+		hash string
+		path string
+	}{
+		{3 * time.Hour, "tx", "aa", ""},
+		{10 * time.Minute, "tx", "bb", "99"}, // relayed
+		{8 * time.Minute, "tx", "dd", ""},    // started
+		{10 * time.Minute, "rx", "cc", ""},
+		{5 * time.Minute, "tx", "", ""}, // unparseable
+	} {
+		rec := &PacketRecord{ReceivedAt: now.Add(-p.age), Direction: p.dir, Raw: []byte{0x00}, PacketHash: p.hash, Path: p.path}
+		if err := st.Packets.Insert(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent, err := st.Packets.SentSince(ctx, now.Add(-2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started, ok := sent["bb"]; len(sent) != 2 || !ok || started || !sent["dd"] {
+		t.Errorf("sent = %v, want bb relayed and dd started only", sent)
+	}
+}
+
+// A "none of these" pin is a stored NULL; it must survive as a present key, not read back as no pin.
+func TestHopPinRepo_NonePinIsPresent(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t)
+	ctx := t.Context()
+
+	key := []byte{0xab, 0x01, 0x02}
+	if err := st.HopPins.Set(ctx, "ab", key); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.HopPins.Set(ctx, "ab", nil); err != nil { // re-pin to none
+		t.Fatal(err)
+	}
+	if err := st.HopPins.Set(ctx, "cd", key); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.HopPins.Delete(ctx, "cd"); err != nil {
+		t.Fatal(err)
+	}
+	pins, err := st.HopPins.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pk, ok := pins["ab"]; !ok || pk != nil {
+		t.Errorf(`pins["ab"] = %x, present %v; want a present nil`, pk, ok)
+	}
+	if _, ok := pins["cd"]; ok {
+		t.Error(`pins["cd"] still present after Delete`)
+	}
+}
+
 // Bump wantVersion whenever a migration file is added.
 func TestStore_MigrateUserVersion(t *testing.T) {
 	t.Parallel()
-	const wantVersion = 21 // one per file in migrations/
+	const wantVersion = 32 // one per file in migrations/
 	st := newTestStore(t)
 	var v int
 	if err := st.db.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&v); err != nil {
@@ -801,7 +918,7 @@ func TestStore_MigrateUserVersion(t *testing.T) {
 func TestStore_ForeignKeysEnforced(t *testing.T) {
 	t.Parallel()
 	st := newTestStore(t)
-	m := &Message{CompanionID: 9999, Channel: "x", Direction: "rx", Timestamp: time.Now()}
+	m := &Message{FloodScope: "everywhere", CompanionID: 9999, Channel: "x", Direction: "rx", Timestamp: time.Now(), ReceivedAt: time.Now()}
 	err := st.Messages.Insert(t.Context(), m)
 	if err == nil {
 		t.Fatalf("Insert with dangling companion_id = nil error, want FK violation")
@@ -839,6 +956,10 @@ func TestStore_UpgradeFromReleasedSchema(t *testing.T) {
 		"INSERT INTO companions (name) VALUES ('upgrade-me')"); err != nil {
 		t.Fatalf("seeding operator data: %v", err)
 	}
+	if _, err := db.ExecContext(t.Context(),
+		"INSERT INTO settings (id, connection_type) VALUES (1, 'kiss')"); err != nil {
+		t.Fatalf("seeding settings: %v", err)
+	}
 	db.Close()
 
 	st, err := Open(t.Context(), path)
@@ -872,10 +993,14 @@ func TestStore_UpgradeFromReleasedSchema(t *testing.T) {
 		cols[name] = true
 	}
 	rows.Close()
-	for _, c := range []string{"duty_cycle_pct", "map_provider", "map_dark_style", "map_tile_key", "path_hash_size"} {
+	for _, c := range []string{"duty_cycle_pct", "map_provider", "map_dark_style", "map_tile_key", "path_hash_size", "packet_retention_days"} {
 		if !cols[c] {
 			t.Errorf("settings.%s missing after the upgrade", c)
 		}
+	}
+	// An existing node gets the default rather than a NULL the NOT NULL column cannot hold.
+	if days, err := st.Settings.PacketRetentionDays(t.Context()); err != nil || days != 7 {
+		t.Errorf("packet_retention_days after the upgrade = %d, %v; want 7", days, err)
 	}
 
 	// The sensor slot both creates tables and alters one, so an upgraded database is where a half-applied slot shows.

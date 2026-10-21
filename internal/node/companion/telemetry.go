@@ -3,11 +3,11 @@ package companion
 import (
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/meshpath"
+	"github.com/OwlShack/OwlShack/internal/sensor"
 )
 
 // reqTypeGetTelemetryData is the firmware's REQ_TYPE_GET_TELEMETRY_DATA; a companion answers no other.
@@ -79,9 +79,9 @@ func (c *Companion) telemetryPermissions(granted byte) byte {
 		mode *string
 		bit  byte
 	}{
-		{c.cfg.TelemetryBase, sensor.PermBase},
-		{c.cfg.TelemetryLocation, sensor.PermLocation},
-		{c.cfg.TelemetryEnvironment, sensor.PermEnvironment},
+		{c.conf().TelemetryBase, meshcore.TelemPermBase},
+		{c.conf().TelemetryLocation, meshcore.TelemPermLocation}, // the firmware sends position only from a GPS module, and no host here has one
+		{c.conf().TelemetryEnvironment, meshcore.TelemPermEnvironment},
 	}
 	var perms byte
 	for _, cl := range classes {
@@ -98,7 +98,7 @@ func (c *Companion) telemetryPermissions(granted byte) byte {
 // telemetryReply is the node's own readings then the operator's map; false is the silence the firmware keeps without base permission.
 func (c *Companion) telemetryReply(granted, mask byte, req *meshcore.Packet) ([]byte, bool) {
 	perms := c.telemetryPermissions(granted) &^ mask
-	if perms&sensor.PermBase == 0 {
+	if perms&meshcore.TelemPermBase == 0 {
 		return nil, false
 	}
 
@@ -110,7 +110,7 @@ func (c *Companion) telemetryReply(granted, mask byte, req *meshcore.Packet) ([]
 	maxBody := sensor.MaxReplyBody(req)
 	body, dropped := sensor.BuildReply(perms, c.selfReadings(), entries, statuses, maxBody)
 	if dropped {
-		c.log.Error("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
+		c.log.Info("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
 	}
 	return body, true
 }
@@ -144,7 +144,7 @@ func (c *Companion) sendReqReply(reqPkt *meshcore.Packet, peerPubKey, secret, pl
 		if err != nil {
 			return err
 		}
-		return c.node.SendPacketDelayed(reply, node.PriorityFloodRelay, serverReplyDelay)
+		return meshpath.Send(c.node, reply, c.contactScope(peerPubKey).MeshRegion(), serverReplyDelay)
 	}
 
 	encrypted, err := meshcore.EncryptThenMAC(secret, plaintext)
@@ -164,7 +164,7 @@ func (c *Companion) sendReqReply(reqPkt *meshcore.Packet, peerPubKey, secret, pl
 	size := c.bytesPerHop(peerPubKey)
 	reply := &meshcore.Packet{
 		Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeResponse, 0),
-		PathLength: (size - 1) << 6,
+		PathLength: meshcore.MakePathLen(size, 0),
 		Payload:    payload,
 	}
 	if outPath, hs, ok := c.learnedRoute(peerPubKey); ok {
@@ -173,7 +173,7 @@ func (c *Companion) sendReqReply(reqPkt *meshcore.Packet, peerPubKey, secret, pl
 		}
 		reply.Header = meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeResponse, 0)
 		reply.Path = outPath
-		reply.PathLength = (hs-1)<<6 | byte(len(outPath)/int(hs))
+		reply.PathLength = meshcore.MakePathLen(hs, uint8(len(outPath)/int(hs)))
 	}
-	return c.node.SendPacketDelayed(reply, node.PrioritySend, serverReplyDelay)
+	return meshpath.Send(c.node, reply, c.contactScope(peerPubKey).MeshRegion(), serverReplyDelay)
 }

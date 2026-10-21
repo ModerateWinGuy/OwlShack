@@ -3,9 +3,12 @@ package sensor
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 func boardSensor(t *testing.T, r BoardReadings, err error) (RadioBoardProvider, *radioBoard) {
@@ -33,9 +36,9 @@ func TestRadioBoard_Read(t *testing.T) {
 		// An SPI radio never will, so waiting would sit on the card for good with no reason.
 		"no board":         {err: ErrNoBoard, wantErr: "no board"},
 		"not answered yet": {r: BoardReadings{Transport: "kiss"}, notYet: true},
-		"both":             {r: BoardReadings{BatteryV: 4.1, HaveBattery: true, MCUTempC: 31.5, HaveMCUTemp: true, At: answered}, want: []Metric{Voltage, Temperature}},
+		"both":             {r: BoardReadings{BatteryV: 4.1, HaveBattery: true, MCUTempC: 31.5, HaveMCUTemp: true, At: answered, BatteryAt: answered, MCUTempAt: answered}, want: []Metric{Voltage, Temperature}},
 		// getBattMilliVolts is 0 on a board that cannot measure one, and 0 V is published as the firmware does.
-		"battery unsupported": {r: BoardReadings{HaveBattery: true, MCUTempC: 30, HaveMCUTemp: true, At: answered}, want: []Metric{Voltage, Temperature}},
+		"battery unsupported": {r: BoardReadings{HaveBattery: true, MCUTempC: 30, HaveMCUTemp: true, At: answered, BatteryAt: answered, MCUTempAt: answered}, want: []Metric{Voltage, Temperature}},
 		"neither":             {r: BoardReadings{At: answered}, wantErr: "neither"},
 		"starting":            {r: BoardReadings{SilentSince: now.Add(-10 * time.Second)}, notYet: true},
 		// Its TCP link reconnects every 60 s, so only the kept silence start shows it never answered.
@@ -97,7 +100,7 @@ func TestRadioBoard_AvailableAndDiscover(t *testing.T) {
 func TestRadioBoard_ThroughAReconnect(t *testing.T) {
 	t.Parallel()
 	answered := time.Now().Add(-5 * time.Second)
-	cur := BoardReadings{BatteryV: 4.1, HaveBattery: true, At: answered}
+	cur := BoardReadings{BatteryV: 4.1, HaveBattery: true, At: answered, BatteryAt: answered}
 	var curErr error
 	p := RadioBoardProvider{Board: func() (BoardReadings, error) { return cur, curErr }, MaxAge: 45 * time.Second}
 	opened, _ := p.Open(Spec{})
@@ -130,5 +133,201 @@ func TestRadioBoard_NoRadioStopsWaiting(t *testing.T) {
 	s.opened = time.Now().Add(-time.Minute)
 	if _, err := s.Read(context.Background()); errors.Is(err, errNotYet) || !errors.Is(err, ErrNoRadio) {
 		t.Fatalf("a minute on: %v, want ErrNoRadio shown, not waited on", err)
+	}
+}
+
+// A board with a BME280 on channel 2 and a light sensor and GPS on channel 3, as the KISS firmware numbers them.
+func boardWithSensors() BoardReadings {
+	at := time.Now().Add(-5 * time.Second)
+	return BoardReadings{Transport: "kiss", At: at, SensorsAt: at, HaveSensors: true, Sensors: []meshcore.LPPReading{
+		{Channel: 2, Type: meshcore.LPPTemperature, Value: 22.5},
+		{Channel: 2, Type: meshcore.LPPRelativeHumidity, Value: 55.0},
+		{Channel: 2, Type: meshcore.LPPBarometricPressure, Value: 1013.2},
+		{Channel: 3, Type: meshcore.LPPLuminosity, Value: 120.0},
+		{Channel: 3, Type: meshcore.LPPGPS, Value: meshcore.LPPGPSValue{Latitude: -36.8}},
+	}}
+}
+
+func boardChannelSpec(ch string) Spec {
+	return Spec{Provider: "radio", Kind: boardSensorKind, Name: "board " + ch, Options: map[string]string{optChannel: ch}}
+}
+
+// Each board channel reads like a wired sensor, in the I2C drivers' units; a value with no single metric, such as a position, is left out.
+func TestBoardSensor_Read(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		r       BoardReadings
+		channel string
+		want    []Reading
+		wantErr string
+	}{
+		"a BME280": {r: boardWithSensors(), channel: "2", want: []Reading{
+			{Metric: Temperature, Value: 22.5, Unit: "°C"}, {Metric: Humidity, Value: 55, Unit: "%"}, {Metric: Pressure, Value: 1013.2, Unit: "hPa"}}},
+		"a light sensor beside a GPS":        {r: boardWithSensors(), channel: "3", want: []Reading{{Metric: "luminosity", Value: 120, Unit: "lux"}}},
+		"a channel the board doesn't report": {r: boardWithSensors(), channel: "4", wantErr: "no sensor on channel 4"},
+		// A firmware without the query answers the rest, so the card says what is missing rather than waiting.
+		"a firmware without the query": {r: BoardReadings{Transport: "kiss", At: time.Now(), HaveBattery: true, BatteryV: 4.1}, channel: "2", wantErr: "no sensor on channel 2"},
+	} {
+		p := RadioBoardProvider{Board: func() (BoardReadings, error) { return tc.r, nil }, MaxAge: 45 * time.Second}
+		s, err := p.Open(boardChannelSpec(tc.channel))
+		if err != nil {
+			t.Fatalf("%s: open: %v", name, err)
+		}
+		got, err := s.Read(context.Background())
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%s: err %v, want it to say %q", name, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("%s: read %+v, %v; want %+v", name, got, err, tc.want)
+		}
+	}
+}
+
+// The picker offers each channel the board reports, after the board itself, and only while the board answers the query.
+func TestBoardSensor_Discover(t *testing.T) {
+	t.Parallel()
+	p := RadioBoardProvider{Board: func() (BoardReadings, error) { return boardWithSensors(), nil }}
+	got, _ := p.Discover(context.Background())
+	var details []string
+	for _, c := range got {
+		details = append(details, c.Kind+" "+c.Options[optChannel]+" "+c.Detail)
+	}
+	want := []string{
+		"radio-board  KISS board",
+		"radio-board-sensor 2 channel 2: temperature, humidity, pressure",
+		"radio-board-sensor 3 channel 3: luminosity",
+	}
+	if !slices.Equal(details, want) {
+		t.Errorf("candidates = %q, want %q", details, want)
+	}
+
+	quiet := RadioBoardProvider{Board: func() (BoardReadings, error) { return BoardReadings{Transport: "kiss"}, nil }}
+	if got, _ := quiet.Discover(context.Background()); len(got) != 1 {
+		t.Errorf("a board that hasn't reported sensors offered %d candidates, want only the board", len(got))
+	}
+}
+
+// The server refuses a channel the firmware could not report a sensor on, and two sensors on one channel.
+func TestBoardSensor_Prepare(t *testing.T) {
+	t.Parallel()
+	p := RadioBoardProvider{Board: func() (BoardReadings, error) { return boardWithSensors(), nil }}
+	h := NewHub(testLog(), p)
+	for _, ch := range []string{"", "1", "0", "256", "two", "2.5", " 2 ", "02", "+2"} {
+		if _, err := h.Prepare(boardChannelSpec(ch)); err == nil {
+			t.Errorf("channel %q was accepted", ch)
+		}
+	}
+	spec := boardChannelSpec("2")
+	spec.ID = 1
+	prepared, err := h.Prepare(spec)
+	if err != nil {
+		t.Fatalf("channel 2: %v", err)
+	}
+	h.Set([]Spec{prepared})
+	if _, err := h.Prepare(boardChannelSpec("2")); err == nil {
+		t.Error("a second sensor on board channel 2 was accepted")
+	}
+	if _, err := h.Prepare(boardChannelSpec("3")); err != nil {
+		t.Errorf("board channel 3 beside 2: %v", err)
+	}
+}
+
+// The channel map may only pick what the channel reads now; while the board is silent it can't know, so it takes any board metric.
+func TestBoardSensor_Reports(t *testing.T) {
+	t.Parallel()
+	answering := NewHub(testLog(), RadioBoardProvider{Board: func() (BoardReadings, error) { return boardWithSensors(), nil }})
+	got := answering.Reports(boardChannelSpec("3"))
+	if len(got) != 1 || !got["luminosity"] {
+		t.Errorf("channel 3 reports %v, want only luminosity", got)
+	}
+	silent := NewHub(testLog(), RadioBoardProvider{Board: func() (BoardReadings, error) { return BoardReadings{}, ErrNoRadio }})
+	if got := silent.Reports(boardChannelSpec("3")); !got[Humidity] || !got["luminosity"] {
+		t.Errorf("with the radio down, channel 3 reports %v, want every board metric", got)
+	}
+	// A sensor that didn't start after a reboot leaves its channel empty for a while; its map rows must not block every other edit.
+	if got := answering.Reports(boardChannelSpec("4")); !got[Temperature] || !got["luminosity"] {
+		t.Errorf("an empty channel reports %v, want every board metric", got)
+	}
+}
+
+// Any answer from the board is not its sensors answering theirs: a reading is as old as the answer it came in.
+func TestRadioBoard_SampledAtIsTheReadingsOwnAnswer(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	r := boardWithSensors()
+	r.At = now.Add(-time.Second)
+	r.SensorsAt = now.Add(-40 * time.Second)
+	r.BatteryV, r.HaveBattery, r.BatteryAt = 4.1, true, now.Add(-30*time.Second)
+	r.MCUTempC, r.HaveMCUTemp, r.MCUTempAt = 31.5, true, now.Add(-20*time.Second)
+	p := RadioBoardProvider{Board: func() (BoardReadings, error) { return r, nil }, MaxAge: 45 * time.Second}
+	for name, tc := range map[string]struct {
+		spec Spec
+		want time.Time
+	}{
+		"the board, as old as its older reading": {Spec{}, r.BatteryAt},
+		"a board sensor":                         {boardChannelSpec("2"), r.SensorsAt},
+	} {
+		s, err := p.Open(tc.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Read(context.Background()); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := s.(*radioBoard).SampledAt(); !got.Equal(tc.want) {
+			t.Errorf("%s: sampled %v ago, want %v, its readings' own answer rather than the board's latest", name, now.Sub(got), now.Sub(tc.want))
+		}
+	}
+}
+
+// The firmware numbers board channels in the order its sensors started, so one that fails at boot moves the next onto its channel.
+func TestBoardSensor_ARenumberedChannelReadsNothing(t *testing.T) {
+	t.Parallel()
+	st := &fakeState{}
+	r := boardWithSensors()
+	p := RadioBoardProvider{Board: func() (BoardReadings, error) { return r, nil }, MaxAge: 45 * time.Second, State: st}
+	spec := boardChannelSpec("2")
+	spec.ID = 7
+	s, err := p.Open(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Read(context.Background()); err != nil || len(got) != 3 {
+		t.Fatalf("first read: %v, %v", got, err)
+	}
+
+	// The BME280 did not start on the next boot, so the light sensor came up on channel 2; the reopen is a restart.
+	r.Sensors = []meshcore.LPPReading{{Channel: 2, Type: meshcore.LPPLuminosity, Value: 120.0}}
+	st.loaded = st.saved
+	s, err = p.Open(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Read(context.Background()); err == nil || !strings.Contains(err.Error(), "channel 2 now reads luminosity") || len(got) != 0 {
+		t.Errorf("a renumbered channel read %v, %v; want nothing and an error naming what it reads now", got, err)
+	}
+
+	r = boardWithSensors()
+	if got, err := s.Read(context.Background()); err != nil || len(got) != 3 {
+		t.Errorf("the BME280 back on channel 2: %v, %v; want it read again", got, err)
+	}
+
+	// New firmware for the same part reports one more value on its channel, which is still that part.
+	r.Sensors = append(r.Sensors, meshcore.LPPReading{Channel: 2, Type: meshcore.LPPAnalogInput, Value: 1.5})
+	if got, err := s.Read(context.Background()); err != nil || len(got) != 4 {
+		t.Errorf("channel 2 with one more value: %v, %v; want all four read", got, err)
+	}
+
+	// Moved to another channel on purpose, the sensor takes what that one reads as its own.
+	spec.Options = map[string]string{optChannel: "3"}
+	s, err = p.Open(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Read(context.Background()); err != nil || len(got) != 1 || got[0].Metric != "luminosity" {
+		t.Errorf("moved to channel 3: %v, %v; want its luminosity", got, err)
 	}
 }

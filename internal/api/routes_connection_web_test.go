@@ -1,0 +1,260 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/OwlShack/OwlShack/internal/store"
+	meshcore "github.com/OwlShack/meshcore-go"
+)
+
+func webKey(b byte) []byte { return bytes.Repeat([]byte{b}, meshcore.PubKeySize) }
+
+func webPacket(id int64, hash string, route, payloadType byte, dir string, payload []byte, hops ...byte) *store.PacketRecord {
+	raw := append([]byte{meshcore.MakeHeader(route, payloadType, 0), byte(len(hops))}, hops...)
+	snr := -float64(id)
+	return &store.PacketRecord{
+		ID: id, ReceivedAt: time.Unix(1_700_000_000+id, 0), Direction: dir,
+		Raw: append(raw, payload...), PacketHash: hash, SNR: &snr,
+	}
+}
+
+func TestConnectionWeb_Builder(t *testing.T) {
+	t.Parallel()
+	rep := func(key []byte, name string, lat, lon int32) store.Peer {
+		return store.Peer{PubKey: key, Name: name, Type: "REPEATER", Lat: lat, Lon: lon}
+	}
+	near := append([]byte{0x55, 0x01}, webKey(0)[2:]...)
+	far := append([]byte{0x55, 0x02}, webKey(0)[2:]...)
+	// twin shares our repeater's 1-byte hash but is somebody else's.
+	twin := append([]byte{0x99, 0x01}, webKey(0)[2:]...)
+	peers := []store.Peer{
+		rep(webKey(0x22), "R2", -41_100_000, 174_100_000),
+		rep(webKey(0x33), "R3", -41_200_000, 174_000_000),
+		rep(webKey(0x44), "R4", -41_300_000, 174_200_000),
+		// far is listed first and was heard last, so only the distance check picks near.
+		{PubKey: far, Name: "far", Type: "REPEATER", Lat: -45_000_000, Lon: 170_000_000, LastSeen: time.Now()},
+		rep(near, "near", -41_010_000, 174_010_000),
+		{PubKey: webKey(0x66), Name: "phone", Type: "CHAT"},
+		rep(twin, "twin", -41_050_000, 174_050_000),
+	}
+	self := &webLatLon{Lat: -41, Lon: 174}
+	relay := webKey(0x99)
+
+	// An advert payload is the sender's pubkey, a timestamp and a signature.
+	advertFromR4 := append(webKey(0x44), make([]byte, 4+64)...)
+	text := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	flood, direct := meshcore.RouteTypeFlood, meshcore.RouteTypeDirect
+	advert, grp, trace := meshcore.PayloadTypeAdvert, meshcore.PayloadTypeGrpTxt, meshcore.PayloadTypeTrace
+
+	// We relayed p8 and started p11.
+	sent := map[string]bool{"p8": false, "p11": true}
+	b := newWebBuilder(peers, self, relay, nil, sent)
+	for _, rec := range []*store.PacketRecord{
+		// p1 heard twice: first over R2, then over R3. p2 and p3 only over R2.
+		webPacket(1, "p1", flood, advert, "rx", advertFromR4, 0x22),
+		webPacket(2, "p1", flood, advert, "rx", advertFromR4, 0x33),
+		webPacket(3, "p2", flood, advert, "rx", advertFromR4, 0x22),
+		webPacket(4, "p3", flood, advert, "rx", advertFromR4, 0x22),
+		// A colliding hash resolves to the repeater nearest us; a CHAT-only hash stays unresolved.
+		webPacket(5, "p4", flood, grp, "rx", text, 0x66, 0x55),
+		// No relay path to learn from.
+		webPacket(6, "p5", direct, grp, "rx", text, 0x22),
+		webPacket(7, "p6", flood, trace, "rx", text, 0x22),
+		webPacket(8, "p7", flood, grp, "tx", text, 0x22),
+		// Our own relay heard back: our hash is on the path and we sent p8.
+		webPacket(9, "p8", flood, grp, "rx", text, 0x22, 0x99, 0x33),
+		// Our hash on the path but we never sent p10: twin relayed it.
+		webPacket(11, "p10", flood, grp, "rx", text, 0x99),
+		// Our own message heard back through R3: hidden unless asked for.
+		webPacket(12, "p11", flood, grp, "rx", text, 0x33),
+		// Zero hops and no identifiable source: nothing to draw.
+		webPacket(10, "p9", flood, grp, "rx", text),
+	} {
+		b.add(rec)
+	}
+	out := b.result()
+
+	r2, r3, r4 := hex.EncodeToString(webKey(0x22)), hex.EncodeToString(webKey(0x33)), hex.EncodeToString(webKey(0x44))
+	nearID, twinID := hex.EncodeToString(near), hex.EncodeToString(twin)
+	chains := map[string]webChainJSON{}
+	for _, c := range out.Chains {
+		chains[strings.Join(c.Nodes, ">")] = c
+	}
+	want := map[string]struct{ count, first int }{
+		r4 + ">" + r2 + ">self":    {3, 3},
+		r4 + ">" + r3 + ">self":    {1, 0},
+		"h:66>" + nearID + ">self": {1, 1},
+		twinID + ">self":           {1, 1},
+	}
+	if len(chains) != len(want) {
+		t.Errorf("got %d chains %v, want %d", len(chains), keys(chains), len(want))
+	}
+	for k, w := range want {
+		c, ok := chains[k]
+		if !ok {
+			t.Errorf("missing chain %s", k)
+			continue
+		}
+		if c.Count != w.count || c.First != w.first {
+			t.Errorf("chain %s: count %d first %d, want %d %d", k, c.Count, c.First, w.count, w.first)
+		}
+	}
+
+	viaR2 := chains[r4+">"+r2+">self"]
+	if viaR2.SNRN != 3 || *viaR2.SNRMin != -4 || *viaR2.SNRMax != -1 || viaR2.SNRSum != -8 {
+		t.Errorf("R2 last-link SNR: n %d min %v max %v sum %v, want 3 -4 -1 -8", viaR2.SNRN, *viaR2.SNRMin, *viaR2.SNRMax, viaR2.SNRSum)
+	}
+
+	nodes := map[string]webNodeJSON{}
+	for _, n := range out.Nodes {
+		nodes[n.ID] = n
+	}
+	if n := nodes[r4]; n.Observations != 4 || n.Packets != 3 {
+		t.Errorf("R4: observations %d packets %d, want 4 3", n.Observations, n.Packets)
+	}
+	if n := nodes[nearID]; len(n.Candidates) != 2 || n.Pinned {
+		t.Errorf("near: %d candidates, pinned %v; want both 55 repeaters, unpinned", len(n.Candidates), n.Pinned)
+	}
+	if _, ok := nodes["h:66"]; !ok {
+		t.Error("a hash matching only a CHAT node should stay an unresolved h:66 node")
+	}
+
+	own := newWebBuilder(peers, self, relay, nil, sent)
+	own.ownEchoes = true
+	own.add(webPacket(12, "p11", flood, grp, "rx", text, 0x33))
+	if out := own.result(); len(out.Chains) != 1 || strings.Join(out.Chains[0].Nodes, ">") != r3+">self" {
+		t.Errorf("ownEchoes: got %v, want our own message as one R3 route", out.Chains)
+	}
+
+	// The operator overrides the distance pick with far, and says no known repeater is 33.
+	farID := hex.EncodeToString(far)
+	pinned := newWebBuilder(peers, self, relay, map[string][]byte{"55": far, "33": nil}, nil)
+	pinned.add(webPacket(2, "p1", flood, advert, "rx", advertFromR4, 0x33))
+	pinned.add(webPacket(5, "p4", flood, grp, "rx", text, 0x66, 0x55))
+	out = pinned.result()
+	chains = map[string]webChainJSON{}
+	for _, c := range out.Chains {
+		chains[strings.Join(c.Nodes, ">")] = c
+	}
+	for _, k := range []string{r4 + ">h:33>self", "h:66>" + farID + ">self"} {
+		if _, ok := chains[k]; !ok {
+			t.Errorf("pinned: missing chain %s, got %v", k, keys(chains))
+		}
+	}
+	nodes = map[string]webNodeJSON{}
+	for _, n := range out.Nodes {
+		nodes[n.ID] = n
+	}
+	if n := nodes[farID]; !n.Pinned || len(n.Candidates) != 2 {
+		t.Errorf("far: pinned %v with %d candidates, want pinned with 2", n.Pinned, len(n.Candidates))
+	}
+	if n := nodes["h:33"]; !n.Pinned || len(n.Candidates) != 1 {
+		t.Errorf("h:33: pinned %v with %d candidates, want pinned with R3 still offered", n.Pinned, len(n.Candidates))
+	}
+}
+
+// A repeater's own advert starts at it, so its first node had no feeder; the same nodes from a relayed text did.
+func TestConnectionWeb_OriginMarksTheSender(t *testing.T) {
+	t.Parallel()
+	peers := []store.Peer{
+		{PubKey: webKey(0x22), Name: "R2", Type: "REPEATER"},
+		{PubKey: webKey(0x44), Name: "R4", Type: "REPEATER"},
+	}
+	flood := meshcore.RouteTypeFlood
+	advertFromR4 := append(webKey(0x44), make([]byte, 4+64)...)
+	advertFromStranger := append(webKey(0x77), make([]byte, 4+64)...)
+	text := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	b := newWebBuilder(peers, nil, nil, nil, nil)
+	b.add(webPacket(1, "a1", flood, meshcore.PayloadTypeAdvert, "rx", advertFromR4, 0x22))
+	b.add(webPacket(2, "t1", flood, meshcore.PayloadTypeGrpTxt, "rx", text, 0x44, 0x22))
+	b.add(webPacket(3, "a2", flood, meshcore.PayloadTypeAdvert, "rx", advertFromStranger, 0x44, 0x22))
+
+	r2, r4 := hex.EncodeToString(webKey(0x22)), hex.EncodeToString(webKey(0x44))
+	type route struct {
+		nodes  string
+		origin bool
+	}
+	got := map[route]int{}
+	for _, c := range b.result().Chains {
+		got[route{strings.Join(c.Nodes, ">"), c.Origin}] = c.Count
+	}
+	want := map[route]int{
+		{r4 + ">" + r2 + ">self", true}:  1,
+		{r4 + ">" + r2 + ">self", false}: 2,
+	}
+	if len(got) != len(want) {
+		t.Errorf("got routes %v, want %v", got, want)
+	}
+	for r, n := range want {
+		if got[r] != n {
+			t.Errorf("route %s origin %v: count %d, want %d", r.nodes, r.origin, got[r], n)
+		}
+	}
+}
+
+// A pin names one of the repeaters the sheet offers for that hash, or none of them; any other key is refused.
+func TestPinHop_OnlyARepeaterCandidate(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "pins.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	rep := append([]byte{0x55, 0x01}, webKey(1)[2:]...)
+	chat := append([]byte{0x55, 0x02}, webKey(2)[2:]...)
+	unknown := append([]byte{0x55, 0x03}, webKey(3)[2:]...)
+	st.WriteSync(func() {
+		if err = st.Peers.Upsert(ctx, &store.Peer{PubKey: rep, Name: "R", Type: "REPEATER"}); err == nil {
+			err = st.Peers.Upsert(ctx, &store.Peer{PubKey: chat, Name: "Bob", Type: "CHAT"})
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, tc := range []struct {
+		name, body string
+		want       int
+	}{
+		{"repeater", `{"pubkey":"` + hex.EncodeToString(rep) + `"}`, http.StatusNoContent},
+		{"none of these", `{"pubkey":null}`, http.StatusNoContent},
+		{"chat node", `{"pubkey":"` + hex.EncodeToString(chat) + `"}`, http.StatusBadRequest},
+		{"unknown key", `{"pubkey":"` + hex.EncodeToString(unknown) + `"}`, http.StatusBadRequest},
+		{"other hash", `{"pubkey":"` + hex.EncodeToString(rep) + `"}`, http.StatusBadRequest},
+	} {
+		hash := "55"
+		if tc.name == "other hash" {
+			hash = "56"
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/api/connection-web/pins/"+hash, strings.NewReader(tc.body)))
+		if rec.Code != tc.want {
+			t.Errorf("%s: %d %s, want %d", tc.name, rec.Code, rec.Body, tc.want)
+		}
+	}
+	pins, err := st.HopPins.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin, ok := pins["55"]; !ok || pin != nil || len(pins) != 1 {
+		t.Errorf("pins %v, want only 55 as none of these", pins)
+	}
+}
+
+func keys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

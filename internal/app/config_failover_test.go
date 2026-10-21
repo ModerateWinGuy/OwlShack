@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/meshcore-go/OwlShack/internal/api"
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 func TestFailoverConfigRoundTrip(t *testing.T) {
@@ -115,3 +115,28 @@ func TestLocationFromAPI_RefusesAMissingField(t *testing.T) {
 }
 
 func f64(v float64) *float64 { return &v }
+
+// Retention is required and range-checked before it reaches the store, so the API never stores a guess.
+func TestSaveSettings_PacketRetention(t *testing.T) {
+	st, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "config.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := initConfigTables(t.Context(), st); err != nil {
+		t.Fatal(err)
+	}
+	b := &backend{db: st}
+	days := func(n int) *int { return &n }
+	for _, bad := range []*int{nil, days(0), days(366)} {
+		if err := b.SaveSettings(t.Context(), api.SettingsInput{PacketRetentionDays: bad}); err == nil {
+			t.Errorf("saved packetRetentionDays %v, want it refused", bad)
+		}
+	}
+	if err := b.SaveSettings(t.Context(), api.SettingsInput{PacketRetentionDays: days(30)}); err != nil {
+		t.Fatalf("saving 30 days: %v", err)
+	}
+	if got, err := st.Settings.PacketRetentionDays(t.Context()); err != nil || got != 30 {
+		t.Errorf("stored %d, %v; want 30", got, err)
+	}
+}

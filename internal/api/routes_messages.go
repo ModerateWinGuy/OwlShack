@@ -1,12 +1,17 @@
 package api
 
 import (
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/store"
+	meshcore "github.com/OwlShack/meshcore-go"
+
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 func (s *Server) handleAddChannel(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +25,7 @@ func (s *Server) handleAddChannel(w http.ResponseWriter, r *http.Request) {
 
 	adder, _, ok := mutator(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -37,18 +42,7 @@ func (s *Server) handleAddChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := adder(body.Name, body.PrivateKey); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-
-	if persist := s.ConfigPersist(); persist != nil {
-		if err := persist(r.Context()); err != nil {
-			s.log.Error("config persist failed after channel add", "error", err)
-		}
-	}
-
-	w.WriteHeader(http.StatusNoContent)
+	s.finishChannelEdit(w, r, "add", adder(body.Name, body.PrivateKey))
 }
 
 func (s *Server) handleRemoveChannel(w http.ResponseWriter, r *http.Request) {
@@ -63,21 +57,34 @@ func (s *Server) handleRemoveChannel(w http.ResponseWriter, r *http.Request) {
 
 	_, remover, ok := mutator(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
-	if err := remover(channelName); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
+	s.finishChannelEdit(w, r, "remove", remover(channelName))
+}
+
+// finishChannelEdit answers a runtime channel edit: 422 for a request at fault, its own status when it carries one, 409 for one the channels refuse, and 500 when the change is made but not saved, so it would be lost at restart.
+func (s *Server) finishChannelEdit(w http.ResponseWriter, r *http.Request, op string, err error) {
+	if err != nil {
+		status := http.StatusConflict
+		verr, serr := (*ValidationError)(nil), (*StatusError)(nil)
+		switch {
+		case errors.As(err, &verr):
+			status = http.StatusUnprocessableEntity
+		case errors.As(err, &serr):
+			status = serr.Status
+		}
+		writeError(w, status, err.Error())
 		return
 	}
-
 	if persist := s.ConfigPersist(); persist != nil {
 		if err := persist(r.Context()); err != nil {
-			s.log.Error("config persist failed after channel remove", "error", err)
+			s.log.Error("config persist failed after a channel edit", "op", op, "error", err)
+			writeError(w, http.StatusInternalServerError, "the channel was changed but not saved, so it reverts at restart: "+err.Error())
+			return
 		}
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -87,7 +94,7 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	provider := s.companionProvider()
 
 	if provider == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -98,7 +105,7 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeError(w, http.StatusNotFound, "companion not found")
+	s.companionNotRunning(w, r)
 }
 
 func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +159,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	channelSender, dmSender, ok := lookup(name)
 	if !ok {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -172,6 +179,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	var sendErr error
 	if strings.HasPrefix(body.Channel, "dm:") {
 		pubkeyHex := strings.TrimPrefix(body.Channel, "dm:")
+		if pk, err := hex.DecodeString(pubkeyHex); err != nil || len(pk) != meshcore.PubKeySize {
+			writeError(w, http.StatusBadRequest, "invalid pubkey hex")
+			return
+		}
 		if dmSender == nil {
 			writeError(w, http.StatusBadRequest, "direct messaging not supported")
 			return
@@ -182,8 +193,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sendErr != nil {
-		s.log.Error("channel/dm send", "error", sendErr)
-		writeError(w, http.StatusInternalServerError, "send failed: "+sendErr.Error())
+		s.writeOpError(w, "channel/dm send", fmt.Errorf("send failed: %w", sendErr))
 		return
 	}
 
@@ -197,12 +207,14 @@ type messageJSON struct {
 	Text         string   `json:"text"`
 	Direction    string   `json:"direction"`
 	Timestamp    string   `json:"timestamp"`
+	ReceivedAt   string   `json:"receivedAt"`
 	SNR          *float64 `json:"snr,omitempty"`
 	RSSI         *int8    `json:"rssi,omitempty"`
 	RepeatCount  *int     `json:"repeatCount,omitempty"`
 	Hops         *int     `json:"hops,omitempty"`
 	PathHashSize *int     `json:"pathHashSize,omitempty"`
 	Status       *string  `json:"status,omitempty"`
+	FloodScope   string   `json:"floodScope"`
 }
 
 func toMessageJSON(m store.Message) messageJSON {
@@ -213,12 +225,14 @@ func toMessageJSON(m store.Message) messageJSON {
 		Text:         m.Text,
 		Direction:    m.Direction,
 		Timestamp:    m.Timestamp.UTC().Format(time.RFC3339),
+		ReceivedAt:   m.ReceivedAt.UTC().Format(time.RFC3339),
 		SNR:          m.SNR,
 		RSSI:         m.RSSI,
 		RepeatCount:  m.RepeatCount,
 		Hops:         m.Hops,
 		PathHashSize: m.PathHashSize,
 		Status:       m.Status,
+		FloodScope:   m.FloodScope,
 	}
 }
 
@@ -264,8 +278,12 @@ func (s *Server) handleRetryMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, dmSender, ok := lookup(name)
-	if !ok || dmSender == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+	if !ok {
+		s.companionNotRunning(w, r)
+		return
+	}
+	if dmSender == nil {
+		writeError(w, http.StatusBadRequest, "direct messaging not supported")
 		return
 	}
 

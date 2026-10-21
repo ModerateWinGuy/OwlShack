@@ -36,6 +36,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { snrTextClass } from "@/components/SignalStrength";
 import { formatDateTime, formatShortTime, truncate, truncateMid } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { regionName } from "@/components/RegionSelect";
 
 interface Packet {
   id?: number;
@@ -52,6 +53,8 @@ interface Packet {
   summary?: string;
   snr?: number;
   rssi?: number;
+  // "everywhere", "region:<name>" or "unknown" (a region not in Settings).
+  floodScope?: string;
 }
 
 interface PacketGroup {
@@ -101,8 +104,15 @@ function hopSense(route: string | undefined): string | null {
 // layouts, where the Hops column is hidden entirely.
 function routeLabel(p: Packet): string {
   if (!p.route) return "—";
-  if (!p.hops) return p.route;
-  return `${p.route} · ${p.hops}`;
+  const region = packetRegion(p);
+  const route = region ? `${p.route} ${region}` : p.route;
+  if (!p.hops) return route;
+  return `${route} · ${p.hops}`;
+}
+
+// packetRegion names a scoped packet's region, or null for an unscoped one.
+function packetRegion(p: Packet): string | null {
+  return p.floodScope === "unknown" ? "other region" : regionName(p.floodScope);
 }
 
 function packetKey(p: Packet): string {
@@ -416,7 +426,7 @@ export function PacketsPage() {
                       {p.snr != null && (
                         <span className={snrTextClass(p.snr)}>{p.snr.toFixed(1)}dB</span>
                       )}
-                      {p.route && <span className="uppercase">{routeLabel(p)}</span>}
+                      {p.route && <span>{routeLabel(p)}</span>}
                     </div>
                   </div>
                 );
@@ -515,7 +525,7 @@ export function PacketsPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <span className="font-mono text-xs uppercase tracking-[0.08em] text-muted-foreground">
+                        <span className="font-mono text-xs tracking-[0.08em] text-muted-foreground">
                           {routeLabel(p)}
                         </span>
                       </TableCell>
@@ -577,7 +587,7 @@ export function PacketsPage() {
           side="right"
           showCloseButton={false}
           className={cn(
-            "p-0 bg-card border-l border-border sm:max-w-none w-full max-w-[100vw]",
+            "p-0 bg-card border-l border-border sm:max-w-none w-full max-w-screen",
           )}
           style={{ width: sidebarWidth }}
         >
@@ -686,6 +696,13 @@ function PacketDetail({
                 <span className="text-muted-foreground/60">—</span>
               )}
             </dd>
+
+            {packetRegion(p) && (
+              <>
+                <dt className="label-overline">Region</dt>
+                <dd>{packetRegion(p)}</dd>
+              </>
+            )}
 
             <dt className="label-overline">Path Size</dt>
             <dd className="tabular-nums">
@@ -831,7 +848,7 @@ function PacketDetail({
                         {dirGlyph(o.direction)}
                       </span>
                     </TableCell>
-                    <TableCell className="align-top font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+                    <TableCell className="align-top font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
                       {routeLabel(o)}
                     </TableCell>
                     <TableCell className="text-right align-top font-mono text-xs tabular-nums pr-5">

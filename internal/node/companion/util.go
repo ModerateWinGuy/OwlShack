@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/trigger"
-	meshcore "github.com/meshcore-go/meshcore-go"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/trigger"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 func identityFromHexSeed(seedHex string) (meshcore.LocalIdentity, error) {
@@ -23,10 +23,19 @@ func channelFromRef(ref config.ChannelRef) (*meshcore.ChannelEntry, error) {
 		return meshcore.NewChannelFromPSK(ref.Name, psk)
 	}
 	if strings.EqualFold(ref.Name, "Public") {
-		return meshcore.NewChannelFromBase64("Public", "izOH6cXN6mrJ5e26oRXNcg==")
+		return meshcore.PublicChannel(), nil
 	}
 	nCh := meshcore.NormalizeHashtag(ref.Name)
 	return meshcore.NewChannelFromHashtag(nCh), nil
+}
+
+// ChannelKey is the key a channel ref stands for, a hashtag's or Public's taken from its name; nil for a bad key.
+func ChannelKey(ref config.ChannelRef) []byte {
+	ch, err := channelFromRef(ref)
+	if err != nil {
+		return nil
+	}
+	return ch.PSK
 }
 
 func resolvePathHashSize(configured *uint8, evt trigger.Event, def uint8) uint8 {

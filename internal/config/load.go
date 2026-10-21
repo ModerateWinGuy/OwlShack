@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/hardware/openhop"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/hardware/openhop"
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
@@ -155,11 +155,34 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("pathHashSize must be %d-%d bytes", MinPathHashSize, MaxPathHashSize)
 	}
 
+	if len(c.FloodRegions) > MaxFloodRegions {
+		return fmt.Errorf("at most %d regions in the list", MaxFloodRegions)
+	}
+	seenRegion := make(map[string]bool, len(c.FloodRegions))
+	tree := make([]RepeaterRegion, 0, len(c.FloodRegions))
+	for _, rg := range c.FloodRegions {
+		if err := ValidateRegionName(rg.Name); err != nil {
+			return err
+		}
+		if seenRegion[rg.Name] {
+			return fmt.Errorf("region %q is listed twice", rg.Name)
+		}
+		seenRegion[rg.Name] = true
+		tree = append(tree, RepeaterRegion{Name: rg.Name, Parent: rg.Parent})
+	}
+	if err := validateRegionParents(tree); err != nil {
+		return err
+	}
+	if err := c.FloodScope.Validate(false); err != nil {
+		return fmt.Errorf("floodScope: %w", err)
+	}
+
 	// Zero companions is valid: a fresh install and an observer-only setup both have none.
 
 	// A startCompanions failure after a reload exits the process, so anything that would fail companion construction must be rejected here.
 	seen := make(map[string]bool, len(c.Companions))
 	seenKeys := make(map[string]string, len(c.Companions))
+	appPorts := make(map[int]string, len(c.Companions))
 	for i, comp := range c.Companions {
 		if comp.Name == "" {
 			return fmt.Errorf("companion[%d]: name is required", i)
@@ -180,6 +203,23 @@ func (c *Config) Validate() error {
 		}
 		if v := comp.PathHashSize; v != nil && (*v < MinPathHashSize || *v > MaxPathHashSize) {
 			return fmt.Errorf("companion %q: pathHashSize must be %d-%d bytes", comp.Name, MinPathHashSize, MaxPathHashSize)
+		}
+		if err := comp.FloodScope.Validate(true); err != nil {
+			return fmt.Errorf("companion %q floodScope: %w", comp.Name, err)
+		}
+		if p := comp.App.Port; (comp.App.Enabled || p != 0) && (p < AppPortFirst || p > AppPortLast) {
+			return fmt.Errorf("companion %q: the app port must be %d-%d", comp.Name, AppPortFirst, AppPortLast)
+		}
+		if q := comp.App.QueueSize; comp.App.Enabled || q != 0 {
+			if err := CheckAppQueueSize(q); err != nil {
+				return fmt.Errorf("companion %q: %w", comp.Name, err)
+			}
+		}
+		if comp.App.Enabled {
+			if other, dup := appPorts[comp.App.Port]; dup {
+				return fmt.Errorf("companions %q and %q both let the app in on port %d", other, comp.Name, comp.App.Port)
+			}
+			appPorts[comp.App.Port] = comp.Name
 		}
 		switch comp.DMPolicyOrDefault() {
 		case DMPolicyContacts, DMPolicyAllowlist, DMPolicyAnyone:
@@ -202,10 +242,22 @@ func (c *Config) Validate() error {
 		}
 		// Standalone channels too: a bad key still fails companion construction.
 		if comp.Channels != nil {
+			slots := map[int]string{}
 			for j, ch := range *comp.Channels {
 				if err := ch.Validate(); err != nil {
 					return fmt.Errorf("companion %q channel[%d] %q: %w", comp.Name, j, ch.Name, err)
 				}
+				if ch.Slot == nil {
+					continue
+				}
+				// One past the node's table is skipped, not refused: a database that loaded before must still load.
+				if *ch.Slot < 0 {
+					return fmt.Errorf("companion %q channel %q: slot %d is negative", comp.Name, ch.Name, *ch.Slot)
+				}
+				if other, dup := slots[*ch.Slot]; dup {
+					return fmt.Errorf("companion %q: channels %q and %q are both in slot %d", comp.Name, other, ch.Name, *ch.Slot)
+				}
+				slots[*ch.Slot] = ch.Name
 			}
 		}
 	}
@@ -229,29 +281,21 @@ func (c *Config) Validate() error {
 		if r.LoopDetect != nil && *r.LoopDetect != "" && !loopDetectLevels[*r.LoopDetect] {
 			return fmt.Errorf("repeater %q: invalid loopDetect %q (want off|minimal|moderate|strict)", r.Name, *r.LoopDetect)
 		}
-		if r.FloodMax != nil && (*r.FloodMax < 1 || *r.FloodMax > 64) {
-			return fmt.Errorf("repeater %q: floodMax must be between 1 and 64", r.Name)
+		if r.FloodMax != nil && (*r.FloodMax < 0 || *r.FloodMax > 64) {
+			return fmt.Errorf("repeater %q: floodMax must be between 0 and 64", r.Name)
 		}
-		if r.FloodMaxAdvert != nil && (*r.FloodMaxAdvert < 1 || *r.FloodMaxAdvert > 64) {
-			return fmt.Errorf("repeater %q: floodMaxAdvert must be between 1 and 64", r.Name)
+		if r.FloodMaxAdvert != nil && (*r.FloodMaxAdvert < 0 || *r.FloodMaxAdvert > 64) {
+			return fmt.Errorf("repeater %q: floodMaxAdvert must be between 0 and 64", r.Name)
 		}
 		if r.FloodMaxUnscoped != nil && (*r.FloodMaxUnscoped < 0 || *r.FloodMaxUnscoped > 64) {
 			return fmt.Errorf("repeater %q: floodMaxUnscoped must be between 0 and 64", r.Name)
 		}
-		if r.DefaultRegion != "" {
-			if r.DefaultRegion == WildcardRegion {
-				return fmt.Errorf(`repeater %q: defaultRegion cannot be "*"`, r.Name)
-			}
-			found := false
-			for _, rg := range r.Regions {
-				if rg.Name == r.DefaultRegion {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("repeater %q: defaultRegion %q is not a configured region", r.Name, r.DefaultRegion)
-			}
+		if err := r.FloodScope.Validate(false); err != nil {
+			return fmt.Errorf("repeater %q floodScope: %w", r.Name, err)
+		}
+		// Firmware default_scope is one of its own regions.
+		if _, ok := r.FloodScope.RegionName(); ok && !slices.ContainsFunc(r.Regions, func(rg RepeaterRegion) bool { return r.FloodScope.NamesRegion(rg.Name) }) {
+			return fmt.Errorf("repeater %q: floodScope %q is not one of its regions", r.Name, r.FloodScope)
 		}
 		if r.HomeRegion != "" {
 			found := false
@@ -288,18 +332,22 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("repeater %q: floodAdvertInterval must be 0 (off) or %d-%d seconds (%d-%d hours)",
 				r.Name, MinFloodAdvertIntervalSecs, MaxFloodAdvertIntervalSecs, MinFloodAdvertIntervalSecs/3600, MaxFloodAdvertIntervalSecs/3600)
 		}
-		if len(r.Regions) > meshcore.MaxRegions {
-			return fmt.Errorf("repeater %q: at most %d regions", r.Name, meshcore.MaxRegions)
+		if n := len(r.Regions) - countWildcard(r.Regions); n > meshcore.MaxRegions {
+			return fmt.Errorf("repeater %q: at most %d regions besides \"*\"", r.Name, meshcore.MaxRegions)
 		}
 		seenRegion := make(map[string]bool, len(r.Regions))
 		for i, rg := range r.Regions {
 			if err := validateRegionName(rg.Name); err != nil {
 				return fmt.Errorf("repeater %q region[%d]: %w", r.Name, i, err)
 			}
-			if seenRegion[rg.Name] {
+			key := strings.TrimPrefix(rg.Name, "#") // the firmware's findByName ignores the "#"
+			if seenRegion[key] {
 				return fmt.Errorf("repeater %q: duplicate region %q", r.Name, rg.Name)
 			}
-			seenRegion[rg.Name] = true
+			seenRegion[key] = true
+		}
+		if err := validateRegionParents(r.Regions); err != nil {
+			return fmt.Errorf("repeater %q: %w", r.Name, err)
 		}
 	}
 
@@ -316,7 +364,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("dutyCycle is a percentage: must be greater than 0 and at most 100")
 	}
 
+	if c.PacketRetentionDays != nil && (*c.PacketRetentionDays < 1 || *c.PacketRetentionDays > 365) {
+		return fmt.Errorf("packetRetentionDays must be between 1 and 365")
+	}
+
 	if c.Mqtt != nil {
+		if k := c.Mqtt.NodeKind; k != nil && *k != MqttNodeCompanion && *k != MqttNodeRepeater {
+			return fmt.Errorf("mqtt nodeKind %q must be companion or repeater", *k)
+		}
+		if c.Mqtt.FedByRepeater() {
+			if c.Repeater == nil {
+				return fmt.Errorf("mqtt is fed by the repeater, but no repeater is configured")
+			}
+			if c.Mqtt.Node != nil && *c.Mqtt.Node != "" {
+				return fmt.Errorf("mqtt node %q names a companion, but the repeater feeds mqtt", *c.Mqtt.Node)
+			}
+		}
 		if c.Mqtt.Node != nil && *c.Mqtt.Node != "" && !seen[*c.Mqtt.Node] {
 			return fmt.Errorf("mqtt node %q does not match any companion", *c.Mqtt.Node)
 		}

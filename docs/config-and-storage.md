@@ -42,14 +42,42 @@ radio/connection change still restarts everything (modem reconnect);
   reload so racing requests cannot each pass the checks the other breaks.
   The `radio` provider reads the board's battery and MCU temperature from what
   the liveness probe already cached (`liveRadio` in `internal/app/sensors.go`),
-  so it adds no link traffic; its sample time is the board's last answer, kept
-  across a reconnect like health's, and a 0 mV battery (the firmware's "not
-  supported") reads 0 V, as the firmware sends it. SPI has no board, so the
-  provider is unavailable there.
+  so it adds no link traffic. Each reading (battery, MCU temperature, noise
+  floor, board sensors) goes stale and is timed by its own query's last answer,
+  never by the board answering something else, an error reply included; the
+  battery and MCU pair is as old as the older of the two. A 0 mV battery (the
+  firmware's "not supported") reads 0 V, as the firmware sends it. SPI has no
+  board, so the provider is unavailable there. On KISS the same 30 s poll also
+  sends `GET_SENSORS` with the environment permission and keeps the decoded
+  LPP; each channel the board reports is a `radio-board-sensor` (option
+  `channel`, 2 to 255, one sensor per channel), reading in the I2C drivers'
+  metrics and units where the LPP type names one. A generic sensor value has no
+  unit, so a board BME680's gas is a unitless `generic_sensor`: the firmware
+  puts the gas resistance there, or the IAQ index on a BSEC build, and nothing
+  on the wire says which. A new map row may only pick what that channel reads
+  now (any board metric while it reads nothing); a saved row, and an edit that
+  takes nothing away, are not held to what it reads now. The firmware numbers
+  board channels in the order its sensors started, so one that fails to start
+  moves the next onto its channel: each board sensor records the metrics its
+  channel first read (`sensor_state`, as `channel:metrics`) and, while the
+  channel reads another set, reads nothing and says so rather than read
+  another part. Moving it to another channel records afresh; after rewiring
+  the board, delete its board sensors and add them again. Position is not
+  asked for, and openHop has no sensors command.
   `companions.telem_base/loc/env` hold who may read each telemetry class
   (`deny`, `selected`, `contacts`), written only by
   `PUT /api/config/companions/{id}/telemetry`, so every other companion edit
-  carries them through. The map keys on node kind and id with no foreign key
+  carries them through. `companions.app_enabled`, `app_port` and
+  `app_queue_size` are the MeshCore app's TCP access (see
+  [firmware-protocol.md](./firmware-protocol.md)), written only by
+  `PUT /api/config/companions/{id}/app`; the port is 5000-5015, kept while
+  access is off, and unique among companions with access on.
+  `app_queue` holds the message frames the app has yet to sync (the firmware's
+  offline queue): up to `app_queue_size` per companion (16-10000, default 256,
+  most firmware builds' `OFFLINE_QUEUE_SIZE`), the oldest channel messages
+  dropped first, or the new message when only DMs fill it. A new size applies
+  on the next message without reopening the port; DMs past a lowered size stay
+  until the app syncs them. A trigger empties it when access goes off. The map keys on node kind and id with no foreign key
   (a row may be the repeater's), so deleting a companion or the repeater deletes
   its rows, and a pruned backup drops rows whose node is gone.
 - **Config is stored relationally** (the config tables: `settings`,
@@ -137,9 +165,8 @@ radio/connection change still restarts everything (modem reconnect);
   name a private broker's host and port. Both are ages for the same reason the
   radio's are: `connected` is a sample, so a broker reconnecting every thirty
   seconds reads `true` on nearly every scrape and only a connection age resetting
-  to near zero reveals the flapping, while the observer never clears its last
-  error on reconnect, so a boolean built from it would stay true for the life of
-  the process. Leaving the nodes out costs
+  to near zero reveals the flapping. `lastErrorSecs` is null once a connection
+  has no error of its own. Leaving the nodes out costs
   nothing: peer counts are hydrated from SQLite and only grow, so they read the
   same with the antenna unplugged, and a node that fails to start exits the
   process rather than quietly leaving a list. "No node is running at all" is the
@@ -229,6 +256,31 @@ radio/connection change still restarts everything (modem reconnect);
   The output is deterministic (sorted ids, fixed rounding, no gzip timestamp), so
   rerunning the generator on an unchanged tag must leave `git status` clean; if it
   does not, the committed file is stale.
+- **Region scopes cascade like path hash size, one level deeper.** `settings.flood_regions`
+  (JSON `[{name, parent}]`, parent `*` at the top, as `repeater.regions` holds it) is the list every picker offers and received floods are labelled from, with
+  the repeater's relay regions; `settings.flood_scope` is the default (`everywhere` or
+  `region:<name>`). `companions`, `companion_channels`, `companion_contacts` and `triggers`
+  each carry `flood_scope` (`inherit` | `everywhere` | `region:<name>`, CHECKed), and
+  `config.ResolveScope` takes the most specific that does not inherit: channel or contact, then
+  companion, then settings; a bot's own comes before the channel or contact it posts to. An API save
+  that changes a scope to a region missing from the Settings list is refused, and the Settings
+  save refuses dropping a listed region still in use, naming its users. A scope left unlisted by an
+  older build stays until changed, and loading never checks, so a stored config always starts. The API requires `floodScope` on every save that carries it; a config file that leaves it
+  out inherits, except the repeater's, which is everywhere. `repeater.flood_scope` is its own (firmware `default_scope`): `everywhere` or one
+  of `repeater.regions`, never inherited; picking one clears its deny flood and removing it resets
+  the scope, as on firmware. Sends we build are scoped with `Packet.SetScope`; channel posts and DMs use the
+  library's `Send*Scoped`. `messages.flood_scope` records what each message carried (`unknown` is
+  a region not in the list, `unrecorded` predates it); packets are labelled on read.
+  Our repeater finds a region as the firmware's `findByName` does, with a leading `#` ignored:
+  `#nz` and `nz` are one region, so both in a list is a duplicate, and a home, parent, add, deny
+  flood or remove naming either finds the stored one and keeps its stored name.
+  Both lists nest by parent for organising only (matching ignores it), are validated alike (each
+  parent listed or `*`, no loops), and every picker shows the tree. Removing a Settings region moves
+  its sub-regions up to its parent; copying from our repeater brings its parents, less `*` and `$` names.
+  **Discover nearby** (`app/region_scan.go`, outliving a reload) runs a zero-hop discovery for
+  repeaters, then sends each an anon REGIONS request (type 0x01, direct, empty reply path, from the
+  first companion) and retries once: the firmware answers only a direct one, and only 4 every 3
+  minutes from anyone (`anon_limiter(4, 180)`), so a second retry would cost half that.
 - **DM acceptance is `companions.dm_policy`** (`contacts` | `allowlist` |
   `anyone`, default `contacts`) with `companions.dm_allow` holding the
   allowlist's pubkeys newline-encoded, the same encoding `triggers.contacts`
@@ -237,15 +289,28 @@ radio/connection change still restarts everything (modem reconnect);
   response to a session we opened, so it is never gated. Changing either field
   restarts the companion, since `triggersOnlyChange` only spares a trigger-only
   edit — so the RX path reads them without a lock.
-- **MQTT is top-level, one node.** `Config.Mqtt` (`mqtt.node` selects the
-  feeding companion, empty = first; `enabled` nil = on). Stored as
-  `mqtt_settings.node_companion_id` (a real FK, ON DELETE SET NULL) and
-  resolved to the companion **name** in `assembleFromRows` — so renaming the
-  feed node no longer breaks the reference. The MqttPage node selector is by
-  companion id. Legacy per-companion `[companion.mqtt]` blocks are hoisted by
-  `ApplyDefaults` on load — first one wins. At runtime `startCompanions` copies
-  the block into the selected companion's config; `CompanionConfig.Mqtt` is
-  otherwise deprecated.
+- **MQTT is top-level, one node, always named.** `Config.Mqtt` (`mqtt.nodeKind`
+  is `companion`, the default, or `repeater`; for a companion `mqtt.node` names
+  it; `enabled` nil = on). Stored as `mqtt_settings.node_kind` (migration 028,
+  CHECKed) and `node_companion_id` (a real FK, ON DELETE SET NULL), resolved to
+  the companion **name** in `assembleFromRows`, so renaming the feed node
+  doesn't break the reference. Nothing falls back to "the first companion":
+  028 writes the first companion's id into a companion feed that named none,
+  an imported file naming no node stores its first companion, and a feed
+  naming no running node publishes nothing (logged). `PUT /api/config/mqtt`
+  requires `nodeKind`, and a `nodeCompanionId` for a companion feed whenever a
+  companion exists; it refuses a repeater that isn't configured, a companion id
+  that doesn't exist, an id with the repeater, and a companion feed with no
+  companion while MQTT publishes (enabled, with an enabled broker). Any config
+  write that would leave MQTT publishing with no node, such as enabling a
+  broker, is a 422; one that finds it so already (an upgrade or a restore) is
+  let through. Deleting the node that feeds MQTT is a 409 while it publishes;
+  otherwise the choice is cleared. A backup restored without the repeater
+  clears a repeater feed's choice the same way, or the config wouldn't load. Legacy per-companion
+  `[companion.mqtt]` blocks are hoisted by `ApplyDefaults` on load, first one
+  wins; `CompanionConfig.Mqtt` is otherwise unused. At runtime the app owns the
+  one observer (`app/mqtt_feed.go`), built with the feeding node's name and
+  identity, and rebuilds it only when the MQTT settings or that node change.
 - **Broker topics are templates.** `broker.packetTopic` / `broker.statusTopic`
   take placeholders `{iata} {pubkey} {name}` (meshcoretomqtt's `{IATA}` /
   `{PUBLIC_KEY}` uppercase forms also resolve); empty = the old hardcoded
@@ -256,19 +321,29 @@ radio/connection change still restarts everything (modem reconnect);
   Templates are validated in `BrokerConfig.Validate` (unknown placeholders,
   MQTT wildcards). **Broker connection state is surfaced**:
   `GET /api/mqtt/status` returns every *configured* enabled broker with
-  `connected` (read from paho's own `IsConnected`, so its auto-reconnect needs
-  no tracking), `lastError`, `connectedTs`, and publish/drop counts; the
+  `connected` (paho's `IsConnectionOpen`; its `IsConnected` stays true while
+  reconnecting), `lastError`, `connectedTs`, and publish/drop counts; the
   MqttPage polls it every 5 s for the per-broker pill. It lists configured
   brokers rather than live clients on purpose — a broker that never connected
-  must stay visible. **A failed initial connect retries** (`retryConnect`,
+  must stay visible. **`lastError` is the current connection's**: a connect
+  clears it, and each error records the client it came from, so an old client's
+  error never shows as the new one's. **A token refresh closes the old session
+  before dialling** (`refreshToken`, under `brokerClient.refreshMu`, which
+  `doPublish` takes too, so publishes wait rather than drop): every client shares
+  one ClientID, and a second session is a takeover, so the broker kicks the old
+  one and publishes our offline will, and paho redials a kicked client at once
+  (its first reconnect has no delay), so the two fight. **A failed initial connect retries** (`retryConnect`,
   5 s doubling to 5 min, guarded by `brokerClient.retrying`): paho's
   `SetAutoReconnect` only covers a client that connected at least once, so
   without it a broker that was down at startup stayed down until the process
   restarted. The same loop rescues a failed token-refresh reconnect, which
   otherwise stranded the broker until the next refresh tick (0.8 x token
-  lifetime). `doPublish` skips a disconnected client and counts a drop —
-  publishing to one would block for `publishWaitTimeout` per job and stall the
-  worker. Per-broker auth: `token` (Ed25519 JWT from the node
+  lifetime). `doPublish` skips a client without an open connection
+  (`IsConnectionOpen`) and counts a drop: while reconnecting, paho discards a
+  QoS 0 publish yet reports it sent, and holds a QoS 1 one for the full
+  `publishWaitTimeout`, stalling the worker. `retryConnect` keeps
+  `IsConnected`, so it stands aside while paho's own reconnect runs rather than
+  dial a second session on the same ClientID. Per-broker auth: `token` (Ed25519 JWT from the node
   identity, username `v1_<pubkey>`, 10-min lifetime, minted fresh on every connect/reconnect via paho's `CredentialsProvider` plus a refresh tick) or `basic`
   (user/pass). The Add Broker modal has presets (`BROKER_PRESETS` in
   `MqttPage.tsx`) mirroring meshcoretomqtt's: LetsMesh US/EU, Waev A/B,
@@ -344,9 +419,11 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
 - **Restoring cannot overwrite the live file** (this process holds it open), so
   `StageRestore` writes `meshcore.db.restore` and `AdoptPendingRestore` (called
   from `Run` *before* `store.Open`) renames it into place on the next start,
-  keeping the outgoing DB as `meshcore.db.replaced` and deleting the stale
-  `-wal`/`-shm` — leaving those would corrupt the adopted DB. The API returns
-  `restartRequired: true`.
+  keeping the outgoing DB as `meshcore.db.replaced`. Its WAL is checkpointed
+  into it first, so the one file holds the last writes before a crash; if that
+  fails the WAL moves with it as `meshcore.db.replaced-wal`. Nothing of the old
+  DB's `-wal`/`-shm` stays beside the adopted one, which it would corrupt. The
+  API returns `restartRequired: true`.
 - **The companion selection is always explicit.** `companionIds` is exactly
   what to keep: `[]` is none (a settings-only backup), every id is all. It is
   **required** — an omitted or `null` field is a 400, not a default, which is
@@ -367,9 +444,10 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
   the packet log costs before building the file. `Bytes` is the live DB size,
   i.e. an upper bound.
 - **Day windows** are `-1` all, `0` none, or N days (`store.DaysAll` /
-  `DaysNone`). They apply to `packets.received_at` and `messages.timestamp`
-  (DATETIME) and `node_metrics.ts` / `node_neighbors.ts` (unix seconds) — hence
-  the `datetime('now',?)` vs `unixepoch('now',?)` split.
+  `DaysNone`). They apply to `packets.received_at` and `messages.received_at`
+  (unix ms, our clock: a sender's `timestamp` can be years out) and `node_metrics.ts` / `node_neighbors.ts` (unix seconds), hence
+  the `sinceMS` and `sinceSecs` cutoffs in `backup.go`. Echoes go with their
+  messages.
 - **Import sniffs the upload**: the `SQLite format 3\0` magic means a backup
   (staged); anything else goes through `importConfigFile`, so an operator can
   also bring an old `.toml`/`.yaml`/`.json` config across through the UI. The
@@ -386,22 +464,89 @@ without hand-copying `meshcore.db`. UI is `BackupWizard` (opened from
   INTO` and syncs it, so going back to an older build is stopping OwlShack and
   moving the copy into place. An upgrade that fails part way keeps its copy,
   and the next start reuses it rather than copying the half-upgraded database;
-  older copies are deleted only once an upgrade finishes. If the copy cannot be
+  older copies are deleted only once an upgrade finishes. A copy whose `from` is
+  the database's own version is not unfinished, as each file commits with its
+  version bump: it is what a rollback by `cp` (not `mv`) left, so the upgrade
+  copies afresh, writing beside it and renaming over it so a failed copy keeps
+  it. Of two unfinished copies from one version, the one for the newer build
+  wins. If the copy cannot be
   made (a full disk), the upgrade goes ahead without one and logs a warning, so
   an updated node still starts. Builds from this one
   on name the copy when they refuse a newer database (v1.4.x does not). Nothing
-  is copied for a fresh database.
+  is copied for a fresh database. Adopting a restore moves the live database's
+  copies along with it (`meshcore.db.replaced.pre-vN-to-vM`) and deletes the
+  older `.replaced` ones only when it replaces that database, as a finished
+  upgrade's copy left behind would read as an unfinished one and the restored
+  database would be upgraded uncopied. A copy that would land on an existing
+  file refuses the restore, naming both, before anything moves.
+
+## Packet log & the Map's Connections mode
+
+- **The packet log is kept by age, not row count.** `settings.packet_retention_days`
+  (Settings -> Service; `INTEGER NOT NULL DEFAULT 7`, CHECKed 1-365, and required in
+  `PUT /api/config/settings`, which refuses a missing or out-of-range value) is read by `packetPruneLoop`
+  (`internal/app/packetlog.go`) at startup and hourly; saving it needs no reload.
+  It deletes 500 rows per writer turn (`PacketRepo.PruneBatchBefore`) so a long
+  backlog never fills the writer queue and drops RX writes. SQLite only reuses
+  freed pages, so once a pass leaves a quarter of the file free (whatever freed
+  it), `Store.ReleaseFreePages` gives them back to the disk 1024 pages per
+  writer turn with `PRAGMA incremental_vacuum`. That needs `auto_vacuum =
+  INCREMENTAL`, which `Open` sets with a single `VACUUM` before the writer
+  starts, once per file (skipped, with a warning, when the disk lacks twice the
+  live data). Not in the DSN: a DSN pragma runs on every pooled connection, and
+  this one writes, which lost writes to "database is locked". **Never run a full `VACUUM` on the
+  writer**: a trigger's reply calls `WriteSync` on the RX dispatch goroutine, so
+  one long writer turn stalls RX.
+- **`received_at` is UTC unix milliseconds**, like every time Go writes (see
+  CLAUDE.md), so the prune is a batched `DELETE ... WHERE received_at < ?` and
+  `ScanFloodRxSince` / `SentSince` take a `WHERE` range, all on
+  `idx_packets_received_at`. A row stamped in the future by a wrong clock stays
+  until it ages past the cutoff.
+- **`GET /api/connection-web?hours=N&ownEchoes=bool`** (`routes_connection_web.go`) folds RX
+  flood packets (not DIRECT, not TRACE, whose path holds SNR) into distinct
+  routes ending at `"self"`. Hop hashes resolve to REPEATER peers only; colliding
+  hashes pick the candidate nearest the next located hop toward us, else the most
+  recently seen. Each node returns every repeater matching its hash as
+  `candidates`. The source is only
+  known for adverts. A path holding our repeater's hash is dropped as our own
+  relay heard back only when a `tx` row in the window (plus a minute) has the
+  same packet hash, so a foreign repeater sharing our hash is still drawn. A
+  packet we started (a `tx` row with an empty path) is dropped whenever heard
+  back, unless `ownEchoes=true`. Both filters run on read; the log keeps every row.
+  SNR/RSSI belong to a route's last link only.
+- **Hop pins** (`hop_pins`, `PUT|DELETE /api/connection-web/pins/{hash}`) let the
+  operator settle a hash: a pubkey overrides the distance pick, a null pubkey says
+  none of the known repeaters (the real relay never adverted), and DELETE returns
+  it to automatic. Pins apply during resolution, not after, because each pick is
+  what the next hop out measures from. A pin to a deleted peer falls back to
+  automatic; a backup without peers drops the pins too.
+- `first` counts, per packet hash, the lowest-id copy: which route won the race.
+  The Map page's Connections mode (`?mode=connections`, `&own=1` for
+  `ownEchoes`; `hooks/useConnectionWeb.ts` draws on the Map's own Leaflet
+  instance, `components/ConnectionWeb.tsx` holds the toolbar half, the lists and
+  the sheet, `lib/connectionWeb.ts` the folding) fetches only while the mode is
+  on, subscribes to `packets` only then, and derives links from
+  the routes: width is `shareOut` (how often a node picks that hop), opacity is
+  the packet count on a log scale, and colour is the last-hop SNR (grey when
+  none was measured). Every link is dashed and drawn sender-to-receiver, so the
+  `.meshcore-web-link` flow animation in `index.css` reads as direction; its
+  keyframe offset must equal the `LINK_DASH` period or the dashes stutter. The
+  link sheet also shows `shareIn` (of what reaches the downstream node).
+  Selecting a node keeps the whole routes it appears on, hops upstream of it
+  included -- trimming them to the part after the node reduced a last-hop relay
+  to a bare "R3 -> you" and hid where its traffic came from.
 
 ## Node monitoring
 
 A type-agnostic poller (`internal/monitor`) polls monitored contacts on a staggered schedule → `node_metrics` (time-series) + `node_state` (latest snapshot, JSON `metric→value`). Gotchas:
 
 - **Kind resolution is peer-type-first** (`monitorKind` in `internal/app/monitor_collector.go`): the advertised peer type wins when known; `metadata.isRepeater` is only the fallback for repeaters whose advert hasn't been heard. A stray `isRepeater` flag must never route a chat node to the repeater collector — companion firmware has no login handler, so that poll can only time out.
-- **Companions are sessionless, telemetry-only.** `companionCollector` sends one `REQ_TYPE_GET_TELEMETRY_DATA` contact request (ECDH with the static identity — no login, no password). What comes back is gated by the *remote* node's telemetry-sharing prefs (base/location/environment, optionally per-contact flags) and requires the bot to be in its contacts. `MonitoringSettings` takes a `kind` prop ("repeater" | "companion") and hides password/probes for companions; its save only writes `isRepeater`/`repeaterPassword`/`monitorProbes` for the repeater kind. Chat contacts enrol via the monitoring panel on `ContactDetailPage`.
+- **Companions are sessionless, telemetry-only.** `companionCollector` sends one `REQ_TYPE_GET_TELEMETRY_DATA` contact request (ECDH with the static identity — no login, no password). What comes back is gated by the *remote* node's telemetry-sharing prefs (base/location/environment, optionally per-contact flags) and requires the bot to be in its contacts. `MonitoringSettings` takes a `kind` prop ("repeater" | "companion" | "sensor") and hides password/probes for companions; its save only writes `isRepeater`/`repeaterPassword`/`monitorProbes` for the repeater kind. Chat contacts enrol via the monitoring panel on `ContactDetailPage`.
 
 - **Metric keys are channel-faithful.** A node's *own* readings keep clean names (`mcu_temperature`, `battery`); *external* sensors carry their LPP channel (`temperature_ch2`, `humidity_ch3`) — the channel is the firmware's stable per-sensor identity on 1.16+. Status fields are fixed names (`last_snr`, `battery_mv`). Don't strip the channel to "unify" sensors — that makes multi-sensor identity order-dependent. Frontend tiles pattern-match by type (`metricKeysOfType` in `NodeStatTiles.tsx`), so they render whatever channel a board uses; `metricDef`/`metricOrderIndex` resolve `_chN` keys back to the base catalogue.
 - **Firmware channel split:** ≤1.15 lumps all sensors on the self channel (ch1); 1.16+ gives each its own (ch2+). `parseRepeaterTelemetry` marks only the FIRST self-type reading on the self channel as the node's own (MCU temp/battery/location), the rest external — otherwise 1.15's external temp collides with the MCU temp under `mcu_temperature` and is lost. A 1.15→1.16 upgrade changes a board's channel keys (accepted one-off history discontinuity).
 - **Snapshot merges, never blanks:** `UpsertNodeState` merges new readings onto the stored snapshot, so a partial poll (status OK, telemetry failed) keeps last-known values; a fully-failed poll uses `MarkPollFailure` (touches only `last_poll_ts`/`last_error`). Telemetry/neighbours probes retry once in-poll (`monitorProbeAttempts`).
+- **Sensors are kind `sensor`.** With `metadata.monitorPush` off, `sensorCollector` polls one sessionless telemetry request like a companion. With it on, each poll logs in with `repeaterPassword`, reads telemetry in the session, then sends REQ 0x08 SUBSCRIBE with `monitorPushDeltas` for one poll interval plus 10 minutes (capped at 65535 s), so every poll renews the watch and a sensor reboot or an OwlShack restart heals at the next one. Pushes go through `monitor.Service.RecordPush` into `node_metrics`/`node_state` and the `metrics` topic, and out on `telemetry` for an open Telemetry tab. An unset interval is 1 h while pushing, and the PATCH refuses an interval over 18 h (`api.MaxPushIntervalSecs`) or push with no readings. A refusal (no default region) is kept on the repeater client (`SubscribeRefused`), shown in the settings, and drops the default back to 6 h; an unanswered subscribe is a retry failure, a rejected one is not. Saving push settings makes the sensor due (`PollSoon`, so it never races a poll in flight), and turning push or monitoring off sends UNSUBSCRIBE; a poll re-reads the contact before subscribing and stops a watch push no longer wants. The client listens for a sent tag before its reply (the sensor takes it first), keeps the static secret on the watch so a logout loses no pushes, and ignores pushes from the moment a stop is sent. A push updates `last_ok_ts` but leaves the last poll's time and error. Watches live only in the client's memory, so a restart or a rebuilt radio client re-polls every sensor (`pollSensorsSoon`); the PATCH refuses push on a non-sensor, deltas that don't fit the sensor's 14 bytes, and the on/off types a strict `>` can never fire. The UI offers only readings before the first humidity: `findTelemValue` reads humidity as 2 bytes, so past it the firmware's walk lands wherever the live values send it.
 - **Manual poll:** `monitor.Service.PollNow` (behind `POST /api/nodes/{pubkey}/poll`) runs an out-of-band poll, serialized against scheduled polls via `pollMu.TryLock` (returns "a poll is already in progress" rather than racing the radio).
 - **Overview staleness dot** derives from each node's configured interval, not a constant: stale when `age > interval + max(25%, 5min)`. The interval is exposed per-node via `intervalSecs` on `/api/nodes/monitored`.
 - **List membership is toggle-driven, not data-driven:** `/api/nodes/monitored` lists the poller's current target set (`monitor.Service.Targets()`, i.e. contacts with the monitor flag), merged with `node_state` snapshots where they exist. A freshly enrolled node appears immediately with `lastPollTs: 0` (UI shows a muted dot + "waiting for first poll"); toggling monitoring off hides a node even though its `node_state` row is retained. Don't go back to listing `node_state` rows directly — that hid new nodes until their first poll and showed unmonitored leftovers forever.
@@ -414,13 +559,19 @@ Every JSON body is capped at 1 MiB (`readJSON`); backup uploads have their own, 
 GET  /api/peers
 DELETE /api/peers/{pubkey}
 GET  /api/packets?limit=N
+GET  /api/connection-web?hours=N&ownEchoes=bool             (routes toward us, see Packet log & the Map's Connections mode)
+PUT|DELETE /api/connection-web/pins/{hash}                  { pubkey: hex | null }   (which repeater a hop hash is)
 
 GET  /api/companions
+GET  /api/companions/{name}/app                              (the app port: enabled, port, listening, error, client, since)
+POST /api/companions/{name}/app/disconnect                   (drops the connected app; 404 while access is off)
 GET  /api/companions/{name}/contacts
 GET  /api/companions/{name}/contacts/{pubkey}                (single contact; 404 if absent)
 POST /api/companions/{name}/contacts                         { pubkey }   (also registers the peer with the running nodes)
 DELETE /api/companions/{name}/contacts/{pubkey}
 PATCH /api/companions/{name}/contacts/{pubkey}               { isRepeater?, repeaterPassword?, telemPerms?, ... }   (merges: only named fields change; an unknown or null field, or a value the form does not offer, is a 400; 404 if absent)
+POST /api/companions/{name}/contacts/{pubkey}/cli            { command }   (1.18+ companion that allows us remote CLI; no login; 504 when it doesn't answer)
+PUT  /api/companions/{name}/contacts/{pubkey}/region         { floodScope }   (inherit | everywhere | region:<name>; 404 if not a contact)
 
 GET|POST|DELETE /api/companions/{name}/channels[/{channel}]
 
@@ -447,12 +598,19 @@ GET  /api/companions/{name}/messages/{id}/path?channel=
 
 POST /api/companions/{name}/trace                            { path, pathHashSize }
 
+# Remote nodes (repeaters, rooms, sensors). A failure says why in "error", with
+# a status to act on: 400 bad pubkey, 401 not logged in, 403 not admin, 404 node
+# not in the peer table, 409 no direct route yet, 422 refused (by the node, or as something it can't take: no regions, `region load`), 502 a
+# reply that could not be read, 503 too many commands in flight, 504 no reply.
+# 500 is only the unexpected (logged). client/repeater/errors.go names each.
 POST /api/companions/{name}/repeaters/{pubkey}/login         { password }
 GET  /api/companions/{name}/repeaters/{pubkey}/status
 POST /api/companions/{name}/repeaters/{pubkey}/cli           { command }
 GET|DELETE /api/companions/{name}/repeaters/{pubkey}/session
 GET|DELETE /api/companions/{name}/repeaters/{pubkey}/path       GET: { outPath, hops, hasPath, directNeighbor, pathHashSize (the route's), bytesPerHop }
 PUT  /api/companions/{name}/repeaters/{pubkey}/path            { route: flood|direct|path, path?, pathHashSize }
+GET  /api/companions/{name}/repeaters/{pubkey}/subscription   (1.18+ sensor) Monitoring's push watch: {active, expires?, scope?, refused}
+GET  /api/companions/{name}/repeaters/{pubkey}/regions         (admin; repeaters and rooms) {regions:[{name,parent,denyFlood}], home ("*" none), default ("" none), defaultSupported, partial}; 422 when the firmware has no regions. Edits go through .../cli, and `region save` keeps them
 
 POST /api/companions/{name}/rooms/{pubkey}/login             { password, syncSince? }
 GET|DELETE /api/companions/{name}/rooms/{pubkey}/session
@@ -464,13 +622,18 @@ GET|DELETE /api/companions/{name}/rooms/{pubkey}/session
 # unmatched /api/* paths 404.
 GET  /api/config/settings                                    (radio/connection/log + setupComplete; modemTokenSet, never the token)
 PUT  /api/config/settings
-GET  /api/config/mqtt                                        (feed settings; node by companion id)
+PUT  /api/config/repeater/scope                              { floodScope }   (everywhere or one of its regions; allows flood on it, as `region default`)
+PUT  /api/config/repeater/home                               { region }       ("*" for none; a label, as `region home`)
+PUT  /api/config/regions                                     { regions: [{name, parent}], floodScope }   (the list and default together; both required, every parent too)
+GET|POST /api/discover/regions                               (Discover nearby: POST starts or joins a run, 503 without a companion; poll GET for phase listening|asking|done)
+GET  /api/config/mqtt                                        (feed settings; nodeKind, companion by id)
 PUT  /api/config/mqtt
 GET  /api/config/mqtt/brokers
 POST /api/config/mqtt/brokers          PUT|DELETE /api/config/mqtt/brokers/{id}
 GET  /api/config/companions                                  (id, name, pubkey, privateKeySet, …)
 POST /api/config/companions            PUT|DELETE /api/config/companions/{id}
 PUT  /api/config/companions/{id}/telemetry                   { base, location, environment }   (each deny | selected | contacts)
+PUT  /api/config/companions/{id}/app                         { enabled, port, queueSize }   (all required; port 5000-5015, one companion per open port; queueSize 16-10000)
 GET  /api/config/companions/{id}/channels
 GET  /api/health                                             (monitoring snapshot; see below)
 GET  /api/config/channels                                    (all channels; for trigger name resolution)

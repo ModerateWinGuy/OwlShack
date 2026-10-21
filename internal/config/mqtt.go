@@ -1,14 +1,23 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
 	"strings"
 )
 
+// MqttNodeCompanion and MqttNodeRepeater are the kinds of node that can feed MQTT.
+const (
+	MqttNodeCompanion = "companion"
+	MqttNodeRepeater  = "repeater"
+)
+
 type MqttConfig struct {
-	// Node names the companion whose identity feeds the observer; empty = the first companion.
+	// NodeKind is the kind of node whose identity feeds the observer: "companion" (or unset) or "repeater".
+	NodeKind *string `json:"nodeKind,omitempty" yaml:"nodeKind,omitempty" toml:"nodeKind,omitempty"`
+	// Node names the companion that feeds the observer when NodeKind is companion; an import naming none stores the first.
 	Node    *string `json:"node,omitempty" yaml:"node,omitempty" toml:"node,omitempty"`
 	Enabled *bool   `json:"enabled,omitempty" yaml:"enabled,omitempty" toml:"enabled,omitempty"` // nil = enabled
 
@@ -17,6 +26,16 @@ type MqttConfig struct {
 	Owner          *string        `json:"owner" yaml:"owner" toml:"owner"`
 	Email          *string        `json:"email" yaml:"email" toml:"email"`
 	Brokers        []BrokerConfig `json:"brokers" yaml:"brokers" toml:"broker"`
+}
+
+// FedByRepeater is whether the repeater, not a companion, feeds the observer.
+func (c *MqttConfig) FedByRepeater() bool {
+	return c != nil && c.NodeKind != nil && *c.NodeKind == MqttNodeRepeater
+}
+
+// Publishes is whether the observer has somewhere to publish: MQTT enabled, with an enabled broker.
+func (c *MqttConfig) Publishes() bool {
+	return c.IsEnabled() && slices.ContainsFunc(c.Brokers, func(b BrokerConfig) bool { return b.Enabled })
 }
 
 func (c *MqttConfig) IsEnabled() bool {
@@ -112,6 +131,25 @@ func (b *BrokerConfig) migrateTopicPrefix() {
 		b.StatusTopic = b.TopicPrefix + "/{iata}/{pubkey}/status"
 	}
 	b.TopicPrefix = ""
+}
+
+// Each status polls the board, and one rarer than hourly is no heartbeat.
+const (
+	MinStatusInterval = 60
+	MaxStatusInterval = 3600
+)
+
+var iataRe = regexp.MustCompile(`^[A-Za-z0-9_-]*$`)
+
+// ValidateFeed checks what the MQTT page saves beside the node; it isn't in Validate, so a database storing an older value still loads.
+func ValidateFeed(iata *string, statusInterval *int) error {
+	if iata != nil && !iataRe.MatchString(*iata) {
+		return errors.New("iataCode may only hold letters, digits, - and _, as it is one level of every topic")
+	}
+	if statusInterval != nil && (*statusInterval < MinStatusInterval || *statusInterval > MaxStatusInterval) {
+		return fmt.Errorf("statusInterval must be %d-%d seconds", MinStatusInterval, MaxStatusInterval)
+	}
+	return nil
 }
 
 func (c *MqttConfig) StatusIntervalSeconds() int {

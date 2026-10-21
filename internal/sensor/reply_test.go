@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 func oneSensor(metric Metric, v float64) []Status {
@@ -44,7 +44,7 @@ func TestBuildReply_AMappedBatteryReplacesTheBoards(t *testing.T) {
 
 // The firmware's getBattMilliVolts returns 0 with no cell, so a node sending no voltage on channel 1 reads as another kind of node.
 func TestBuildReply_TheBatteryIsAlwaysSent(t *testing.T) {
-	if got := replyHex(t, PermBase, SelfReadings{}, nil, nil); got != "01740000" {
+	if got := replyHex(t, meshcore.TelemPermBase, SelfReadings{}, nil, nil); got != "01740000" {
 		t.Fatalf("a node with no battery replied %q, want 01740000", got)
 	}
 }
@@ -54,10 +54,10 @@ func TestBuildReply_TheNodesOwnChannelAnswersToBase(t *testing.T) {
 	mapped := []ChannelEntry{{Channel: ChannelSelf, Type: meshcore.LPPVoltage, SensorID: 1, Metric: Voltage}}
 	sts := oneSensor(Voltage, 3.7)
 
-	if got := replyHex(t, PermBase, SelfReadings{}, mapped, sts); got != "01740172" {
+	if got := replyHex(t, meshcore.TelemPermBase, SelfReadings{}, mapped, sts); got != "01740172" {
 		t.Fatalf("base only: %s, want the mapped battery", got)
 	}
-	if got := replyHex(t, PermEnvironment, SelfReadings{}, mapped, sts); got != "" {
+	if got := replyHex(t, meshcore.TelemPermEnvironment, SelfReadings{}, mapped, sts); got != "" {
 		t.Fatalf("environment only: %s, want nothing from the node's own channel", got)
 	}
 }
@@ -108,8 +108,9 @@ func request(path int) *meshcore.Packet {
 	return &meshcore.Packet{Header: meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeReq, 0), Path: make([]byte, path)}
 }
 
-// A map the editor accepts has to arrive whole on every common path, beside the node's own voltage and temperature.
-func TestBuildReply_AMapAtTheBudgetFitsEveryCommonReply(t *testing.T) {
+// budgetMap is a channel map exactly at MaxTelemetryPayload, with readings for every row.
+func budgetMap(t *testing.T) ([]ChannelEntry, SelfReadings, []Status) {
+	t.Helper()
 	var entries []ChannelEntry
 	for ch := 2; ch <= 24; ch++ {
 		entries = append(entries, ChannelEntry{Channel: byte(ch), Type: meshcore.LPPGenericSensor, SensorID: 1, Metric: Temperature})
@@ -123,16 +124,20 @@ func TestBuildReply_AMapAtTheBudgetFitsEveryCommonReply(t *testing.T) {
 	if err := ValidateChannelMap(entries); err != nil {
 		t.Fatalf("refused a map at the budget: %v", err)
 	}
-
 	temp := 21.5
-	self := SelfReadings{BatteryVolts: 4.1, TempC: &temp}
 	sts := []Status{{
 		Spec:     Spec{ID: 1},
 		Readings: []Reading{{Metric: Temperature, Value: 22.5}, {Metric: Humidity, Value: 50}},
 		At:       time.Now(),
 	}}
+	return entries, SelfReadings{BatteryVolts: 4.1, TempC: &temp}, sts
+}
+
+// A map the editor accepts has to arrive whole direct and over a flood path of up to 4 bytes, beside the node's own voltage and temperature.
+func TestBuildReply_AMapAtTheBudgetFitsEveryCommonReply(t *testing.T) {
+	entries, self, sts := budgetMap(t)
 	var body []byte
-	for _, path := range []int{-1, 0, 1, 2, 17} {
+	for _, path := range []int{-1, 0, 1, 2, 4} {
 		var dropped bool
 		body, dropped = BuildReply(PermAll, self, entries, sts, MaxReplyBody(request(path)))
 		if dropped {
@@ -141,6 +146,26 @@ func TestBuildReply_AMapAtTheBudgetFitsEveryCommonReply(t *testing.T) {
 	}
 	if tightest := MaxReplyBody(request(1)); len(body) != tightest {
 		t.Errorf("a full reply is %d bytes where a one-byte path holds %d, so the budget is off", len(body), tightest)
+	}
+}
+
+// A flood reply goes back in a PATH, which createPathReturn refuses past MAX_COMBINED_PATH (Mesh.cpp:452); a longer path drops the map, never the reply.
+func TestBuildReply_AFloodReplyAlwaysFitsItsPathReturn(t *testing.T) {
+	entries, self, sts := budgetMap(t)
+	for path := 0; path <= meshcore.MaxPathSize; path++ {
+		hashSize := uint8(1)
+		if path > 63 {
+			hashSize = 2
+		}
+		req := request(path)
+		body, dropped := BuildReply(PermAll, self, entries, sts, MaxReplyBody(req))
+		if dropped != (path > 4) {
+			t.Errorf("a %d-byte flood path dropped the map: %v, want %v", path, dropped, path > 4)
+		}
+		pp := meshcore.PathPayload{PathLength: meshcore.MakePathLen(hashSize, uint8(path/int(hashSize))), Path: req.Path, ExtraType: meshcore.PayloadTypeResponse, Extra: append(make([]byte, ReplyTagLen), body...)}
+		if _, err := pp.ToBytes(); err != nil {
+			t.Errorf("a %d-byte flood path's %d-byte reply cannot be returned: %v", path, len(body), err)
+		}
 	}
 }
 

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/buildinfo"
-	"github.com/meshcore-go/OwlShack/internal/modem"
-	meshcore "github.com/meshcore-go/meshcore-go"
+	"github.com/OwlShack/OwlShack/internal/buildinfo"
+	"github.com/OwlShack/OwlShack/internal/modem"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 // Zone-aware so downstream observers don't read our feed as naive local time and clamp rxTime to their ingest time; always format a UTC time with it.
@@ -103,7 +103,7 @@ func addressedPathLabel(pkt *meshcore.Packet) string {
 	return fmt.Sprintf("%02X -> %02X", pkt.Payload[1], pkt.Payload[0])
 }
 
-// statsBlock is a wire schema shared with meshcore-bot — change field names in both. Sent and QueueLen are PROCESS-wide, not per-node.
+// statsBlock is a wire schema shared with OwlBot — change field names in both. Sent and QueueLen are PROCESS-wide, not per-node.
 type statsBlock struct {
 	UptimeSecs uint32 `json:"uptime_secs"`
 	// Both names ship: recv/sent is the firmware and CoreScope client-RF vocabulary, packets_recv/packets_sent is what CoreScope's status ingest requires.
@@ -127,7 +127,7 @@ type statsBlock struct {
 	// Firmware stats-core / stats-radio key names; omitted when unmeasurable, but a KISS 0 still publishes.
 	BatteryMV  *uint16  `json:"battery_mv,omitempty"`
 	MCUTempC   *float64 `json:"mcu_temp_c,omitempty"`
-	NoiseFloor int16    `json:"noise_floor"`
+	NoiseFloor *int16   `json:"noise_floor,omitempty"`
 	LastRSSI   int16    `json:"last_rssi"`
 	LastSNR    float64  `json:"last_snr"`
 	// The firmware's rx_air_time / total_air_time; TX arrives via Observer.NoteTx, so it counts the whole process.
@@ -157,7 +157,7 @@ type statsBlock struct {
 }
 
 // u64 flattens a counter this transport cannot measure to 0: the published schema is shared with
-// meshcore-bot and CoreScope, so omitting a key here is a coordinated change, not a local one.
+// OwlBot and CoreScope, so omitting a key here is a coordinated change, not a local one.
 func u64(p *uint64) uint64 {
 	if p == nil {
 		return 0
@@ -224,6 +224,10 @@ func formatStatus(status, originName, originID string, radio modem.RadioInfo, ds
 	if ds.HaveMCUTemp {
 		mcuTemp = &ds.MCUTempC
 	}
+	var noiseFloor *int16
+	if ds.HaveNoiseFloor {
+		noiseFloor = &ds.NoiseFloor
+	}
 	var batteryMV *uint16
 	if ds.HaveBattery {
 		batteryMV = &ds.BatteryMV
@@ -252,7 +256,7 @@ func formatStatus(status, originName, originID string, radio modem.RadioInfo, ds
 
 			BatteryMV:  batteryMV,
 			MCUTempC:   mcuTemp,
-			NoiseFloor: ds.NoiseFloor,
+			NoiseFloor: noiseFloor,
 			LastSNR:    obs.LastSNR,
 			LastRSSI:   obs.LastRSSI,
 			RxAirSecs:  uint32(obs.RxMs / 1000),

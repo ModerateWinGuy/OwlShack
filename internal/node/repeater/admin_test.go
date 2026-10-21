@@ -1,18 +1,23 @@
 package repeater
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/sensor"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 func TestCString(t *testing.T) {
@@ -152,18 +157,18 @@ func TestRegionReads(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{Regions: []config.RepeaterRegion{
 		{Name: "alpha"}, {Name: "bravo", DenyFlood: true},
 	}}}
-	if got := r.runCLI("region list allowed"); got != "alpha" {
-		t.Errorf("region list allowed = %q, want %q", got, "alpha")
+	if got := r.runCLI("region list allowed"); got != "*,alpha" { // no "*" entry ⇒ the wildcard allows, as on firmware
+		t.Errorf("region list allowed = %q, want %q", got, "*,alpha")
 	}
-	if got := r.runCLI("region list denied"); got != "*,bravo" { // no "*" entry ⇒ the wildcard denies
-		t.Errorf("region list denied = %q, want %q", got, "*,bravo")
+	if got := r.runCLI("region list denied"); got != "bravo" {
+		t.Errorf("region list denied = %q, want %q", got, "bravo")
 	}
 	if got := r.runCLI("region remove ghost"); got != "Err - not found" {
 		t.Errorf("region remove ghost = %q, want %q", got, "Err - not found")
 	}
 }
 
-// Pins the "*" entry mapping to wildcard flags, and an absent "*" denying unscoped flood.
+// Pins the "*" entry mapping to wildcard flags, and an absent "*" allowing unscoped flood as the firmware's wildcard does.
 func TestRegionsFromConfig(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -171,11 +176,12 @@ func TestRegionsFromConfig(t *testing.T) {
 		wantNamed []string
 		wantDeny  bool // wildcard denies unscoped flood
 	}{
-		{"empty ⇒ deny", nil, nil, true},
+		{"empty ⇒ allow", nil, nil, false},
 		{"* allow", []config.RepeaterRegion{{Name: "*"}}, nil, false},
 		{"* deny", []config.RepeaterRegion{{Name: "*", DenyFlood: true}}, nil, true},
 		{"named + *", []config.RepeaterRegion{{Name: "alpha"}, {Name: "*"}}, []string{"alpha"}, false},
-		{"named only ⇒ deny unscoped", []config.RepeaterRegion{{Name: "alpha"}}, []string{"alpha"}, true},
+		{"named only ⇒ allow unscoped", []config.RepeaterRegion{{Name: "alpha"}}, []string{"alpha"}, false},
+		{"private region kept, keyless", []config.RepeaterRegion{{Name: "$p"}, {Name: "alpha"}}, []string{"$p", "alpha"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -203,6 +209,25 @@ func TestRegionsFromConfig(t *testing.T) {
 	}
 }
 
+// Keys match the firmware's getTransportKeysFor: a bare name hashes as "#name" (MeshCore 7ae16421), so "nz" and "#nz" are one region.
+func TestRegionKeyMatchesFirmware(t *testing.T) {
+	want := sha256.Sum256([]byte("#nz"))
+	for _, name := range []string{"nz", "#nz"} {
+		named, _ := regionsFromConfig([]config.RepeaterRegion{{Name: name}})
+		if len(named) != 1 || !bytes.Equal(named[0].Key[:], want[:meshcore.RegionKeySize]) {
+			t.Errorf("region %q key = %x, want SHA256(\"#nz\")[:16] %x", name, named[0].Key, want[:meshcore.RegionKeySize])
+		}
+	}
+}
+
+// A "$" private region needs keys we cannot load, so it has none and never matches, as on firmware without them.
+func TestPrivateRegionNeverMatches(t *testing.T) {
+	named, _ := regionsFromConfig([]config.RepeaterRegion{{Name: "$p"}})
+	if len(named) != 1 || !named[0].Key.IsZero() {
+		t.Fatalf("$p = %+v, want one keyless region", named)
+	}
+}
+
 // TestClearStats zeroes the counters.
 func TestClearStats(t *testing.T) {
 	r := &Repeater{}
@@ -220,11 +245,10 @@ func TestClearStats(t *testing.T) {
 
 // Pins the neighbours layout the client decodes, and the telemetry order (voltage then temperature, temperature only when measurable).
 func TestTelemetryBody(t *testing.T) {
-	r := &Repeater{}
-	r.batteryMV.Store(4168)
-	r.haveBattery.Store(true)
+	ds := DeviceStats{BatteryMV: 4168, HaveBattery: true}
+	r := &Repeater{boardStats: func() DeviceStats { return ds }}
 
-	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, reqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	if !ok {
 		t.Fatal("telemetry request answered nothing")
 	}
@@ -240,9 +264,8 @@ func TestTelemetryBody(t *testing.T) {
 		t.Errorf("voltage = ch%d %v, want ch%d 4.17", readings[0].Channel, readings[0].Value, telemChannelSelf)
 	}
 
-	r.mcuTempC.Store(227)
-	r.haveMCUTemp.Store(true)
-	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, reqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	ds.MCUTempC, ds.HaveMCUTemp = 22.7, true
+	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	readings, err = meshcore.LPPDecode(body)
 	if err != nil {
 		t.Fatalf("LPPDecode with temp: %v", err)
@@ -265,8 +288,7 @@ func TestNeighboursBody(t *testing.T) {
 	r.neighbors.m[a] = &neighbor{pubkey: a, snr: 5.0, heard: now}
 	r.neighbors.m[b] = &neighbor{pubkey: b, snr: -2.5, heard: now.Add(-30 * time.Second)}
 
-	// params: [version:1][count:1][offset:2][order_by:1][prefix_len:1]
-	params := []byte{0, 10, 0, 0, 2, 6}
+	params := meshcore.NeighboursRequest{Count: 10, OrderBy: 2, PrefixLen: 6}
 	body := r.neighboursBody(params)
 
 	if total := binary.LittleEndian.Uint16(body[0:2]); total != 2 {
@@ -304,17 +326,27 @@ func TestRateLimiter(t *testing.T) {
 	}
 }
 
-// Pins the anon REGIONS reply body against firmware exportNamesTo(mask=DENY_FLOOD).
-func TestRegionsExport(t *testing.T) {
-	r := &Repeater{cfg: config.RepeaterConfig{Regions: []config.RepeaterRegion{
-		{Name: "alpha"}, {Name: "bravo", DenyFlood: true}, {Name: "*"},
-	}}}
-	if got := r.regionsExport(); got != "*,alpha" {
-		t.Errorf("export = %q, want %q", got, "*,alpha")
+// With no "*" entry the wildcard allows flood, as on firmware, so it is listed alone.
+func TestAnonRegions_NoRegions(t *testing.T) {
+	r, radio, client := anonRepeater(t)
+	if got := anonReply(t, r, radio, client, meshcore.AnonReqTypeRegions, 0, nil); string(got) != "*" {
+		t.Errorf("empty export = %q, want %q", got, "*")
 	}
-	r.cfg.Regions = nil // no "*" entry ⇒ unscoped flood denied ⇒ nothing exported
-	if got := r.regionsExport(); got != "" {
-		t.Errorf("empty export = %q, want \"\"", got)
+}
+
+// exportNamesTo skips a name that doesn't fit and carries on: `region list` gets 160 bytes.
+func TestRegionNames_CappedAsFirmware(t *testing.T) {
+	a, b, c, d, e := strings.Repeat("a", 30), strings.Repeat("b", 30), strings.Repeat("c", 30), strings.Repeat("d", 30), strings.Repeat("e", 30)
+	r := newRegionRepeater(t, config.RepeaterRegion{Name: "*"})
+	for _, n := range []string{a, b, c, d, "abcdefghijkl", e, "#nz", "denied"} {
+		r.cfg.Regions = append(r.cfg.Regions, config.RepeaterRegion{Name: n, Parent: "*", DenyFlood: n == "denied"})
+	}
+	// After "*,", four 30-byte names and a 12-byte one, 139 bytes are written: e needs 171 < max, "nz" 143.
+	if got, want := r.runCLI("region list allowed"), "*,"+a+","+b+","+c+","+d+",abcdefghijkl,nz"; got != want {
+		t.Errorf("list allowed = %q\nwant           %q", got, want)
+	}
+	if got := r.runCLI("region list denied"); got != "denied" {
+		t.Errorf("list denied = %q", got)
 	}
 }
 
@@ -330,7 +362,7 @@ func TestNeighboursOrderBy(t *testing.T) {
 	r.neighbors.m[c] = &neighbor{pubkey: c, snr: 0.0, heard: now.Add(-30 * time.Second)}
 
 	firstPrefix := func(orderBy byte) byte {
-		params := []byte{0, 10, 0, 0, orderBy, 6}
+		params := meshcore.NeighboursRequest{Count: 10, OrderBy: orderBy, PrefixLen: 6}
 		return r.neighboursBody(params)[4]
 	}
 	if got := firstPrefix(0); got != 0x02 {
@@ -355,18 +387,18 @@ func TestRegionDefaultCLI(t *testing.T) {
 	defer cancel()
 	r.runCtx = ctx
 
-	await := func(region string, nRegions int) {
+	await := func(region config.FloodScope, nRegions int) {
 		t.Helper()
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if cfg := r.cfgSnapshot(); cfg.DefaultRegion == region && len(cfg.Regions) == nRegions {
+			if cfg := r.cfgSnapshot(); cfg.FloodScope == region && len(cfg.Regions) == nRegions {
 				return
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
 		cfg := r.cfgSnapshot()
 		t.Fatalf("cfg never became {region=%q nRegions=%d}; have region=%q regions=%+v",
-			region, nRegions, cfg.DefaultRegion, cfg.Regions)
+			region, nRegions, cfg.FloodScope, cfg.Regions)
 	}
 
 	if got := r.runCLI("region default"); got != " default scope is <null>" {
@@ -375,7 +407,7 @@ func TestRegionDefaultCLI(t *testing.T) {
 	if got := r.runCLI("region default alpha"); got != " default scope is now alpha" {
 		t.Fatalf("set = %q", got)
 	}
-	await("alpha", 1)
+	await("region:alpha", 1)
 	if rg := r.cfgSnapshot().Regions[0]; rg.Name != "alpha" || rg.DenyFlood {
 		t.Fatalf("auto-created region wrong: %+v", rg)
 	}
@@ -385,7 +417,7 @@ func TestRegionDefaultCLI(t *testing.T) {
 	if got := r.runCLI("region default <null>"); got != " default scope is now <null>" {
 		t.Fatalf("clear = %q", got)
 	}
-	await("", 1) // clearing keeps the region itself
+	await(config.ScopeEverywhere, 1) // clearing keeps the region itself
 }
 
 // Pins the firmware asymmetry: a revoke accepts a pubkey prefix, a grant does not.
@@ -460,7 +492,7 @@ func TestRegionTree(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{
 		HomeRegion: "alpha",
 		Regions: []config.RepeaterRegion{
-			{Name: "*"}, {Name: "alpha"}, {Name: "bravo", DenyFlood: true},
+			{Name: "*"}, {Name: "alpha", Parent: "*"}, {Name: "bravo", Parent: "*", DenyFlood: true},
 		},
 	}}
 	want := "* F\n alpha^ F\n bravo\n"
@@ -468,15 +500,15 @@ func TestRegionTree(t *testing.T) {
 		t.Errorf("region tree = %q, want %q", got, want)
 	}
 
-	r.cfg.Regions = []config.RepeaterRegion{{Name: "alpha"}} // no "*" ⇒ unscoped flood denied
-	if got := r.runCLI("region"); got != "*\n alpha^ F\n" {
+	r.cfg.Regions = []config.RepeaterRegion{{Name: "alpha", Parent: "*"}} // no "*" ⇒ the wildcard allows, printed "* F" as printChildRegions does
+	if got := r.runCLI("region"); got != "* F\n alpha^ F\n" {
 		t.Errorf("region tree without wildcard = %q", got)
 	}
 }
 
 func TestRegionGetHomeSaveLoad(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{Regions: []config.RepeaterRegion{
-		{Name: "alpha"}, {Name: "bravo", DenyFlood: true},
+		{Name: "alpha", Parent: "*"}, {Name: "bravo", Parent: "*", DenyFlood: true},
 	}}}
 	r.reconfigure = testReconfigure(r)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -494,9 +526,6 @@ func TestRegionGetHomeSaveLoad(t *testing.T) {
 	}
 	if got := r.runCLI("region save"); got != "OK" {
 		t.Errorf("save = %q", got)
-	}
-	if got := r.runCLI("region load"); got != "" {
-		t.Errorf("load = %q, want empty (firmware replies nothing)", got)
 	}
 	if got := r.runCLI("region home"); got != " home is *" {
 		t.Errorf("home read = %q", got)
@@ -516,11 +545,11 @@ func TestRegionGetHomeSaveLoad(t *testing.T) {
 	}
 }
 
-// A dangling defaultRegion/homeRegion fails Config.Validate and would break the reload after the reply.
-func TestRegionRemoveClearsRefs(t *testing.T) {
+// Removing the home or default region clears it, as the firmware's home_id and default_id then find nothing.
+func TestRegionRemoveClearsHomeAndScope(t *testing.T) {
 	r := &Repeater{cfg: config.RepeaterConfig{
-		DefaultRegion: "alpha", HomeRegion: "alpha",
-		Regions: []config.RepeaterRegion{{Name: "alpha"}},
+		FloodScope: "region:alpha", HomeRegion: "alpha",
+		Regions: []config.RepeaterRegion{{Name: "alpha", Parent: "*"}},
 	}}
 	r.reconfigure = testReconfigure(r)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -534,8 +563,8 @@ func TestRegionRemoveClearsRefs(t *testing.T) {
 	for len(r.cfgSnapshot().Regions) != 0 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if cfg := r.cfgSnapshot(); cfg.DefaultRegion != "" || cfg.HomeRegion != "" {
-		t.Errorf("dangling refs left: default=%q home=%q", cfg.DefaultRegion, cfg.HomeRegion)
+	if cfg := r.cfgSnapshot(); cfg.FloodScope != config.ScopeEverywhere || cfg.HomeRegion != "" {
+		t.Errorf("after remove: scope=%q home=%q, want everywhere and none", cfg.FloodScope, cfg.HomeRegion)
 	}
 }
 
@@ -549,7 +578,7 @@ func TestNeighboursBodyCap(t *testing.T) {
 		k[0] = byte(i)
 		r.neighbors.m[k] = &neighbor{pubkey: k, heard: now}
 	}
-	body := r.neighboursBody([]byte{0, 255, 0, 0, 0, 6})
+	body := r.neighboursBody(meshcore.NeighboursRequest{Count: 255, PrefixLen: 6})
 	if total := binary.LittleEndian.Uint16(body[0:2]); total != 40 {
 		t.Errorf("total = %d, want 40", total)
 	}
@@ -572,6 +601,9 @@ func TestStatusBodyCounters(t *testing.T) {
 	}
 
 	b := r.statusBody()
+	if len(b) != 56 {
+		t.Fatalf("status body is %d bytes, want the firmware's 56 (MyMesh.h:44-60)", len(b))
+	}
 	for _, c := range []struct {
 		name string
 		off  int
@@ -747,24 +779,25 @@ func TestNeighborsListCap(t *testing.T) {
 
 // testReconfigure stands in for the app's persist+reload hook, mutating r.cfg under the config lock.
 func testReconfigure(r *Repeater) func(func(*config.RepeaterConfig)) error {
+	if r.log == nil {
+		r.log = slog.New(slog.DiscardHandler) // a refused change is logged, as in production
+	}
 	return func(m func(*config.RepeaterConfig)) error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		m(&r.cfg)
+		c := r.cfg // like the app, mutate a copy rebuilt from storage, never the running slice
+		c.Regions = slices.Clone(c.Regions)
+		m(&c)
+		// Validate as repeaterReconfigurer does, filling what these test configs leave out.
+		v := c
+		v.Name, v.AdminPassword = cmp.Or(v.Name, "rp"), cmp.Or(v.AdminPassword, "pw")
+		full := config.DefaultConfig()
+		full.Repeater = &v
+		if err := full.Validate(); err != nil {
+			return err
+		}
+		r.cfg = c
 		return nil
-	}
-}
-
-// Pins the send-order flip: a flood request's accumulated path lists the client's neighbour first.
-func TestReverseHops(t *testing.T) {
-	if got := reverseHops([]byte{1, 2, 3}, 1); string(got) != string([]byte{3, 2, 1}) {
-		t.Errorf("1-byte = %x", got)
-	}
-	if got := reverseHops([]byte{1, 2, 3, 4}, 2); string(got) != string([]byte{3, 4, 1, 2}) {
-		t.Errorf("2-byte = %x", got)
-	}
-	if got := reverseHops(nil, 0); len(got) != 0 {
-		t.Errorf("empty = %x", got)
 	}
 }
 
@@ -848,7 +881,7 @@ func TestRegionPrefixLookup(t *testing.T) {
 		"region get al":    " al F",
 		"region get alp":   " alphabet ",
 		"region get alpha": " alpha F",
-		"region get *":     " * ",
+		"region get *":     " * F", // no "*" entry: the wildcard allows, as on firmware
 		"region get zz":    "Err - unknown region",
 	} {
 		if got := r.runCLI(cmd); got != want {
@@ -860,12 +893,9 @@ func TestRegionPrefixLookup(t *testing.T) {
 // A guest is answered too, payload[0] is an INVERSE mask, and base goes out whatever it says (firmware handleRequest).
 func TestTelemetryHonoursTheRequestersInverseMask(t *testing.T) {
 	newRepeater := func() *Repeater {
-		r := &Repeater{}
-		r.batteryMV.Store(4168)
-		r.haveBattery.Store(true)
-		r.mcuTempC.Store(215)
-		r.haveMCUTemp.Store(true)
-		return r
+		return &Repeater{boardStats: func() DeviceStats {
+			return DeviceStats{BatteryMV: 4168, HaveBattery: true, MCUTempC: 21.5, HaveMCUTemp: true}
+		}}
 	}
 
 	for _, tc := range []struct {
@@ -875,13 +905,13 @@ func TestTelemetryHonoursTheRequestersInverseMask(t *testing.T) {
 	}{
 		{"no params means everything", nil, 2},
 		{"zero mask means everything", []byte{0x00}, 2},
-		{"excluding environment leaves base alone", []byte{sensor.PermEnvironment}, 2},
-		{"excluding location leaves base alone", []byte{sensor.PermLocation}, 2},
-		{"excluding base still sends it", []byte{sensor.PermBase}, 2},
+		{"excluding environment leaves base alone", []byte{meshcore.TelemPermEnvironment}, 2},
+		{"excluding location leaves base alone", []byte{meshcore.TelemPermLocation}, 2},
+		{"excluding base still sends it", []byte{meshcore.TelemPermBase}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, ok := newRepeater().buildReqResponse(
-				&store.RepeaterACLEntry{Permissions: permGuest}, reqTypeGetTelemetryData, tc.params, sensor.MaxReplyBody(nil))
+				&store.RepeaterACLEntry{Permissions: permGuest}, append([]byte{meshcore.ReqTypeGetTelemetryData}, tc.params...), sensor.MaxReplyBody(nil))
 			if !ok {
 				t.Fatal("telemetry request was not answered; the firmware answers a guest too")
 			}
@@ -903,11 +933,10 @@ func TestTelemetryHonoursTheRequestersInverseMask(t *testing.T) {
 
 // A host with no battery still sends one at 0 V, as every firmware node does.
 func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
-	r := &Repeater{} // batteryMV left at 0, as on a Raspberry Pi
-	r.mcuTempC.Store(352)
-	r.haveMCUTemp.Store(true)
+	ds := DeviceStats{MCUTempC: 35.2, HaveMCUTemp: true} // no battery, as on a Raspberry Pi
+	r := &Repeater{boardStats: func() DeviceStats { return ds }}
 
-	body, _ := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, reqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	body, _ := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	readings, err := meshcore.LPPDecode(body)
 	if err != nil {
 		t.Fatalf("LPPDecode: %v", err)
@@ -918,12 +947,27 @@ func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
 	}
 
 	// A board that does report a battery still publishes it.
-	r.batteryMV.Store(4168)
-	r.haveBattery.Store(true)
-	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, reqTypeGetTelemetryData, nil, sensor.MaxReplyBody(nil))
+	ds.BatteryMV, ds.HaveBattery = 4168, true
+	body, _ = r.buildReqResponse(&store.RepeaterACLEntry{Permissions: permAdmin}, []byte{meshcore.ReqTypeGetTelemetryData}, sensor.MaxReplyBody(nil))
 	readings, _ = meshcore.LPPDecode(body)
 	// LPP voltage has 0.01 V resolution and the encoder rounds, so 4168 mV comes back as 4.17.
 	if len(readings) != 2 || readings[0].Value != 4.17 {
 		t.Errorf("got %+v, want the battery plus the temperature", readings)
+	}
+}
+
+// `power` answers in CommonCLI's layout (CommonCLI.cpp:287), with 0 mV when the board has no cell.
+func TestCLIPower_FirmwareLayout(t *testing.T) {
+	ds := DeviceStats{BatteryMV: 4168, HaveBattery: true}
+	r := &Repeater{boardStats: func() DeviceStats { return ds }}
+	if got, want := r.dispatchCLI("power"), "batt:4168 mV usb:n/a solar_chg:n/a ext:no charger:no"; got != want {
+		t.Errorf("power = %q, want %q", got, want)
+	}
+	ds = DeviceStats{}
+	if got, want := r.dispatchCLI("power"), "batt:0 mV usb:n/a solar_chg:n/a ext:no charger:no"; got != want {
+		t.Errorf("power without a cell = %q, want %q", got, want)
+	}
+	if got := r.dispatchCLI("powersaving"); got != notSupportedOnNode {
+		t.Errorf("powersaving = %q, want %q", got, notSupportedOnNode)
 	}
 }

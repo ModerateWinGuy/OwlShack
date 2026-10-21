@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/sensor"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 // oneRow is a channel map of a single reading, with the sensor behind it already read.
@@ -32,19 +32,17 @@ func oneRow(ch, typ byte, metric sensor.Metric, v float64) func() ([]sensor.Chan
 
 func telemetryRepeater(t *testing.T, hook func() ([]sensor.ChannelEntry, []sensor.Status)) *Repeater {
 	t.Helper()
-	r := &Repeater{
-		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		telemetry: hook,
+	return &Repeater{
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		telemetry:  hook,
+		boardStats: func() DeviceStats { return DeviceStats{BatteryMV: 4000, HaveBattery: true} },
 	}
-	r.batteryMV.Store(4000)
-	r.haveBattery.Store(true)
-	return r
 }
 
 // params[0] is an inverse mask, so 0x00 asks for everything.
 func telemetryReply(t *testing.T, r *Repeater, role int, mask byte) string {
 	t.Helper()
-	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: role}, reqTypeGetTelemetryData, []byte{mask}, sensor.MaxReplyBody(nil))
+	body, ok := r.buildReqResponse(&store.RepeaterACLEntry{Permissions: role}, []byte{meshcore.ReqTypeGetTelemetryData, mask}, sensor.MaxReplyBody(nil))
 	if !ok {
 		t.Fatal("the node refused to answer a telemetry request")
 	}
@@ -66,7 +64,7 @@ func TestTelemetry_EnvironmentPermissionGatesTheMap(t *testing.T) {
 	r := telemetryRepeater(t, oneRow(2, meshcore.LPPTemperature, sensor.Temperature, 22.5))
 
 	// Masking out the environment class leaves the node's own channel behind.
-	got := telemetryReply(t, r, permReadOnly, sensor.PermEnvironment)
+	got := telemetryReply(t, r, permReadOnly, meshcore.TelemPermEnvironment)
 	if got != "01740190" {
 		t.Fatalf("reply %s, want the node's own channel only", got)
 	}
@@ -89,7 +87,7 @@ func TestTelemetry_AGuestGetsTheNodesOwnChannelOnly(t *testing.T) {
 	}
 }
 
-// Checked against the packet the send path builds and the frame the requester's companion hands its app: one byte more and one of them drops it.
+// Checked against the path return, the packet the send path builds and the frame the requester's companion hands its app: one byte more and one of them drops it.
 func TestMaxReplyBody_IsTheMostTheRequestersAppReceives(t *testing.T) {
 	secret := bytes.Repeat([]byte{0x5A}, 32)
 	for _, path := range []int{-1, 0, 1, 2, 3, 17, 40} {
@@ -100,6 +98,12 @@ func TestMaxReplyBody_IsTheMostTheRequestersAppReceives(t *testing.T) {
 			route = 1 + path + 1
 		}
 		received := func(body int) bool {
+			if path >= 0 {
+				pp := meshcore.PathPayload{PathLength: meshcore.MakePathLen(1, uint8(path)), Path: req.Path, ExtraType: meshcore.PayloadTypeResponse, Extra: make([]byte, sensor.ReplyTagLen+body)}
+				if _, err := pp.ToBytes(); err != nil {
+					return false
+				}
+			}
 			payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
 				return (&meshcore.Response{Destination: 1, Source: 2, MAC: mac, EncryptedPayload: enc}).ToBytes()
 			}, make([]byte, route+sensor.ReplyTagLen+body))
@@ -126,9 +130,9 @@ func TestTelemetry_FallsBackToTheNodesOwnChannelWhenTheMapIsTooBig(t *testing.T)
 	r := telemetryRepeater(t, manyRows(2, 30, meshcore.LPPGenericSensor, 123456))
 
 	overSize := 29 * 6
-	if overSize <= sensor.MaxReplyBody(nil) || overSize > maxPacketPayload {
+	if overSize <= sensor.MaxReplyBody(nil) || overSize > meshcore.MaxPacketPayload {
 		t.Fatalf("a %d-byte map is not in the window this test exists for (%d..%d]",
-			overSize, sensor.MaxReplyBody(nil), maxPacketPayload)
+			overSize, sensor.MaxReplyBody(nil), meshcore.MaxPacketPayload)
 	}
 
 	got := telemetryReply(t, r, permReadOnly, 0x00)
@@ -201,7 +205,7 @@ func telemetryRequest(t *testing.T, from meshcore.LocalIdentity, to meshcore.Ide
 	}
 	plain := make([]byte, 6)
 	binary.LittleEndian.PutUint32(plain, tag)
-	plain[4] = reqTypeGetTelemetryData
+	plain[4] = meshcore.ReqTypeGetTelemetryData
 	payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
 		return (&meshcore.Request{Destination: to.PublicKey()[0], Source: from.PublicKey()[0], MAC: mac, EncryptedPayload: enc}).ToBytes()
 	}, plain)

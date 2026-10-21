@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 // WSTopicMetrics is the WebSocket topic live readings are broadcast on.
@@ -105,6 +105,8 @@ type Service struct {
 	collectors map[string]Collector
 	nextDue    map[string]time.Time // keyed by pubkey hex
 	failures   map[string]int       // consecutive failed polls, keyed by pubkey hex
+	soon       map[string]bool      // asked to poll again while its poll was in flight, keyed by pubkey hex
+	inFlight   string               // the node being polled now, under pollMu
 
 	// pollMu keeps only one collector round-trip on the air at a time.
 	pollMu sync.Mutex
@@ -130,6 +132,14 @@ func New(st *store.Store, bc Broadcaster, lister Lister, log *slog.Logger) *Serv
 func (s *Service) rescheduleAfter(key string, t Target, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.inFlight = ""
+	// A PollSoon that arrived mid-poll wants the newer settings on air, which the poll just finished may have missed.
+	if s.soon[key] {
+		delete(s.soon, key)
+		delete(s.nextDue, key)
+		return
+	}
 
 	interval := defaultInterval
 	if t.IntervalSecs > 0 {
@@ -225,6 +235,7 @@ func (s *Service) runCycle(ctx context.Context) {
 		first = false
 
 		s.pollMu.Lock()
+		s.setInFlight(key)
 		retryFailure, err := s.poll(ctx, t)
 		s.pollMu.Unlock()
 
@@ -263,17 +274,50 @@ func (s *Service) poll(ctx context.Context, t Target) (retryFailure bool, err er
 		return false, err
 	}
 
+	s.record(state, res.Name, res.Readings, res.Neighbors, false)
+	return res.RetryFailure, nil
+}
+
+// RecordPush stores readings a node sent unasked, such as a sensor's push, as a successful poll at the time they arrived.
+func (s *Service) RecordPush(t Target, name string, readings []Reading) {
+	ts := time.Now().Unix()
+	s.record(store.NodeState{Pubkey: t.Pubkey, CompanionID: t.CompanionID, Kind: t.Kind, LastPollTS: ts}, name, readings, nil, true)
+}
+
+func (s *Service) setInFlight(key string) {
+	s.mu.Lock()
+	s.inFlight = key
+	s.mu.Unlock()
+}
+
+// PollSoon makes a node due now, so the next tick polls it rather than racing one in flight; asked mid-poll, it holds past that poll.
+func (s *Service) PollSoon(pubkey []byte) {
+	key := hex.EncodeToString(pubkey)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key == s.inFlight {
+		if s.soon == nil {
+			s.soon = make(map[string]bool)
+		}
+		s.soon[key] = true
+	}
+	delete(s.nextDue, key)
+}
+
+// record persists and broadcasts one successful result; state carries the node and its time, and a push leaves the last poll's outcome alone.
+func (s *Service) record(state store.NodeState, name string, readings []Reading, nbs []NeighborSample, pushed bool) {
+	pollTS := state.LastPollTS
 	state.LastOkTS = pollTS
-	if res.Name != "" {
-		state.Name = res.Name
+	if name != "" {
+		state.Name = name
 	}
 
-	metrics := make([]store.Metric, 0, len(res.Readings))
-	snapshot := make(map[string]float64, len(res.Readings))
-	for _, r := range res.Readings {
+	metrics := make([]store.Metric, 0, len(readings))
+	snapshot := make(map[string]float64, len(readings))
+	for _, r := range readings {
 		metrics = append(metrics, store.Metric{
 			TS:      pollTS,
-			Pubkey:  t.Pubkey,
+			Pubkey:  state.Pubkey,
 			Metric:  r.Metric,
 			Channel: r.Channel,
 			Value:   r.Value,
@@ -284,11 +328,11 @@ func (s *Service) poll(ctx context.Context, t Target) (retryFailure bool, err er
 		state.State = string(blob)
 	}
 
-	neighbors := make([]store.Neighbor, 0, len(res.Neighbors))
-	for _, n := range res.Neighbors {
+	neighbors := make([]store.Neighbor, 0, len(nbs))
+	for _, n := range nbs {
 		neighbors = append(neighbors, store.Neighbor{
 			TS:             pollTS,
-			Pubkey:         t.Pubkey,
+			Pubkey:         state.Pubkey,
 			NeighborPubkey: n.Pubkey,
 			SNR:            n.SNR,
 		})
@@ -302,22 +346,26 @@ func (s *Service) poll(ctx context.Context, t Target) (retryFailure bool, err er
 		if err := s.st.Metrics.RecordNeighbors(context.Background(), neighbors); err != nil {
 			s.log.Error("recording neighbors", "error", err)
 		}
-		if err := s.st.Metrics.UpsertNodeState(context.Background(), &state); err != nil {
+		upsert := s.st.Metrics.UpsertNodeState
+		if pushed {
+			upsert = s.st.Metrics.UpsertPushedState
+		}
+		if err := upsert(context.Background(), &state); err != nil {
 			s.log.Error("upserting node state", "error", err)
 		}
 	})
 
 	if s.bc != nil {
 		s.bc.Broadcast(WSTopicMetrics, map[string]any{
-			"pubkey":      hex.EncodeToString(t.Pubkey),
-			"companionId": t.CompanionID,
-			"kind":        t.Kind,
+			"pubkey":      hex.EncodeToString(state.Pubkey),
+			"companionId": state.CompanionID,
+			"kind":        state.Kind,
 			"name":        state.Name,
 			"ts":          pollTS,
 			"metrics":     snapshot,
+			"pushed":      pushed,
 		})
 	}
-	return res.RetryFailure, nil
 }
 
 // PollNow polls one node out of band and resets its schedule; it errors if the node isn't monitored or a poll is in flight.
@@ -343,6 +391,7 @@ func (s *Service) PollNow(ctx context.Context, pubkey []byte) error {
 		return fmt.Errorf("node is not currently monitored")
 	}
 
+	s.setInFlight(key)
 	retryFailure, pollErr := s.poll(ctx, *target)
 	s.rescheduleAfter(key, *target, pollErr == nil && !retryFailure)
 	return pollErr

@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 // putFloat mirrors the firmware encoder so the test is a genuine round trip, not a restatement of the decoder.
@@ -116,5 +116,30 @@ func TestParseSeries_BlockPadding(t *testing.T) {
 	}
 	if s.Entries[0].Min != 20 || s.Entries[0].Max != 30 || s.Entries[0].Avg != 25 {
 		t.Errorf("temp = %v/%v/%v; want 20/30/25", s.Entries[0].Min, s.Entries[0].Max, s.Entries[0].Avg)
+	}
+}
+
+// Firmware putFloat holds a value in a uint32, so a 6-byte gyrometer reading has two zero top bytes; channel 0 ends the data (LPPReader::readHeader).
+func TestParseSeries_FirmwareGolden(t *testing.T) {
+	body := []byte{0x00, 0xF1, 0x53, 0x65}                                          // now = 1700000000
+	body = append(body, 1, meshcore.LPPVoltage, 0x01, 0x73, 0x01, 0xA0, 0x01, 0x8E) // 3.71 / 4.16 / 3.98 V
+	body = append(body, 2, meshcore.LPPGyrometer,
+		0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // 256, multiplier 1
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x64, // 100
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // 0
+	body = append(body, 0, meshcore.LPPVoltage, 0x01, 0x73, 0x01, 0xA0, 0x01, 0x8E)
+
+	s, err := ParseSeries(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.NodeTime != 1_700_000_000 || len(s.Entries) != 2 {
+		t.Fatalf("got time %d and %d entries, want 1700000000 and 2: %+v", s.NodeTime, len(s.Entries), s.Entries)
+	}
+	if e := s.Entries[0]; e.Channel != 1 || e.Min != 3.71 || e.Max != 4.16 || e.Avg != 3.98 || e.Unit != "V" {
+		t.Errorf("voltage = %+v", e)
+	}
+	if e := s.Entries[1]; e.Channel != 2 || e.Min != 256 || e.Max != 100 || e.Avg != 0 {
+		t.Errorf("gyrometer = %+v", e)
 	}
 }

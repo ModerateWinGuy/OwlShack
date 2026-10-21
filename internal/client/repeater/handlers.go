@@ -5,12 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/meshpath"
+	"github.com/OwlShack/OwlShack/internal/meshpath"
 )
 
 func (rm *Client) HandlePathPacket(pkt *meshcore.Packet) bool {
@@ -42,7 +40,7 @@ func (rm *Client) HandlePathPacket(pkt *meshcore.Packet) bool {
 			rm.log.Debug("HandlePathPacket: bad path payload", "error", err)
 			continue
 		}
-		if pp.ExtraType != meshcore.PayloadTypeResponse || !isLoginReply(pp.Extra) {
+		if pp.ExtraType != meshcore.PayloadTypeResponse || !rm.isLoginReply(pp.Extra, pl.peerPubKeyByte) {
 			continue
 		}
 		rm.pendingLogins = append(rm.pendingLogins[:i], rm.pendingLogins[i+1:]...)
@@ -62,7 +60,7 @@ func (rm *Client) HandlePathPacket(pkt *meshcore.Packet) bool {
 
 		rm.node.Peers().SetOutPath(pl.peerPubKey, returnPath, uint8(pathHashSize))
 		rm.persistOutPath(pl.peerPubKey[:], returnPath, uint8(pathHashSize))
-		rm.sendReciprocalPath(pkt, pl.peerPubKey[:], pl.sharedSecret, returnPath, uint8(pathHashSize))
+		rm.sendReciprocalPath(pkt, pl.peerPubKey[:], returnPath, uint8(pathHashSize))
 
 		select {
 		case pl.ch <- extraData:
@@ -95,28 +93,15 @@ func (rm *Client) HandlePathPacket(pkt *meshcore.Packet) bool {
 		pathHashSize := int(pp.PathHashSize())
 
 		rm.log.Debug("path return received (session)", "hops", pp.PathHashCount(), "hashSize", pathHashSize, "pathHex", hex.EncodeToString(returnPath))
-		if pubkeyBytes, derr := hex.DecodeString(sess.PubKeyHex); derr == nil && len(pubkeyBytes) == 32 {
+		target := rm.pendingFor(extraType, extraData)
+		if pubkeyBytes, derr := hex.DecodeString(sess.PubKeyHex); derr == nil && len(pubkeyBytes) == 32 && (target == nil || !target.discovery) {
 			var pubkey [32]byte
 			copy(pubkey[:], pubkeyBytes)
 			rm.node.Peers().SetOutPath(pubkey, returnPath, uint8(pathHashSize))
 			rm.persistOutPath(pubkeyBytes, returnPath, uint8(pathHashSize))
-			rm.sendReciprocalPath(pkt, pubkeyBytes, sess.sharedSecret, returnPath, uint8(pathHashSize))
+			rm.sendReciprocalPath(pkt, pubkeyBytes, returnPath, uint8(pathHashSize))
 		}
-
-		if extraType == meshcore.PayloadTypeResponse && len(extraData) >= 4 {
-			tag := binary.LittleEndian.Uint32(extraData[:4])
-			data := extraData[4:]
-
-			rm.pendingMu.Lock()
-			pr, ok := rm.pending[tag]
-			rm.pendingMu.Unlock()
-			if ok {
-				select {
-				case pr.ch <- data:
-				default:
-				}
-			}
-		}
+		deliverPathReply(target, pkt, pp)
 		return true
 	}
 
@@ -141,29 +126,41 @@ func (rm *Client) HandlePathPacket(pkt *meshcore.Packet) bool {
 		if err != nil {
 			return true
 		}
-		returnPath, extraType, extraData := pp.Path, pp.ExtraType, pp.Extra
-
-		rm.node.Peers().SetOutPath(pr.peerPubKey, returnPath, pp.PathHashSize())
-		rm.persistOutPath(pr.peerPubKey[:], returnPath, pp.PathHashSize())
-		rm.sendReciprocalPath(pkt, pr.peerPubKey[:], pr.sharedSecret, returnPath, pp.PathHashSize())
-
-		if extraType == meshcore.PayloadTypeResponse && len(extraData) >= 4 {
-			tag := binary.LittleEndian.Uint32(extraData[:4])
-			data := extraData[4:]
-
-			rm.pendingMu.Lock()
-			target, ok := rm.pending[tag]
-			rm.pendingMu.Unlock()
-			if ok {
-				select {
-				case target.ch <- data:
-				default:
-				}
-			}
+		returnPath := pp.Path
+		target := rm.pendingFor(pp.ExtraType, pp.Extra)
+		if target == nil || !target.discovery {
+			rm.node.Peers().SetOutPath(pr.peerPubKey, returnPath, pp.PathHashSize())
+			rm.persistOutPath(pr.peerPubKey[:], returnPath, pp.PathHashSize())
+			rm.sendReciprocalPath(pkt, pr.peerPubKey[:], returnPath, pp.PathHashSize())
 		}
+		deliverPathReply(target, pkt, pp)
 		return true
 	}
 	return false
+}
+
+// pendingFor is the request a PATH packet's embedded response answers, or nil.
+func (rm *Client) pendingFor(extraType byte, extra []byte) *pendingRequest {
+	if extraType != meshcore.PayloadTypeResponse || len(extra) < 4 {
+		return nil
+	}
+	rm.pendingMu.Lock()
+	defer rm.pendingMu.Unlock()
+	return rm.pending[binary.LittleEndian.Uint32(extra[:4])]
+}
+
+// deliverPathReply hands target the response after its tag, and a discovery both paths first.
+func deliverPathReply(target *pendingRequest, pkt *meshcore.Packet, pp *meshcore.PathPayload) {
+	if target == nil {
+		return
+	}
+	if target.onPath != nil {
+		target.onPath(PathBytes{Len: pp.PathLength, Hops: pp.Path}, PathBytes{Len: pkt.PathLength, Hops: pkt.Path})
+	}
+	select {
+	case target.ch <- pp.Extra[4:]:
+	default:
+	}
 }
 
 func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
@@ -179,12 +176,12 @@ func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
 			continue
 		}
 		plaintext := resp.Decrypt(pl.sharedSecret)
-		if !isLoginReply(plaintext) {
+		if !rm.isLoginReply(plaintext, pl.peerPubKeyByte) {
 			continue
 		}
 		rm.pendingLogins = append(rm.pendingLogins[:i], rm.pendingLogins[i+1:]...)
 		rm.loginMu.Unlock()
-		rm.retryReciprocalPath(pkt, pl.peerPubKey, pl.sharedSecret)
+		rm.retryReciprocalPath(pkt, pl.peerPubKey)
 		select {
 		case pl.ch <- plaintext:
 		default:
@@ -208,7 +205,7 @@ func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
 		}
 		ch := pr.ch
 		rm.pendingMu.Unlock()
-		rm.retryReciprocalPath(pkt, pr.peerPubKey, pr.sharedSecret)
+		rm.retryReciprocalPath(pkt, pr.peerPubKey)
 		select {
 		case ch <- plaintext[4:]:
 		default:
@@ -247,21 +244,25 @@ func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
 			case pr.ch <- data:
 			default:
 			}
+		} else {
+			rm.handlePush(sess.PubKeyHex, tag, data)
 		}
 		// The branch every in-session status, telemetry and CLI reply takes, so it is where a
 		// remote still flooding at us despite our route is most likely to show up.
 		if pubkeyBytes, derr := hex.DecodeString(sess.PubKeyHex); derr == nil && len(pubkeyBytes) == 32 {
 			var pubkey [32]byte
 			copy(pubkey[:], pubkeyBytes)
-			rm.retryReciprocalPath(pkt, pubkey, sess.sharedSecret)
+			rm.retryReciprocalPath(pkt, pubkey)
 		}
 		return
 	}
+	rm.pushWithoutSession(resp)
 }
 
-func (rm *Client) HandleCLIResponse(senderPubKey [32]byte, text string) {
+// HandleCLIResponse delivers a reply to the CLI command of ours it answers, reporting whether there was one.
+func (rm *Client) HandleCLIResponse(senderPubKey [32]byte, text string) bool {
 	if len(text) < cliPrefixLen || text[2] != '|' {
-		return
+		return false
 	}
 	prefix := text[:2]
 	response := text[3:]
@@ -276,6 +277,7 @@ func (rm *Client) HandleCLIResponse(senderPubKey [32]byte, text string) {
 		default:
 		}
 	}
+	return ok
 }
 
 func (rm *Client) HandleTextPacket(pkt *meshcore.Packet) bool {
@@ -304,60 +306,47 @@ func (rm *Client) HandleTextPacket(pkt *meshcore.Packet) bool {
 		}
 
 		flags := plaintext[4] >> 2
-		if flags != txtTypeCliData {
+		if flags != meshcore.TxtTypeCLIData {
 			continue
 		}
 
-		text := strings.TrimRight(string(plaintext[5:]), "\x00")
-		rm.HandleCLIResponse([32]byte{}, text)
-		return true
+		// A reply none of our commands is waiting for answers the app's, which the companion hands on.
+		return rm.HandleCLIResponse([32]byte{}, strings.TrimRight(string(plaintext[5:]), "\x00"))
 	}
 	return false
 }
 
-// reciprocalPathDelay is the firmware's 500 ms on a reciprocal path return (Mesh.cpp:177).
-const reciprocalPathDelay = 500 * time.Millisecond
-
 // sendReciprocalPath teaches a peer its route back to us after it taught us ours, sent direct down
 // that fresh route. Firmware Mesh.cpp:173-178 does this for any flood PATH; without it the remote
 // keeps flooding every response at us.
-func (rm *Client) sendReciprocalPath(pkt *meshcore.Packet, peerPubKey, secret, learnedPath []byte, hashSize uint8) {
-	if !pkt.IsRouteFlood() {
+func (rm *Client) sendReciprocalPath(pkt *meshcore.Packet, peerPubKey, learnedPath []byte, hashSize uint8) {
+	// A marked PATH came from a peer the node knows, and the library has already answered it.
+	if !pkt.IsRouteFlood() || pkt.IsMarkedDoNotRetransmit() {
 		return
 	}
-	rpath, err := meshpath.BuildReturn(rm.node.Identity().PublicKey(), peerPubKey, secret, pkt.Path, pkt.PathLength, 0, nil)
+	peer, err := meshcore.NewIdentityFromBytes(peerPubKey)
 	if err != nil {
-		rm.log.Debug("failed to build reciprocal path return", "error", err)
 		return
 	}
-	meshpath.Direct(rpath, learnedPath, hashSize)
-	if err := rm.node.SendPacketDelayed(rpath, node.PriorityFloodRelay, reciprocalPathDelay); err != nil {
+	if err := rm.node.SendReciprocalPath(peer, pkt, learnedPath, hashSize, meshpath.ReciprocalDelay); err != nil {
 		rm.log.Debug("failed to send reciprocal path return", "error", err)
 		return
 	}
 	rm.log.Debug("sent reciprocal path return", "peer", hex.EncodeToString(peerPubKey[:min(6, len(peerPubKey))]), "hops", len(learnedPath)/int(max(hashSize, 1)))
 }
 
-// returnPathRetryDelay is the firmware's 3 s on handleReturnPathRetry (BaseChatMesh.cpp:364).
-const returnPathRetryDelay = 3 * time.Second
-
 // retryReciprocalPath answers a FLOOD response from a peer we already hold a route to: they are
-// not using the route we taught them, so BaseChatMesh::handleReturnPathRetry resends it direct.
-func (rm *Client) retryReciprocalPath(pkt *meshcore.Packet, peerPubKey [32]byte, secret []byte) {
-	if !pkt.IsRouteFlood() || secret == nil {
+// not using the route we taught them, so BaseChatMesh.cpp:332-337 resends it direct.
+func (rm *Client) retryReciprocalPath(pkt *meshcore.Packet, peerPubKey [32]byte) {
+	if !pkt.IsRouteFlood() {
 		return
 	}
-	outPath, hashSize := learnedRoute(rm.node.Peers().Lookup(peerPubKey))
+	peer := rm.node.Peers().Lookup(peerPubKey)
+	outPath, hashSize := learnedRoute(peer)
 	if outPath == nil {
 		return // no route of ours for them to be ignoring
 	}
-	rpath, err := meshpath.BuildReturn(rm.node.Identity().PublicKey(), peerPubKey[:], secret, pkt.Path, pkt.PathLength, 0, nil)
-	if err != nil {
-		rm.log.Debug("failed to build return path retry", "error", err)
-		return
-	}
-	meshpath.Direct(rpath, outPath, hashSize)
-	if err := rm.node.SendPacketDelayed(rpath, node.PriorityFloodRelay, returnPathRetryDelay); err != nil {
+	if err := rm.node.SendReciprocalPath(peer.Identity, pkt, outPath, hashSize, meshpath.ReturnRetryDelay); err != nil {
 		rm.log.Debug("failed to send return path retry", "error", err)
 		return
 	}

@@ -1,10 +1,20 @@
 package api
 
-import "context"
+import (
+	"context"
+
+	meshcore "github.com/OwlShack/meshcore-go"
+
+	"github.com/OwlShack/OwlShack/internal/store"
+)
 
 // Backend is the seam between the HTTP/WS layer and the domain; api never imports the domain.
 type Backend interface {
 	Companions() []CompanionInfo
+	// CompanionApp is the MeshCore app's access to a running companion; ok is false for a companion not running.
+	CompanionApp(name string) (status CompanionAppStatus, ok bool)
+	// DisconnectCompanionApp drops the app connected to a companion; false when its access is off.
+	DisconnectCompanionApp(name string) bool
 
 	// SPIBoards lists the radio hats this build knows how to wire.
 	SPIBoards() []SPIBoardInfo
@@ -24,6 +34,10 @@ type Backend interface {
 	StartDiscovery(types []int) (DiscoveryState, bool)
 	// DiscoveryState reports the current scan without starting one.
 	DiscoveryState() (DiscoveryState, bool)
+	// StartRegionScan finds the repeaters in radio range and asks each which regions it floods; the error says why it cannot run.
+	StartRegionScan() (RegionScanState, error)
+	// RegionScanState reports the current or last region scan.
+	RegionScanState() RegionScanState
 
 	// Sensors reports every configured local sensor with its current state.
 	Sensors() []SensorStatus
@@ -54,6 +68,8 @@ type Backend interface {
 
 	// ChannelByHash resolves a channel hash byte across every companion; nil when unknown.
 	ChannelByHash(hash byte) *ChannelInfo
+	// FloodScopeOf names the region a packet carried: "everywhere", "region:<name>" or "unknown".
+	FloodScopeOf(pkt *meshcore.Packet) string
 
 	// AddPeer registers a peer in every companion's in-memory table, so it is reachable before its advert.
 	AddPeer(pubkey []byte, name, peerType string)
@@ -92,12 +108,17 @@ type Backend interface {
 
 	// Config writes by surrogate id: id==0 creates and returns it, id>0 updates; *string secrets are nil=keep, ""=clear.
 	SaveSettings(ctx context.Context, in SettingsInput) error
+	SaveFloodRegions(ctx context.Context, in FloodRegionsInput) error
+	// SetContactFloodScope validates the value and saves it; sends read it per packet, so nothing reloads.
+	SetContactFloodScope(ctx context.Context, companionID int64, pubkey []byte, scope string) error
 	SaveMqtt(ctx context.Context, in MqttInput) error
 	SaveBroker(ctx context.Context, in BrokerInput) (int64, error)
 	DeleteBroker(ctx context.Context, id int64) error
 	SaveCompanion(ctx context.Context, in CompanionInput) (int64, error)
 	// SetCompanionTelemetry sets who may read each class of a companion's telemetry.
 	SetCompanionTelemetry(ctx context.Context, id int64, in CompanionTelemetryInput) error
+	// SetCompanionApp turns the MeshCore app's TCP access on or off and picks its port.
+	SetCompanionApp(ctx context.Context, id int64, in CompanionAppInput) error
 	DeleteCompanion(ctx context.Context, id int64) error
 	SaveChannel(ctx context.Context, in ChannelInput) (int64, error)
 	DeleteChannel(ctx context.Context, id int64) error
@@ -113,7 +134,10 @@ type Backend interface {
 	UpdateRepeaterNode(ctx context.Context, in RepeaterNodeInput) error
 	UpdateRepeaterRelay(ctx context.Context, in RepeaterRelayInput) error
 	UpdateRepeaterAdmin(ctx context.Context, in RepeaterAdminInput) error
+	SetRepeaterFloodScope(ctx context.Context, in RepeaterScopeInput) error
+	SetRepeaterHome(ctx context.Context, in RepeaterHomeInput) error
 	AddRepeaterRegion(ctx context.Context, in RepeaterRegionInput) error
+	MoveRepeaterRegion(ctx context.Context, name, parent string) error
 	SetRepeaterRegionFlood(ctx context.Context, name string, denyFlood bool) error
 	RemoveRepeaterRegion(ctx context.Context, name string) error
 	DeleteRepeater(ctx context.Context) error
@@ -127,6 +151,18 @@ func (e *ValidationError) Unwrap() error { return e.Err }
 
 // Invalid marks err as the request's fault.
 func Invalid(err error) error { return &ValidationError{Err: err} }
+
+// StatusError is a request that failed in a way the operator can act on, such as a node that didn't answer; Status is the HTTP answer.
+type StatusError struct {
+	Status int
+	Err    error
+}
+
+func (e *StatusError) Error() string { return e.Err.Error() }
+func (e *StatusError) Unwrap() error { return e.Err }
+
+// Failed marks err with the status a handler answers it with.
+func Failed(status int, err error) error { return &StatusError{Status: status, Err: err} }
 
 // RepeaterNodeOps are runtime operations on the running repeater node.
 type RepeaterNodeOps struct {
@@ -185,6 +221,28 @@ type DiscoveryInfo struct {
 	ReportedSNR float64 `json:"reportedSnr"`
 	// Heard is when this node answered, as a timestamp so the page can age it without polling.
 	Heard string `json:"heard"`
+}
+
+// RegionScanState is a Discover nearby run: a discovery window for repeaters, then one regions request to each in turn.
+type RegionScanState struct {
+	Running bool `json:"running"`
+	// Phase is "listening", "asking" or "done"; "" before any scan.
+	Phase     string `json:"phase"`
+	SecsLeft  int    `json:"secsLeft"`  // while listening
+	StartedAt string `json:"startedAt"` // "" before any scan
+	// Repeaters is empty while listening, then every repeater that answered the discovery, strongest first.
+	Repeaters []RegionScanRepeater `json:"repeaters"`
+}
+
+// RegionScanRepeater is one repeater's answer, or why there is none.
+type RegionScanRepeater struct {
+	PubKey string  `json:"pubkey"`
+	Name   string  `json:"name"` // "" for a node we only know by key
+	SNR    float64 `json:"snr"`
+	// Status is "waiting", "asking", "answered" or "no answer". A firmware repeater answers 4 of these every 3 minutes from anyone, so no answer can be that limit.
+	Status string `json:"status"`
+	// Regions are the ones it floods as it reported them, "*" first when it floods unscoped traffic.
+	Regions []string `json:"regions"`
 }
 
 // DiscoveryState is a scan and whatever has answered so far.
@@ -270,14 +328,14 @@ type DatabaseHealth struct {
 
 // No node listing on purpose: a name or peer count cannot report a fault (a node that fails to start is a problem entry), and both resolve to coordinates on public maps.
 
-// BrokerHealth carries ages, not the transport error (it names the broker's address) and not flags (the observer never clears lastErr, so a bool would latch).
+// BrokerHealth carries ages, not the transport error (it names the broker's address).
 type BrokerHealth struct {
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
 	Connected bool   `json:"connected"`
 	// Null when disconnected. Resetting toward zero on every scrape is how flapping shows; Connected alone reads true.
 	ConnectedSecs *int64 `json:"connectedSecs"`
-	// Null when it has never erred.
+	// Null when the current connection has no error.
 	LastErrorSecs *int64 `json:"lastErrorSecs"`
 	Published     uint64 `json:"published"`
 	Dropped       uint64 `json:"dropped"`
@@ -520,12 +578,22 @@ type SettingsInput struct {
 	ModemToken   *string `json:"modemToken"`
 	PathHashSize *int    `json:"pathHashSize"`
 	// DutyCycle is a TX airtime cap percentage (0 < pct <= 100); null means the default, not "keep".
-	DutyCycle     *float64 `json:"dutyCycle"`
-	SetupComplete *bool    `json:"setupComplete"`
+	DutyCycle *float64 `json:"dutyCycle"`
+	// PacketRetentionDays is how many days of packets to keep, 1-365; required, so a missing value is refused rather than guessed.
+	PacketRetentionDays *int  `json:"packetRetentionDays"`
+	SetupComplete       *bool `json:"setupComplete"`
+}
+
+// FloodRegionsInput is the region list and the default every inheriting level resolves to.
+type FloodRegionsInput struct {
+	Regions    *[]store.FloodRegion `json:"regions"`    // required, each with its parent ("*" at the top); [] clears the list
+	FloodScope string               `json:"floodScope"` // "everywhere" or "region:<name>"; required
 }
 
 type MqttInput struct {
-	Enabled         *bool   `json:"enabled"`
+	Enabled *bool `json:"enabled"`
+	// NodeKind is required: "companion" (NodeCompanionID) or "repeater" (no id).
+	NodeKind        string  `json:"nodeKind"`
 	NodeCompanionID *int64  `json:"nodeCompanionId"`
 	IataCode        *string `json:"iataCode"`
 	StatusInterval  *int    `json:"statusInterval"`
@@ -564,6 +632,8 @@ type CompanionInput struct {
 	Longitude      *float64 `json:"longitude"`
 	AdvertInterval *int     `json:"advertInterval"`
 	PathHashSize   *int     `json:"pathHashSize"`
+	FloodScope     string   `json:"floodScope"`    // "inherit", "everywhere" or "region:<name>"; required
+	ShareLocation  *bool    `json:"shareLocation"` // whether adverts carry the position; required
 }
 
 // CompanionTelemetryInput is who may read each class: "deny", "selected" or "contacts".
@@ -573,11 +643,29 @@ type CompanionTelemetryInput struct {
 	Environment string `json:"environment"`
 }
 
+// CompanionAppStatus is what the companion's page shows about its app port: whether it is open, and who is using it.
+type CompanionAppStatus struct {
+	Enabled   bool   `json:"enabled"`
+	Port      int    `json:"port,omitempty"`
+	Listening bool   `json:"listening"`
+	Error     string `json:"error,omitempty"`
+	Client    string `json:"client,omitempty"`
+	Since     string `json:"since,omitempty"`
+}
+
+// CompanionAppInput is the MeshCore app's access; every field is required.
+type CompanionAppInput struct {
+	Enabled   *bool `json:"enabled"`
+	Port      *int  `json:"port"`
+	QueueSize *int  `json:"queueSize"`
+}
+
 type ChannelInput struct {
 	ID          int64   `json:"id"`
 	CompanionID int64   `json:"companionId"`
 	Name        string  `json:"name"`
 	PrivateKey  *string `json:"privateKey"` // nil = keep existing
+	FloodScope  string  `json:"floodScope"` // "inherit", "everywhere" or "region:<name>"; required
 }
 
 // RepeaterCreateInput sets up the singleton; everything else is edited through the section endpoints.
@@ -609,7 +697,6 @@ type RepeaterRelayInput struct {
 	DirectTxDelayFactor *float64 `json:"directTxDelayFactor"`
 	RxDelayBase         *float64 `json:"rxDelayBase"`
 	MultiAcks           *int     `json:"multiAcks"`
-	DefaultRegion       string   `json:"defaultRegion"` // "" = unscoped flood adverts
 	AdvertInterval      *int     `json:"advertInterval"`
 	FloodAdvertInterval *int     `json:"floodAdvertInterval"`
 }
@@ -621,10 +708,21 @@ type RepeaterAdminInput struct {
 	GuestPassword *string `json:"guestPassword"`
 }
 
-// RepeaterRegionInput is a region add (POST) or deny-flood toggle (PATCH) body.
+// RepeaterScopeInput is the region for its own adverts and replies (firmware default_scope): "everywhere" or "region:<name>" naming one of its regions.
+type RepeaterScopeInput struct {
+	FloodScope string `json:"floodScope"`
+}
+
+// RepeaterHomeInput names the home region, a label only (firmware home_id); "*" is none.
+type RepeaterHomeInput struct {
+	Region string `json:"region"`
+}
+
+// RepeaterRegionInput is a region add (POST) body; re-adding a region moves it under Parent, as the firmware's `region put` does.
 type RepeaterRegionInput struct {
-	Name      string `json:"name"`
-	DenyFlood bool   `json:"denyFlood"`
+	Name      string  `json:"name"`
+	Parent    *string `json:"parent"` // required: "*" for the top, else another region's name
+	DenyFlood bool    `json:"denyFlood"`
 }
 
 // TriggerTestInput is an unsaved feed bot to try; ItemID picks the item a render uses.
@@ -691,6 +789,7 @@ type TriggerInput struct {
 	URL                string           `json:"url"`
 	Location           *TriggerLocation `json:"location"`
 	Regions            *[]string        `json:"regions"`
+	FloodScope         string           `json:"floodScope"` // "inherit", "everywhere" or "region:<name>"; required
 }
 
 // BackupFile is a generated backup ready to stream to the browser.

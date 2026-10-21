@@ -1,17 +1,41 @@
 package companion
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"strings"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/config"
 )
 
 func (c *Companion) AddChannel(ref config.ChannelRef) error {
+	c.chanEditMu.Lock()
+	defer c.chanEditMu.Unlock()
+	return c.addChannel(ref, -1)
+}
+
+// ownScope is a channel's own region, unset read as inherit, as it is saved.
+func ownScope(s config.FloodScope) config.FloodScope {
+	if s == "" {
+		return config.ScopeInherit
+	}
+	return s
+}
+
+// addChannel puts the channel in slot, or the first free one when slot is -1.
+func (c *Companion) addChannel(ref config.ChannelRef, slot int) error {
+	if err := config.CheckChannelName(ref.Name); err != nil {
+		return api.Invalid(err)
+	}
+	if err := ref.Validate(); err != nil {
+		return api.Invalid(err)
+	}
 	ch, err := channelFromRef(ref)
 	if err != nil {
 		return fmt.Errorf("invalid channel %q: %w", ref.Name, err)
@@ -23,7 +47,10 @@ func (c *Companion) AddChannel(ref config.ChannelRef) error {
 		}
 	}
 
-	idx := c.nextFreeChannelIndex()
+	idx := slot
+	if idx < 0 {
+		idx = c.nextFreeChannelIndex()
+	}
 	if idx < 0 {
 		return fmt.Errorf("no free channel slots")
 	}
@@ -31,12 +58,21 @@ func (c *Companion) AddChannel(ref config.ChannelRef) error {
 	if !c.node.SetChannel(idx, ch) {
 		return fmt.Errorf("failed to set channel at index %d", idx)
 	}
+	c.chanScopesMu.Lock()
+	c.chanScopes[ch.Name] = ownScope(ref.FloodScope)
+	c.chanScopesMu.Unlock()
 
 	c.log.Info("channel added", "channel", ch.Name, "index", idx)
 	return nil
 }
 
 func (c *Companion) RemoveChannel(name string) error {
+	c.chanEditMu.Lock()
+	defer c.chanEditMu.Unlock()
+	return c.removeChannel(name)
+}
+
+func (c *Companion) removeChannel(name string) error {
 	if used := c.channelTriggerUsage(name); used != "" {
 		return fmt.Errorf("channel %q is in use by the %s; remove that trigger usage first", name, used)
 	}
@@ -44,26 +80,76 @@ func (c *Companion) RemoveChannel(name string) error {
 		ch := c.node.Channel(i)
 		if ch != nil && ch.Name == name {
 			c.node.RemoveChannel(i)
+			c.chanScopesMu.Lock()
+			delete(c.chanScopes, name)
+			c.letGo(name)
+			c.chanScopesMu.Unlock()
 			c.log.Info("channel removed", "channel", name, "index", i)
 			return nil
 		}
 	}
-	return fmt.Errorf("channel %q not found", name)
+	return api.Failed(http.StatusNotFound, fmt.Errorf("channel %q not found", name))
+}
+
+// letGo records a channel the node no longer holds; the caller holds chanScopesMu.
+func (c *Companion) letGo(name string) {
+	if c.dropped == nil {
+		c.dropped = make(map[string]bool)
+	}
+	c.dropped[name] = true
+}
+
+// Dropped reports whether the node removed or renamed away a channel by this name since it was built.
+func (c *Companion) Dropped(name string) bool {
+	c.chanScopesMu.Lock()
+	defer c.chanScopesMu.Unlock()
+	return c.dropped[name]
 }
 
 func (c *Companion) RenameChannel(oldName, newName string) error {
+	c.chanEditMu.Lock()
+	defer c.chanEditMu.Unlock()
+	if ch := c.findChannel(oldName); ch != nil && oldName != newName && !bytes.Equal(ch.PSK, meshcore.PublicChannel().PSK) {
+		return api.Invalid(fmt.Errorf("only the Public channel can be renamed; %q would keep its old key under the new name", oldName))
+	}
+	return c.renameChannel(oldName, newName)
+}
+
+// renameChannel relabels any channel, as the firmware's setChannel does given the same key.
+func (c *Companion) renameChannel(oldName, newName string) error {
+	if oldName == newName {
+		return nil // a save with nothing changed; the scope swap below would delete the scope
+	}
+	if c.findChannel(oldName) == nil {
+		return api.Failed(http.StatusNotFound, fmt.Errorf("channel %q not found", oldName))
+	}
+	if err := config.CheckChannelName(newName); err != nil {
+		return api.Invalid(err)
+	}
 	if used := c.channelTriggerUsage(oldName); used != "" {
 		return fmt.Errorf("channel %q is in use by the %s; remove that trigger usage first", oldName, used)
 	}
 	for i := range node.DefaultMaxChannels {
+		if ch := c.node.Channel(i); ch != nil && ch.Name == newName {
+			return fmt.Errorf("a channel named %q already exists", newName)
+		}
+	}
+	for i := range node.DefaultMaxChannels {
 		ch := c.node.Channel(i)
 		if ch != nil && ch.Name == oldName {
-			ch.Name = newName
+			renamed := *ch
+			renamed.Name = newName
+			c.chanScopesMu.Lock()
+			c.node.SetChannel(i, &renamed)
+			c.chanScopes[newName] = c.chanScopes[oldName]
+			delete(c.chanScopes, oldName)
+			c.letGo(oldName)
+			c.chanScopesMu.Unlock()
 			c.log.Info("channel renamed", "old", oldName, "new", newName, "index", i)
 			return nil
 		}
 	}
-	return fmt.Errorf("channel %q not found", oldName)
+	return api.Failed(http.StatusNotFound, fmt.Errorf("channel %q not found", oldName))
 }
 
 // channelTriggerUsage describes the first trigger referencing the named channel, or "" if none do; matching is case-sensitive, as elsewhere in the channel code.
@@ -94,13 +180,16 @@ func (c *Companion) nextFreeChannelIndex() int {
 
 // StandaloneChannels returns every channel registered on the node for config persistence; hashtag/Public channels omit their derived key.
 func (c *Companion) StandaloneChannels() []config.ChannelRef {
-	allChs := c.node.Channels()
+	c.chanScopesMu.Lock()
+	defer c.chanScopesMu.Unlock()
 	var refs []config.ChannelRef
-	for _, ch := range allChs {
+	for i := range node.DefaultMaxChannels {
+		ch := c.node.Channel(i)
 		if ch == nil {
 			continue
 		}
-		ref := config.ChannelRef{Name: ch.Name}
+		slot := i
+		ref := config.ChannelRef{Name: ch.Name, FloodScope: c.chanScopes[ch.Name], Slot: &slot}
 		if !isHashtagChannel(ch) {
 			ref.PrivateKey = hex.EncodeToString(ch.PSK[:])
 		}
@@ -112,14 +201,10 @@ func (c *Companion) StandaloneChannels() []config.ChannelRef {
 func isHashtagChannel(ch *meshcore.ChannelEntry) bool {
 	if strings.HasPrefix(ch.Name, "#") {
 		derived := meshcore.NewChannelFromHashtag(meshcore.NormalizeHashtag(ch.Name))
-		return derived.Hash == ch.Hash
+		return bytes.Equal(derived.PSK, ch.PSK)
 	}
 	if strings.EqualFold(ch.Name, "Public") {
-		pub, err := meshcore.NewChannelFromBase64("Public", "izOH6cXN6mrJ5e26oRXNcg==")
-		if err != nil {
-			return false
-		}
-		return pub.Hash == ch.Hash
+		return bytes.Equal(meshcore.PublicChannel().PSK, ch.PSK)
 	}
 	return false
 }

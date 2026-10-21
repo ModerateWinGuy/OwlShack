@@ -66,15 +66,63 @@ The node we run (`internal/node/repeater`) is measured against MeshCore 1.17.1
   the serial-only commands, hint-tagged "(serial only)".
 - **`set radio` / `set tx` are OTA commands upstream; we deliberately refuse
   them** — the modem is shared with the companion and its settings live in app
-  config. This is our one intentional divergence.
-- **Regions are flat** (name + denyFlood), not the firmware's parent tree, so
-  `region def` is unsupported and `region get` never prints a parent.
-  `region save` returns OK because `reconfigure` already persisted; `region load`
-  replies nothing, as the firmware's async reload does. `region list` and
+  config. The region items below are the only other divergences.
+- **Regions form the firmware's tree**: each keeps its parent by name (`*` at
+  the top), for organising only, as `RegionMap::findMatch` ignores parents.
+  Keys follow `getTransportKeysFor`: `#name` hashes as given, a bare name as
+  `#name` (MeshCore 7ae16421), and a `$` private region gets no key, so it
+  never matches. `*` is the firmware's wildcard: always there, allowing flood
+  until denied, so a config with no `*` entry relays unscoped flood, and the
+  REST API refuses to remove it as the firmware does.
+  `region put <name> [parent]` adds or moves a region, `region remove` refuses
+  one with sub-regions (`Err - not empty`), `region get` prints ` name (parent) F`
+  below the top, and `region def a b|jump c` puts each name under the one before
+  it (or the jump). `region save` returns OK because `reconfigure` already
+  persisted. `region load` replies nothing, then takes every following command
+  as a tree line (indent = depth, a trailing `F` allows flood for a new region,
+  an existing one keeps its flags) until a blank line swaps the tree in and
+  replies `OK - loaded N regions`. The remote-admin client refuses to send
+  `region load`: it reads lines before stripping our `XX|` tag, so a firmware
+  repeater would swallow every later command until rebooted. `region list` and
   `regionsExport` are comma-separated (`region list` includes `*` and prints
-  `-none-` when empty); bare `region` is the newline-terminated tree
+  `-none-` when empty), skipping a name that does not fit as `exportNamesTo`
+  does (160 bytes for `region list`, `sizeof(reply_data)-12` for the anon
+  reply); bare `region` is the newline-terminated tree
   (`regionTree`, mirroring `RegionMap::exportTo` — wildcard first, children
-  indented one space, `^` = home (on `*` when unset), ` F` = flood allowed).
+  indented one space per level, `^` = home (on `*` when unset), ` F` = flood
+  allowed, cut at 159 bytes).
+- **Region divergences, each where the firmware would end in a broken state:**
+  `region put` refuses to move a region under its own sub-region (the firmware
+  accepts it and the region drops out of its tree), and the end of `region load`
+  keeps `*`'s flood setting and the home region, which the firmware's temp map
+  resets (re-opening unscoped flood on a repeater that denied it). `region default $x` is
+  refused too: we can't load a private region's keys, so its adverts would go unscoped.
+  A name that is not UTF-8 once cut to 30 bytes gets the firmware's put error (`Err -
+  unable to put`, `Err - region table full` for `region default`) where the firmware
+  stores the bytes: JSON storage would swap them for U+FFFD and refuse the config at start.
+  A `#nz` default is stored as `region:nz`, which keys the same. Removing the
+  default region, or a `region load` without it, sets the default to `<null>`: the
+  firmware keeps sending in it until a reboot finds no region, and its load always
+  drops the default.
+  **Reading a remote node's regions** (`client/repeater/region_map.go`): `region`
+  gives the tree and the name lists are always read: a reply of 159 bytes was cut,
+  and a region in a parent loop (the firmware's `region put` allows one) never
+  prints, so `region get` asks each missing one's parent, and a loop is reported as
+  `partial` since no tree can show it. A list of 127 bytes or more
+  may have skipped a name (`exportNamesTo` drops what does not fit), and a lost
+  `region get` leaves its region out; either is reported as `partial`. The read
+  stops between commands when the HTTP request is gone. `region home` is always
+  asked next: a name may end in `^` as the home marker does, so only the line
+  equal to the home plus `^` is the home, and when two lines read so (home `a`
+  and a region `a^`) every region is read with `region get` instead. `region
+  default` is asked before the lists, so a node that goes quiet during them still
+  leaves a `partial` map; two missed `region get` replies in a row end the read.
+  The tree and lists print names without `#` (firmware before v1.12 has no remote
+  tree), but `region home`, `get` and `default` print the stored name, so a leading
+  `#` is dropped; `get` falls back to a prefix match, so a reply naming another
+  region counts as not found. The Regions tab sends each change at once and `region
+  save` on Save, as the MeshCore app does; a move re-sends `denyf`, as `put`
+  allows flood again on firmware 1.15+.
   Lookups are exact-then-prefix (`findByNamePrefix`); `region home` replies
   `" home is now X"` / `" home is X"`; `put` on an existing region re-allows
   flood (`OK - (flood allowed)`); `remove *` → `Err - not empty`. `region
@@ -127,7 +175,8 @@ The node we run (`internal/node/repeater`) is measured against MeshCore 1.17.1
   `multi.acks` copies are handled by the library.
 - **Telemetry (0x03)** returns battery voltage and MCU temperature on the self
   channel, both read from the KISS modem board (`HW_CMD_GET_BATTERY` /
-  `HW_CMD_GET_MCU_TEMP`, polled by `deviceStatsLoop` into `DeviceStats`). The
+  `HW_CMD_GET_MCU_TEMP`, read from the modem's `CachedStats` per reply, so a
+  reading past `StaleReadingAfter` is never sent; STATUS reads the same). The
   temperature is omitted when the board can't measure one — the modem answers
   `HW_ERR_NO_CALLBACK` and `HaveMCUTemp` stays false — mirroring the firmware's
   `isnan` check. The operator's channel map adds local sensors, and the inverse
@@ -431,7 +480,7 @@ existing `MessageGroup` sender rendering already handles that.
   - `keepalive` → `SendRoomKeepAlive`: REQ 0x02 `[tag][0x02][since:4]`, sent
     **direct only** (the firmware ignores flooded keep-alives and answers with
     a direct ACK carrying its unsynced count), after which posts resume through
-    the normal DM path. Fire-and-forget; "Resync posts" on the Status tab.
+    the normal DM path. Fire-and-forget; "Resume posts" in the room thread's menu.
   - Everything else (CLI, ACL, telemetry, path) is the shared type-agnostic
     surface. Firmware facts the page encodes: login outcomes are admin password
     → admin, `guest.password` (the *room* password) → read-write, otherwise
@@ -442,6 +491,47 @@ existing `MessageGroup` sender rendering already handles that.
     telemetry, so `monitorKind` maps ROOM to the companion collector.
 - **Still not done**: auto re-join on startup, and surfacing the keep-alive
   ACK's unsynced-post count (we don't listen for that ACK).
+
+## The MeshCore app over TCP (internal/companionapp)
+
+A companion with app access on serves the firmware's companion protocol on its
+port, as `examples/companion_radio` does over WiFi: `<` + u16 LE length + payload
+in, `>` frames out, 176 bytes at most (a longer header drops the connection),
+one app at a time and the last to connect wins. DEVICE_INFO claims
+FIRMWARE_VER_CODE 13 (anon requests to non-contacts, no RUN_CLI_COMMAND) with
+the BLE pin always 0. There is no password, so the handlers are an allowlist:
+
+- Served as the firmware does: handshake, contacts (`since` is when a contact
+  was added or last heard), DMs and channel posts (sent through the companion's
+  own send path, so they are stored, shown and retried like any other; SENT
+  carries our own ack tag and SEND_CONFIRMED follows delivery), the offline
+  queue (`addToOfflineQueue`: when full the oldest channel message goes, or
+  the new one if only DMs are held; its size is the App page's setting,
+  default 256 as most builds set `OFFLINE_QUEUE_SIZE`, where the firmware's
+  is fixed), login, status, telemetry, binary and anon requests, path discovery
+  (flooded, and the route is left alone), trace, discover-nearby control data,
+  CLI over a logged-in session, adverts, import and self export, the send scope
+  (CMD 54, per connection, only for regions in the list), time, battery, the
+  three stats replies (transmit counts and airtime are the shared radio's; what
+  was heard, its airtime and the last SNR and RSSI are counted while the port is
+  open), and the pushes for messages, adverts, paths, the RX log, traces and
+  control data.
+- Saved as the companion's own settings, through the same checks and reload as
+  a save from the UI: its name (cut to 31 bytes, as the firmware keeps it), its
+  position (0,0 is none), the telemetry modes and whether adverts share the
+  position (SET_OTHER_PARAMS; auto-adding contacts and extra acks are refused),
+  its default scope (a region in the list, or none), the path hash mode, and
+  channels by slot (SET_CHANNEL under the Channels page's rules: Public and a
+  hashtag channel are kept by name, a bot's channel cannot be cleared, only
+  Public is renamed in place). Contacts take a new name until their next
+  advert, the favourite star and telemetry grants. A rebuild that moves a
+  channel to another slot drops the app, which reconnects and reads them again.
+- Refused: private key export and import (DISABLED), signing, reboot, factory
+  reset, set PIN, RUN_CLI_COMMAND, raw packets and raw data, custom variables,
+  channel data, and sharing or exporting another node's advert (not kept).
+- The radio's and the host's settings (radio, TX power, tuning, auto-add, the
+  clock within 60 s) answer OK when the write changes nothing, as the app
+  re-saves a whole form, and UNSUPPORTED when it would change something.
 
 ## Message delivery status
 
@@ -464,8 +554,8 @@ The role facts behind the tags:
 
 - Repeater-only: `neighbors`, `neighbor.remove`, `discover.neighbors`, `loop.detect` (sensor and room `formatNeighborsReply` return "not supported", and only the repeater implements `isLooped`), plus `bridge.*`.
 - `io` sensor-only; `allow.read.only` room-only.
-- `guest.password` repeater + room (sensors have no guest login); `region save`/`load` repeater + room (the sensor lacks the callbacks).
-- Universal: `repeat` / `flood.max` — sensors and rooms **do** forward via `allowPacketForward` (the room also honours `flood.max.advert`/`.unscoped`).
+- `guest.password` repeater + room (sensors have no guest login); `region save`/`load` every role from 1.18 (a 1.17 sensor lacks the callbacks, so its save fails).
+- Universal: `repeat` / `flood.max` — sensors and rooms **do** forward via `allowPacketForward` (the room also honours `flood.max.advert`/`.unscoped`). A 1.18 room refuses `set repeat on` (`ERR - repeat now deprecated`) but takes `off`, so the Routing section sends only the fields changed since load.
 
 ## Radio presets
 
@@ -482,3 +572,30 @@ feed, and only warns when the feed is down or unusable, since regenerating
 cannot fix that; the release workflow runs it on every tag. A preset's `network_settings.path_hash_size` becomes
 `pathHashSize`, which the label shows but does **not** apply — set it on
 Settings (see [mqtt-and-radio.md](./mqtt-and-radio.md)).
+
+## MeshCore 1.18 additions
+
+- **Remote companion CLI** (`BaseChatMesh.cpp:262`, `companion_radio/MyMesh.cpp:538,2082`): a DM of
+  `TXT_TYPE_CLI_COMMAND` (3) to a 1.18 companion runs as CLI when its contact for us has flag 0x10,
+  and the reply is a `TXT_TYPE_CLI_DATA` (1) DM echoing our `XX|` tag. Without the flag the command
+  goes to its owner's app and nothing comes back, so silence is both "not allowed" and "out of
+  reach". OwlShack sends these (`SendCompanionCLI`); it does not yet run them, so the app server
+  refuses flag 0x10 rather than store a grant nothing honours.
+- **Sensor subscriptions** (`simple_sensor/SensorMesh.cpp:213-251,1042-1068`): REQ 0x08 carries a
+  push tag, a timeout (16-bit seconds) and 3-14 bytes of LPPData deltas; the reply's expiry is 0
+  when the request was unscoped and the sensor has no default region. Every 60 s the sensor
+  compares readings with the deltas and sends its whole telemetry as a RESPONSE tagged with the
+  push tag. The firmware stores the push tag before refusing, so a refused resubscribe re-tags the
+  running watch. It reads humidity as 2 bytes where the telemetry holds 1, so humidity and the reading
+  right after it (pressure on a BME280/680) are never matched; checked on a RAK4631 with a BME680, where
+  a fresh pressure watch never fired and a generic-sensor watch after it did. The API refuses
+  humidity; the UI also leaves out every reading after the first humidity, since where the walk lands past it depends on the values, which the server can't see. Pushes go
+  out as a flood scoped to the watch's region, so they only cross repeaters that relay that region.
+  OwlShack subscribes only from Monitoring (see config-and-storage.md), never sends the request in a
+  region, and so needs the sensor's default region.
+- **Hidden repeater** (`simple_repeater/MyMesh.cpp:793`): with both advert intervals 0 it ignores
+  DISCOVER, and so does ours.
+- **Flood relay by region is the repeater's call** (`simple_repeater/MyMesh.cpp:440,556`): our
+  repeater's `allowForward` refuses a flood `FindFloodMatch` gives nil; from meshcore-go v1.10 the
+  library no longer gates relays itself.
+

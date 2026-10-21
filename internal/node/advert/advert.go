@@ -6,8 +6,10 @@ import (
 	"math"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
+
+	"github.com/OwlShack/OwlShack/internal/meshpath"
 )
 
 // floodPathLength encodes the path-hash width in BYTES as (size-1) in PathLength's top 2 bits; clamped, a 0 would underflow to 0xC0.
@@ -15,50 +17,17 @@ func floodPathLength(pathHashSize int) byte {
 	if pathHashSize < 1 || pathHashSize > 3 {
 		pathHashSize = 1
 	}
-	return byte((pathHashSize - 1) << 6)
+	return meshcore.MakePathLen(uint8(pathHashSize), 0)
 }
 
 // SendSelf transmits a self-advert: flood is mesh-wide, otherwise zero-hop to direct neighbours only; scope wraps a flood in a transport region.
 func SendSelf(n *node.Node, log *slog.Logger, advType, name string, lat, lon *float64, flood bool, pathHashSize int, scope *meshcore.Region) error {
-	appData := meshcore.AdvertAppData{Type: advType, Name: name}
-	if lat != nil && lon != nil && (*lat != 0 || *lon != 0) {
-		appData.Lat = int32(math.Round(*lat * 1_000_000.0))
-		appData.Lon = int32(math.Round(*lon * 1_000_000.0))
-	}
-	rawAppData, err := appData.ToBytes()
+	pkt, err := BuildSelf(n, advType, name, lat, lon, flood, pathHashSize)
 	if err != nil {
 		return err
 	}
-
-	adv := meshcore.Advert{
-		PublicKey:  n.Identity().Identity,
-		Timestamp:  uint32(time.Now().Unix()),
-		RawAppData: rawAppData,
-	}
-	// SignWith, not Sign(PrivateKey()): an imported expanded-key identity has no usable seed.
-	adv.SignWith(n.Identity())
-
-	payload, err := adv.ToBytes()
-	if err != nil {
-		return err
-	}
-
-	// The firmware reads a direct packet with path_len==0 as zero-hop: accepted by neighbours, never relayed.
-	routeType := meshcore.RouteTypeFlood
-	pathLength := floodPathLength(pathHashSize)
-	if !flood {
-		routeType = meshcore.RouteTypeDirect
-		pathLength = 0
-	}
-
-	pkt := &meshcore.Packet{
-		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeAdvert, 0),
-		PathLength: pathLength,
-		Payload:    payload,
-	}
-	if flood && scope != nil { // scoped flood advert (firmware sendFloodScoped(default_scope, ...)); code 2 stays 0
-		pkt.Header = meshcore.MakeHeader(meshcore.RouteTypeTransportFlood, meshcore.PayloadTypeAdvert, 0)
-		pkt.TransportCode1 = scope.CalcTransportCode(pkt)
+	if flood {
+		pkt.SetScope(scope) // firmware sendFloodScoped(default_scope, ...); nil stays unscoped
 	}
 
 	mode := "flood"
@@ -69,5 +38,37 @@ func SendSelf(n *node.Node, log *slog.Logger, advType, name string, lat, lon *fl
 	}
 	log.Info("sending self-advert", "mode", mode)
 
-	return n.SendPacket(pkt)
+	return meshpath.Send(n, pkt, scope, 0)
+}
+
+// BuildSelf is a signed self-advert packet, unscoped.
+func BuildSelf(n *node.Node, advType, name string, lat, lon *float64, flood bool, pathHashSize int) (*meshcore.Packet, error) {
+	appData := meshcore.AdvertAppData{Type: advType, Name: name}
+	if lat != nil && lon != nil && (*lat != 0 || *lon != 0) {
+		appData.Lat = int32(math.Round(*lat * 1_000_000.0))
+		appData.Lon = int32(math.Round(*lon * 1_000_000.0))
+	}
+	// Firmware stamps an advert with getCurrentTime, not the unique clock.
+	adv, err := meshcore.NewAdvert(n.Identity(), appData, uint32(time.Now().Unix()))
+	if err != nil {
+		return nil, err
+	}
+	payload, err := adv.ToBytes()
+	if err != nil {
+		return nil, err
+	}
+
+	// The firmware reads a direct packet with path_len==0 as zero-hop: accepted by neighbours, never relayed.
+	routeType := meshcore.RouteTypeFlood
+	pathLength := floodPathLength(pathHashSize)
+	if !flood {
+		routeType = meshcore.RouteTypeDirect
+		pathLength = 0
+	}
+
+	return &meshcore.Packet{
+		Header:     meshcore.MakeHeader(routeType, meshcore.PayloadTypeAdvert, 0),
+		PathLength: pathLength,
+		Payload:    payload,
+	}, nil
 }

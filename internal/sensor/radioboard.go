@@ -4,10 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
+
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
-const radioBoardKind = "radio-board"
+const (
+	radioBoardKind = "radio-board"
+	// boardSensorKind is one sensor wired to the board, which the firmware reports on a channel of its own.
+	boardSensorKind = "radio-board-sensor"
+	optChannel      = "channel"
+)
 
 var (
 	// ErrNoRadio is a radio that is not connected right now.
@@ -25,6 +35,11 @@ type BoardReadings struct {
 	HaveMCUTemp bool
 	At          time.Time
 	SilentSince time.Time
+	// Sensors is what the board's own sensors read, one LPP channel each; HaveSensors is false until it answers.
+	Sensors     []meshcore.LPPReading
+	HaveSensors bool
+	// BatteryAt, MCUTempAt and SensorsAt are when the board gave each reading, which At, any answer at all, does not say.
+	BatteryAt, MCUTempAt, SensorsAt time.Time
 }
 
 // RadioBoardProvider reads the battery and MCU temperature the modem already asks its board for, so it adds no traffic on the link.
@@ -33,6 +48,8 @@ type RadioBoardProvider struct {
 	Board func() (BoardReadings, error)
 	// MaxAge is how long the modem keeps a board reading without an answer; it asks every 30 s.
 	MaxAge time.Duration
+	// State keeps what each board sensor's channel read first, so a channel the firmware renumbered is caught; nil keeps no record.
+	State StateStore
 }
 
 func (RadioBoardProvider) ID() string    { return "radio" }
@@ -46,13 +63,55 @@ func (p RadioBoardProvider) Available(context.Context) (bool, string) {
 	return true, ""
 }
 
-func (RadioBoardProvider) Kinds() []KindInfo {
+func (p RadioBoardProvider) Kinds() []KindInfo {
 	return []KindInfo{{
 		Kind: radioBoardKind, Label: "Radio board",
 		Description: "Battery voltage and MCU temperature from the radio's board",
 		Category:    "Power",
 		Metrics:     []Metric{Voltage, Temperature},
+	}, {
+		Kind: boardSensorKind, Label: "Board sensor",
+		Description: "A sensor wired to a KISS modem's board, such as a BME280 beside the radio",
+		Category:    "Environment",
+		Metrics:     boardMetrics(),
+		// What the channel reads now; while it reads nothing, as after a sensor failed to start, anything a board could report.
+		ReportsUnder: func(o map[string]string) []Metric {
+			ch, err := boardChannel(o)
+			if err != nil {
+				return nil
+			}
+			r, err := p.Board()
+			if err != nil {
+				return nil
+			}
+			var out []Metric
+			for _, rd := range channelReadings(r, ch) {
+				out = append(out, rd.Metric)
+			}
+			return out
+		},
+		Fields: []Field{{
+			Key: optChannel, Label: "Board channel", Required: true, Identifies: true,
+			Help: "The channel the board reports this sensor on; it counts from 2 in the order the firmware found its sensors",
+		}},
 	}}
+}
+
+// Validate refuses a board channel the firmware could not report a sensor on.
+func (RadioBoardProvider) Validate(spec Spec) error {
+	if spec.Kind != boardSensorKind {
+		return nil
+	}
+	_, err := boardChannel(spec.Options)
+	return err
+}
+
+func boardChannel(o map[string]string) (byte, error) {
+	n, err := strconv.Atoi(o[optChannel])
+	if err != nil || strconv.Itoa(n) != o[optChannel] || n <= int(ChannelSelf) || n > 255 {
+		return 0, fmt.Errorf("board channel must be a number from %d to 255", ChannelSelf+1)
+	}
+	return byte(n), nil
 }
 
 func (p RadioBoardProvider) Discover(context.Context) ([]Candidate, error) {
@@ -60,25 +119,179 @@ func (p RadioBoardProvider) Discover(context.Context) ([]Candidate, error) {
 	if err != nil {
 		return nil, nil
 	}
-	return []Candidate{{
+	out := []Candidate{{
 		Kind: radioBoardKind, Label: "Radio board", Detail: transportNames[r.Transport] + " board", Addable: true,
 		Options: map[string]string{},
-	}}, nil
+	}}
+	if !r.HaveSensors {
+		return out, nil
+	}
+	var channels []byte
+	for _, rd := range r.Sensors {
+		if !slices.Contains(channels, rd.Channel) {
+			channels = append(channels, rd.Channel)
+		}
+	}
+	slices.Sort(channels)
+	for _, ch := range channels {
+		var names []string
+		for _, rd := range channelReadings(r, ch) {
+			names = append(names, string(rd.Metric))
+		}
+		if len(names) == 0 {
+			continue
+		}
+		out = append(out, Candidate{
+			Kind: boardSensorKind, Label: "Board sensor", Addable: true,
+			Detail:  fmt.Sprintf("channel %d: %s", ch, strings.Join(names, ", ")),
+			Options: map[string]string{optChannel: strconv.Itoa(int(ch))},
+		})
+	}
+	return out, nil
 }
 
 var transportNames = map[string]string{"kiss": "KISS", "openhop": "openHop"}
 
-// Claim makes the board addable once: there is only one radio.
-func (RadioBoardProvider) Claim(Spec) string { return "the radio board" }
+// Claim makes the board, and each of its channels, addable once: there is only one radio.
+func (RadioBoardProvider) Claim(spec Spec) string {
+	if spec.Kind == boardSensorKind {
+		return "board channel " + spec.Options[optChannel]
+	}
+	return "the radio board"
+}
 
 func (p RadioBoardProvider) StaleAfter(Spec) (time.Duration, bool) { return p.MaxAge, true }
 
-func (p RadioBoardProvider) Open(Spec) (Sensor, error) {
-	return &radioBoard{board: p.Board, maxAge: p.MaxAge, opened: time.Now()}, nil
+func (p RadioBoardProvider) Open(spec Spec) (Sensor, error) {
+	s := &radioBoard{board: p.Board, maxAge: p.MaxAge, opened: time.Now(), pick: boardReadings,
+		none: "the radio board reports neither a battery nor an MCU temperature"}
+	if spec.Kind == boardSensorKind {
+		ch, err := boardChannel(spec.Options)
+		if err != nil {
+			return nil, err
+		}
+		s.pick = func(r BoardReadings) ([]Reading, time.Time) { return channelReadings(r, ch), r.SensorsAt }
+		s.none = fmt.Sprintf("the radio board reports no sensor on channel %d", ch)
+		if p.State != nil && spec.ID != 0 {
+			stored, err := p.State.LoadState(spec.ID)
+			if err != nil {
+				return nil, err
+			}
+			s.first = &firstRead{state: p.State, id: spec.ID, channel: ch}
+			if on, reads, ok := strings.Cut(string(stored), ":"); ok && on == strconv.Itoa(int(ch)) {
+				s.first.reads = reads
+			}
+		}
+	}
+	return s, nil
+}
+
+// boardReadings is the board's own battery and MCU temperature, as old as the older of the two.
+func boardReadings(r BoardReadings) ([]Reading, time.Time) {
+	var out []Reading
+	var at time.Time
+	if r.HaveBattery {
+		out = append(out, Reading{Metric: Voltage, Label: "battery", Value: r.BatteryV, Unit: "V"})
+		at = r.BatteryAt
+	}
+	if r.HaveMCUTemp {
+		out = append(out, Reading{Metric: Temperature, Label: "MCU", Value: r.MCUTempC, Unit: "°C"})
+		if at.IsZero() || r.MCUTempAt.Before(at) {
+			at = r.MCUTempAt
+		}
+	}
+	return out, at
+}
+
+// firstRead is what a board sensor's channel read first, stored as "channel:metrics"; nothing on the wire says which part a channel is.
+type firstRead struct {
+	state   StateStore
+	id      int64
+	channel byte
+	reads   string
+}
+
+// check refuses a channel that no longer reads every metric it first did, recording that set on the first read; firmware may add one.
+func (f *firstRead) check(out []Reading) error {
+	var names []string
+	for _, r := range out {
+		names = append(names, string(r.Metric))
+	}
+	slices.Sort(names)
+	names = slices.Compact(names)
+	got := strings.Join(names, ", ")
+	if f.reads == "" {
+		if err := f.state.SaveState(f.id, []byte(strconv.Itoa(int(f.channel))+":"+got)); err != nil {
+			return fmt.Errorf("recording what board channel %d reads: %w", f.channel, err)
+		}
+		f.reads = got
+		return nil
+	}
+	if !slices.ContainsFunc(strings.Split(f.reads, ", "), func(m string) bool { return !slices.Contains(names, m) }) {
+		return nil
+	}
+	return fmt.Errorf("board channel %d now reads %s, not the %s it read when added: the board numbers its sensors as they start, so one that failed to start moves the next onto its channel", f.channel, got, f.reads)
+}
+
+// channelReadings is what one board channel reads; a type that carries more than one value has no metric of its own and is left out.
+func channelReadings(r BoardReadings, ch byte) []Reading {
+	if !r.HaveSensors {
+		return nil
+	}
+	var out []Reading
+	for _, rd := range r.Sensors {
+		v, ok := rd.Value.(float64)
+		if rd.Channel != ch || !ok {
+			continue
+		}
+		if m, unit, ok := lppMetric(rd.Type); ok {
+			out = append(out, Reading{Metric: m, Value: v, Unit: unit})
+		}
+	}
+	return out
+}
+
+// lppMetric names an LPP type as a metric, in the units the I2C drivers report, so a board BME280 reads like a wired one.
+func lppMetric(typ byte) (Metric, string, bool) {
+	switch typ {
+	case meshcore.LPPTemperature:
+		return Temperature, "°C", true
+	case meshcore.LPPRelativeHumidity:
+		return Humidity, "%", true
+	case meshcore.LPPBarometricPressure:
+		return Pressure, "hPa", true
+	case meshcore.LPPVoltage:
+		return Voltage, "V", true
+	case meshcore.LPPCurrent:
+		return Current, "A", true
+	case meshcore.LPPPercentage:
+		return Percentage, "%", true
+	}
+	t, ok := lookupLPPType(typ)
+	if !ok {
+		return "", "", false
+	}
+	return Metric(strings.ReplaceAll(strings.ToLower(t.Name), " ", "_")), t.Unit, true
+}
+
+// boardMetrics is every metric a board channel can read.
+func boardMetrics() []Metric {
+	var out []Metric
+	for _, t := range lppTypes {
+		if m, _, ok := lppMetric(t.Code); ok && !slices.Contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 type radioBoard struct {
-	board  func() (BoardReadings, error)
+	board func() (BoardReadings, error)
+	// pick is what this sensor reads from the board, and when the board gave it.
+	pick func(BoardReadings) ([]Reading, time.Time)
+	none string
+	// first is nil for the board itself, and where no store keeps a record.
+	first  *firstRead
 	maxAge time.Duration
 	// opened bounds how long a start may wait on the radio before the wait is itself the fault.
 	opened time.Time
@@ -97,16 +310,17 @@ func (w waiting) Unwrap() error { return w.error }
 func (s *radioBoard) Read(context.Context) ([]Reading, error) {
 	r, err := s.board()
 	var out []Reading
+	var at time.Time
 	if err == nil {
-		if r.HaveBattery {
-			out = append(out, Reading{Metric: Voltage, Label: "battery", Value: r.BatteryV, Unit: "V"})
-		}
-		if r.HaveMCUTemp {
-			out = append(out, Reading{Metric: Temperature, Label: "MCU", Value: r.MCUTempC, Unit: "°C"})
-		}
+		out, at = s.pick(r)
 	}
 	if len(out) > 0 {
-		s.last, s.at = out, r.At
+		if s.first != nil {
+			if err := s.first.check(out); err != nil {
+				return nil, err
+			}
+		}
+		s.last, s.at = out, at
 		return out, nil
 	}
 	if s.last != nil && time.Since(s.at) <= s.maxAge {
@@ -132,8 +346,8 @@ func (s *radioBoard) Read(context.Context) ([]Reading, error) {
 	case time.Since(r.At) > s.maxAge:
 		return nil, fmt.Errorf("the radio board has not answered for %s", time.Since(r.At).Round(time.Second))
 	}
-	return nil, errors.New("the radio board reports neither a battery nor an MCU temperature")
+	return nil, errors.New(s.none)
 }
 
-// SampledAt is the board's last answer, which the modem asks for every 30 s, not this read.
+// SampledAt is when the board gave this sensor's readings, which the modem asks for every 30 s, not this read.
 func (s *radioBoard) SampledAt() time.Time { return s.at }

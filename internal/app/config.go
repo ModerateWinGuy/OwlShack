@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 // The database is the source of truth for config; files are one-time imports.
@@ -107,6 +107,12 @@ func importConfigFile(ctx context.Context, db *store.Store, path string) (*confi
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config %s: %w", resolved, err)
 	}
+	if m := cfg.Mqtt; m != nil {
+		if err := config.ValidateFeed(m.IataCode, m.StatusInterval); err != nil {
+			return nil, fmt.Errorf("config %s: mqtt: %w", resolved, err)
+		}
+	}
+	nameImportedMqttNode(cfg)
 	// Importing a file is a deliberate configuration step, so skip the wizard.
 	complete := true
 	cfg.SetupComplete = &complete

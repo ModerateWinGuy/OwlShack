@@ -3,6 +3,321 @@
 Notable changes per release. Dates are the tag date; unreleased work sits at the
 top until tagged.
 
+## v1.6.0 - 2026-10-21
+
+Baseline `v1.5.0`. Use the official MeshCore app with any companion; regions that nest, that you
+can send in, and that you can manage on remote repeaters and sensors; MeshCore 1.18 support,
+including sensors that push their readings into Monitoring; Connections mode on the Map; and fixes
+across direct messages, repeaters, MQTT and backups.
+
+### Added
+
+- **Use the official MeshCore app with a companion.** On a companion's App page, turn on app
+  access and connect the app over TCP to that port. Chat, contacts, channels, and logging in to
+  repeaters and rooms all work from the app, and what you send shows here too. The app has no
+  password, so anyone who can reach the port can read the companion's messages and send as it:
+  turn it on only on a network you trust. From the app you can rename the companion, move it, set
+  who may read its telemetry, its region and path hash size, add and remove channels, and rename
+  or star contacts; the radio's settings stay OwlShack's to change. The App page also sets how
+  many messages are held while the app is away (256 unless you change it).
+- **Star your favourite contacts.** Starred contacts are listed first. The star is the same one as
+  in the MeshCore app, so starring a contact in either shows in both.
+- **Keep a companion's position out of its adverts.** Edit companion has Share position in
+  adverts; turn it off and its adverts go out without the position. Telemetry has its own position
+  setting on the companion's telemetry page. The MeshCore app's share-position switch sets the
+  same thing as this one.
+
+- **Sensors wired to a KISS modem show on the Sensors page.** A BME280 or other sensor on the
+  modem's board appears in Add sensor as a board sensor, one per channel the board reports. Once
+  added it reads like a sensor wired to the Pi, and you can share it over the mesh from the channel
+  map. A BME680's gas reading shows without a unit, as the board sends it. If the board's sensors
+  change, a board sensor whose channel now reports something else shows an error instead of
+  another sensor's readings; delete it and add it again.
+- **Your repeater can feed MQTT.** On the MQTT page, pick your repeater as the node, and LetsMesh,
+  CoreScope and other brokers see the feed under the repeater's own name and key. The node that
+  feeds MQTT can't be deleted while MQTT is on; pick another node first.
+- **Start a private channel.** In Add channel, Private, press Generate for a new key. The dialog
+  shows the key and a QR code to share it; the MeshCore app adds the channel by scanning the code.
+- **See which channels are private.** The Messages list and a channel's header show whether it is
+  the Public channel, a hashtag channel anyone who knows its name can read, or a private channel
+  only those with its key can read.
+- **Change a thread's region from the thread.** The menu in a channel, direct message or room
+  thread has Region, which sets the region that thread's messages are sent in.
+- **Manage a room server from its thread.** A room's thread menu has Manage, which opens the
+  room's management page.
+- **Connections mode on the Map** (contributed by @ModerateWinGuy in #66). Switch the Map from
+  Peers to Connections to see the routes packets took to reach you. A line's width shows how often
+  a node passes traffic along that hop, its brightness how many packets it carried, and its colour
+  the signal of the last hop into you; the dashes move toward you. Pick a time window, hide the
+  quiet links, and tap a node or link to see its neighbours, which path arrived first, and the
+  signal on each. It reads packets already received, so it never uses airtime.
+- **Say which repeater a hop is.** When several repeaters share a hop's hash, the map picks the
+  one nearest the next hop toward you and marks the hop. From its sheet, pick the right repeater,
+  say it is none of the known ones, or go back to automatic. Your choice is kept.
+- **Your own packets on the map when you want them.** Connections leaves out your own messages
+  and adverts heard back after other repeaters relayed them, so they do not count as traffic
+  reaching you. Turn on "my packets" to include them. Your repeater's relays heard back are always
+  left out.
+- **Send in a region.** List your mesh's regions in Settings and pick a default. A companion,
+  a channel, a contact or a bot can each use its own region, or the same as the level above, so
+  setting your area once covers everything that does not say otherwise. Messages, adverts,
+  logins and replies then reach only the repeaters that carry that region. Messages and packets
+  you receive show the region they were sent in, and the message box shows where the next one
+  will go.
+- **Find the regions around you.** In Settings, Regions, "Discover nearby" asks the repeaters
+  that hear you which regions they carry, then lists each one's answer with a button to add any
+  name you don't have yet. It takes about half a minute. A repeater answers only a few of these
+  every 3 minutes, from anyone, so one may show no answer if it was asked recently.
+- **Regions can sit inside other regions.** In Settings, put a region under another, such as akl
+  under nz, and every region picker shows the tree. One button copies your own repeater's regions
+  in, nested as on your repeater. Nesting only organises the list: a region still reaches only the
+  repeaters that carry that exact region.
+- **Your repeater keeps regions inside other regions.** Put a region under another, such as
+  akl under nz, from the Regions list or with `region put akl nz`, and move it later the same way.
+  The list and the `region` command show the tree. It only organises the list: each region still
+  relays by its own name. `region def` now works as on firmware. The remote console refuses
+  `region load`: over the mesh it leaves a repeater ignoring every later command until it restarts.
+- **Manage a remote repeater's regions.** Log in as admin to a repeater or room server and
+  open Regions to see its regions as a tree, add, move, deny flood or remove one, and pick its
+  home region and the region for its own adverts. Each change is sent at once; press Save to keep
+  them over a reboot, as in the MeshCore app. A node holding more regions than its console can list
+  says some may be missing.
+- **Set your repeater's home region.** The Regions list on the Repeater page now has a home
+  region picker, as `region home` sets.
+- **Read a repeater's power state.** Your repeater answers `power` with its battery voltage when
+  the radio board reports one; it can't tell USB, solar or charging, so those read n/a or no. The
+  console also suggests `power` and `gps diag` for MeshCore 1.18 repeaters.
+- **Monitoring can have a sensor push its readings when they change.** For a monitored MeshCore
+  1.18 sensor, turn on Push changes in its Monitoring settings, tick up to three readings and set how
+  much each must change. The sensor then sends its readings within a minute of one moving that far,
+  and they go into its Monitoring history and onto its Telemetry tab as they arrive. Monitoring still
+  polls it, every hour unless you set another interval, and each poll renews the push, so it comes
+  back by itself after OwlShack or the sensor restarts. The sensor needs a default region, set on
+  its Regions tab: without one it refuses to push, the settings say so, and it is polled as usual
+  until you set one. Monitoring logs in to set up the push, so it saves the sensor's password.
+  Humidity, and the readings that come after it, can't be watched, as MeshCore 1.18 sensors
+  misread them.
+- **Run commands on a companion.** A chat contact's page has a CLI panel for companions on
+  MeshCore 1.18 or later, for commands such as `get radio` or `ver`, and Tab completes the commands
+  a companion knows. The companion's owner has to allow you remote CLI in their app first; until
+  they do, it doesn't answer.
+- **Manage a sensor's regions.** A MeshCore 1.18 sensor keeps a region list as repeaters do, so its
+  page now has the Regions tab.
+
+### Changed
+
+- **Your own requests, adverts and traces take their turn as they do on firmware.** Logins,
+  commands and requests to a remote node, traces, and your repeater's replies waited behind every
+  relay queued to go out, so on a busy repeater they could time out and look like a node out of
+  reach. Direct requests now go first, as on a firmware node.
+- **Sharing a channel includes its region**, so a phone that scans it sends in the same region.
+  Sharing a room server or repeater now adds it as that kind of contact in the MeshCore app,
+  not as a chat contact.
+- **The packet log keeps the last 7 days instead of the newest 10,000 packets.** Set 1 to 365
+  days in Settings, Service. A busy mesh keeps more packets than before, so the database can grow
+  larger. Lowering the setting deletes the older packets within the hour, and they cannot be
+  recovered.
+- **The `*` region works as it does on firmware.** It is always listed and cannot be removed;
+  turn on deny flood for it to stop relaying unscoped traffic. A repeater set up from a config file
+  with no `*` now relays unscoped traffic, as a new firmware repeater does. A repeater that had no
+  `*` before this update keeps not relaying it, and now shows `*` with deny flood on.
+- **Your repeater's advert region is one of its own regions.** It is now "Region for its own
+  adverts and replies", in the Regions list beside the home region, saves as soon as you pick it,
+  and offers the repeater's regions, as `region default` does on firmware.
+  Picking one allows flood on it, and removing that region sets it back to everywhere. A region set
+  before this update is added to the repeater's list if it was missing.
+- **On your repeater, `#nz` and `nz` are the same region**, as on firmware. Adding, moving, denying
+  flood on, removing or picking either finds the one in the list, and a list that holds both keeps
+  the first and drops the other.
+- **A private region (a name starting with `$`) no longer matches anything**, as on a firmware
+  repeater, which needs that region's keys and OwlShack cannot load them.
+- **A region has to be in your Settings list before anything can use it**, and it can't be
+  removed from the list while a companion, channel, contact or bot still sends in it. The
+  message says which ones to change first.
+- **Resume a room's posts from its thread.** When posts stop arriving, the thread menu's "Resume
+  posts" asks the room to carry on from the last one you got; it doesn't fetch posts from before
+  that. It replaces "Resync posts" on the room's Status tab.
+- **The MQTT page checks the IATA code and the status interval.** An IATA code can use letters,
+  digits, `-` and `_`, and the status interval is 60 to 3600 seconds. A code with other characters
+  made the broker refuse every connection. A saved value outside these keeps working until you
+  next save the MQTT page, which then asks you to change it.
+- **Renaming or moving a companion keeps its logins and doesn't send an advert by itself.** The
+  next advert carries the new name and position; press flood advert on the companion's page to
+  announce them at once, as in the MeshCore app.
+- **A hidden repeater stays out of discovery.** With both advert intervals off, your repeater no
+  longer answers Discover nearby or another repeater's discover, as MeshCore 1.18 repeaters do.
+  Turn either advert back on to be found again.
+- **New repeaters start with loop detection on minimal**, as new MeshCore 1.18 repeaters do. A
+  repeater you already have keeps its setting.
+- **The MeshCore app can't turn on remote CLI for a contact.** OwlShack doesn't take commands
+  from contacts yet, so the app shows an error rather than a switch that looks on and does nothing.
+- **A radio wired to the Pi resets its receiver every 30 seconds**, as a KISS modem does, so a
+  receiver that has gone deaf recovers without a restart. The noise floor reading starts again
+  after each reset.
+- **Your repeater relays direct messages and ACKs with MeshCore 1.18's timing.** A relayed direct
+  message or ACK now waits a short random delay, and extra ACK copies go out 300 ms apart before the
+  ACK itself.
+- **Your repeater passes on a flood sent in region 0 even when "*" denies floods**, as MeshCore 1.18
+  repeaters do.
+
+### Fixed
+
+- **CLI suggestions show each command in full on a phone.** The command no longer gets cut off to
+  make room for its description.
+- **Channel posts sent at the same moment each show their own repeats.** When two posts went out
+  together, for example from two open pages or a bot replying as you post, one could show the
+  other's repeats while the other showed none.
+- **A message the radio never sent shows as failed.** A channel post the radio could not send,
+  still held when the radio went down, or lost in a modem reset looked sent; it now shows failed
+  with Retry. A direct message caught by a full queue or a radio restart no longer stays on
+  "sending" for good.
+- **A direct message no longer gives up on a reply that is still coming.** When a message to a
+  contact had to go out by flood, it could be sent again before the reply had time to arrive.
+- **A contact that keeps answering you by flood learns your route again.** Its later replies come
+  straight back, as they do with MeshCore companions.
+- **Your repeater waits its turn before relaying a packet, as firmware repeaters do.** It relayed
+  everything the moment it heard it, so it collided with other repeaters relaying the same packet.
+- **Commands sent to a repeater or room close together are all answered.** When two went out
+  within a moment of each other, for example from two open pages or from the app and OwlShack at
+  once, the node could ignore one, and it timed out as if the node were unreachable.
+- **While a companion's radio reconnects, sending says the radio isn't connected yet.** It said
+  the companion was not found, as if it had been deleted.
+- **A room, repeater or sensor you haven't added as a contact shows its own name.** Its page was
+  titled just "Room", "Repeater" or "Sensor"; it now uses the name from its advert.
+- **A room server opened from Contacts, Monitoring, the Repeaters list or a message thread shows
+  its posts.** It opened as a repeater page, without Posts stored and Posts pushed.
+- **The noise floor no longer reads 0 dBm before the radio has measured it.** The Radio page
+  and MQTT leave it out until the first reading, which on a Pi hat takes a few seconds after
+  starting.
+- **A direct message to a contact with no known route is confirmed.** When the reply comes back
+  it shows delivered, and OwlShack learns the route, so the next one goes straight there.
+- **A KISS radio's battery, temperature and noise floor are current.** Each reading showed the one
+  before it, and nothing at all until the second poll after connecting.
+- **Adverts with no name no longer add a contact.** A node that announces itself without a name
+  no longer appears as a blank entry in your contacts and peers.
+- **Monitoring no longer logs you out of a node it can't reach.** When a poll got no answer,
+  monitoring dropped your login before trying a fresh one, so a node out of range or switched off
+  left you logged out of it. Your login now stays until a fresh one succeeds.
+- **Monitoring shows a node as failing when it stops answering, with the status check off.** A
+  node polled only for telemetry or neighbours showed as fine however long it had been silent.
+- **Settings that OwlShack can't use are refused when saved, however they're sent.** A channel
+  with a blank name, a key the MeshCore app can't join, or a rename the Messages page doesn't
+  offer, and a bot with no template or on another companion's channel, were saved if sent
+  straight to OwlShack's API; a long channel key then stopped OwlShack from starting.
+- **Your repeater stops reporting a battery or temperature reading once it has gone out of date**,
+  where it kept sending the last one.
+- **A remote node's page goes back to its login form when OwlShack has lost the login**, after
+  a restart or a logout from another tab, instead of every action failing.
+- **Settings that follow the level above show it.** A companion's or your repeater's path hash
+  size, and your repeater's advert scope, showed an empty box when set to inherit or unscoped.
+  They now say what they are set to.
+- **Discover packets are named in the packet log.** Discover requests and answers showed as
+  "Control (flags:80)" and the like; they now read Discover Request and Discover Response.
+- **Messages show when you received them.** Channel messages and room posts showed the time
+  by the sender's clock, which can be years out, so a message that had just arrived could show a
+  date long past. They now show when they arrived, and a message's Reception paths add the sender's
+  own time when it is more than a minute out. Backups that keep the last N days of messages now
+  go by when you received them too.
+- **Backups that keep the last N days now cut off at the right time.** The cutoff was out by
+  your time zone's offset from UTC, up to 13 hours in New Zealand, so a backup could hold more or
+  less than the days you picked.
+- **Peers, packets and messages load in every time zone.** In zones whose offset from UTC is not
+  a whole hour and that have no letter abbreviation, including Nepal, Iran, Afghanistan, Sri Lanka,
+  Myanmar and the Chatham Islands, these lists failed to load. Times saved before the upgrade are
+  kept and show correctly.
+- **Restoring a backup from an older version keeps its own copy to go back to.** After an update,
+  restoring an older backup upgraded it without a copy, and the copy left from the update held the
+  database from before the restore, so going back to the older version brought back the wrong
+  data.
+- **The MQTT page shows each broker as it is now.** A broker that had gone down still read
+  Connected while it tried to reconnect, and a broker that was working showed an error from hours
+  or days before, such as the session a token refresh replaced. Now a broker that is down reads
+  as down with its error, and one that is connected shows no error unless that connection has one.
+- **Your observer no longer flickers offline every 8 minutes.** Renewing a broker's login made
+  the broker announce the observer as offline, and could lose the packets sent at that moment, so
+  maps could show it offline for up to 5 minutes at a time. Renewing is now seamless.
+- **Packets lost while a broker reconnects count as dropped.** They were counted as published,
+  though the broker never got them, so the MQTT page looked healthy through an outage. A status
+  update during a reconnect also held up the packets behind it for 5 seconds; it no longer does.
+- **Tapping a map on a phone hits what you tapped.** When part of a map was below the bottom of
+  the screen or a dialog, the first tap scrolled it and landed beside the line or node you aimed
+  at, so nothing opened, and a location or region picker could pick the wrong spot.
+- **Share Location from Map shows its map.** The map in the chat's Share Location dialog never
+  appeared, so you could only share your own position. Each time you open it, it starts from your
+  position again rather than the point you picked last time.
+- **Regions named without `#` work with firmware repeaters.** A region such as `nz` got a
+  different key from the one firmware repeaters use for it, so your repeater ignored their scoped
+  traffic in that region and they ignored yours. Regions written with `#`, such as `#nz`, already
+  matched.
+- **Changing the radio's settings or resetting the modem no longer leaks memory.** OwlShack stays
+  the same size however often the radio reconnects.
+- **The Radio page and `/api/health` show how many packets are waiting to go out.** The transmit
+  queue always read 0.
+- **Changing a channel no longer breaks an open Channels or Bots page.** Adding, removing or
+  renaming a channel left other open pages failing with "channel not found" or "no bot with id"
+  until you reloaded them.
+- **A companion with more than 50 channels keeps them all.** Changing a channel no longer deletes
+  the ones past 50 or their keys, and each joins at the next start or settings save once a slot
+  is free.
+- **A remote admin can no longer leave your repeater unable to start.** A region name longer than
+  30 bytes that was cut part-way through a character was saved in a form OwlShack then refused to
+  load. Your repeater now refuses it with the firmware's error.
+- **Your repeater answers a region list with many regions.** The reply was too big to send, so
+  `region list`, the Regions tab and Discover nearby got nothing. Names that don't fit are left
+  out, as on a firmware repeater.
+- **Setting a new default region on a full region table says it failed**, instead of replying OK
+  and changing nothing.
+- **Your repeater answers CLI commands that a client marks as commands**, as firmware repeaters
+  do. It ignored them.
+- **Brokers show your node online again as soon as it reconnects.** After a network drop or a
+  broker restart it showed offline until the next status message, up to five minutes later.
+- **Saving MQTT settings no longer knocks the new connection off the broker.**
+- **Two brokers on the same host no longer knock each other off.**
+- **The log says when an MQTT broker comes back.** After a "broker connection lost" warning, the
+  reconnect is logged too, so the log no longer reads as if the broker were still down.
+- **A companion's MQTT feed no longer says it relays packets** when a repeater runs beside it.
+- **A backup that keeps recent messages keeps how they were heard.** It dropped every echo, so
+  restored messages showed no paths.
+- **The database gives disk space back after old packets are cleared.** It stayed at its largest
+  size. The first start after updating rewrites the database once to allow this, which takes a
+  little longer on a large database.
+- **Rolling back by copying the pre-upgrade copy into place is safe to upgrade from again.** The
+  next upgrade takes a fresh copy, so anything written since the rollback can still be undone.
+- **A restore after a crash keeps the replaced database complete.** `meshcore.db.replaced` holds
+  every write made before the crash.
+- **Messages keep your stored threads while the radio is down.** The list showed "Failed to load
+  conversations" and stayed empty until you pressed Retry.
+- **Monitoring charts appear after the first poll**, without reloading the page.
+- **First-run setup fits a phone screen.** Its buttons scrolled off the side.
+- **Screen readers name map markers and settings fields.** Markers were read without a name, text
+  fields by their placeholder instead of their label, and dropdowns only by their current value.
+- **Saving Routing on a MeshCore 1.18 room server works.** A 1.18 room refuses to turn repeat on,
+  and the save stopped there with an error, leaving path hash mode and the flood limits unsaved.
+  Save now sends only what you changed, so it fails only if you choose repeat on.
+- **A negative TX power on a MeshCore 1.18 repeater shows as negative.** 1.18 reports -4 dBm as
+  252; the Radio settings now show -4.
+- **`set flood.max 0` and `set flood.max.advert 0` now take effect.** Your repeater answered OK
+  and kept the old limit; 0 now means it relays no floods, or no adverts, as in MeshCore.
+- **New companions and repeaters never get a key MeshCore treats as reserved.** About one key in
+  128 started with a byte MeshCore firmware won't use, so a device would refuse it if you moved the
+  identity onto one.
+
+### Upgrading
+
+- **The first start after upgrading can take a few minutes, so let it finish.** OwlShack updates
+  its database and rewrites the file once before the web page comes up: seconds on a PC, about two
+  minutes for a 56 MB database on a Pi Zero, and longer for a bigger one or a slow SD card. The log
+  says "rewriting the database once" while it works. Stopping it part way loses nothing, and it
+  carries on at the next start. If your Docker setup restarts a container that fails a health check,
+  give it longer than usual this once.
+- **Docker images are now at `ghcr.io/owlshack/owlshack`.** The project moved to the OwlShack
+  organisation on GitHub, and pulls from `ghcr.io/meshcore-go/owlshack` already fail. Change the
+  image name in your `docker run` command or compose file; the tags are the same. The Debian
+  installer and the GitHub links still work through GitHub's redirect, but use the new addresses
+  in the README.
+- **To use the MeshCore app with the Docker image, publish its ports.** Add
+  `-p 5000-5015:5000-5015` to your `docker run` command or compose file.
+
 ## v1.5.0 - 2026-10-01
 
 Baseline `v1.4.2`. Sensors on the Pi, sent over the mesh; bytes per hop and one Path window for

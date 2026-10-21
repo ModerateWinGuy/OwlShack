@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
+
+	"github.com/OwlShack/OwlShack/internal/meshpath"
 )
 
 type LoginResult struct {
@@ -14,31 +16,38 @@ type LoginResult struct {
 	IsAdmin     bool   `json:"isAdmin"`
 	Permissions int    `json:"permissions"`
 	Role        string `json:"role,omitempty"`
+	// Reply is the server's answer, its tag first, for the MeshCore app's login push.
+	Reply []byte `json:"-"`
 }
 
 func (rm *Client) SendLogin(pubkeyHex, password string, timeout time.Duration) (*LoginResult, error) {
-	return rm.sendLogin(pubkeyHex, password, nil, timeout)
+	return rm.sendLogin(pubkeyHex, password, nil, timeout, nil)
 }
 
 // SendRoomLogin is SendLogin plus a sync_since cursor; the server pushes posts newer than it.
 func (rm *Client) SendRoomLogin(pubkeyHex, password string, syncSince uint32, timeout time.Duration) (*LoginResult, error) {
-	return rm.sendLogin(pubkeyHex, password, &syncSince, timeout)
+	return rm.sendLogin(pubkeyHex, password, &syncSince, timeout, nil)
 }
 
-func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, timeout time.Duration) (*LoginResult, error) {
+// AppLogin is the MeshCore app's login, a room's with syncSince set; its tag is the node's key prefix, as the firmware's pending_login.
+func (rm *Client) AppLogin(pubkeyHex, password string, syncSince *uint32, timeout time.Duration, app AppSend) (*LoginResult, error) {
+	return rm.sendLogin(pubkeyHex, password, syncSince, timeout, &app)
+}
+
+func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, timeout time.Duration, app *AppSend) (*LoginResult, error) {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid pubkey hex: %w", err)
+		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
 	}
 
 	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid pubkey: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrBadPubkey, err)
 	}
 
 	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
 	if peer == nil {
-		return nil, fmt.Errorf("peer not found in peer table")
+		return nil, ErrUnknownPeer
 	}
 
 	// The static identity (not an ephemeral key) puts us in the repeater's ACL, so its getClient() lookup accepts blank-password reauth.
@@ -48,40 +57,15 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
 
-	var plaintext []byte
+	// The firmware's sendLogin sends at most 15 bytes, all a node keeps of a password.
+	req := meshcore.LoginRequest{Password: password[:min(len(password), 15)]}
 	if roomSyncSince != nil {
-		// Room login: [timestamp:4][sync_since:4][password:N]
-		plaintext = make([]byte, 8+len(password))
-		binary.LittleEndian.PutUint32(plaintext[:4], rm.UniqueTimestamp())
-		binary.LittleEndian.PutUint32(plaintext[4:8], *roomSyncSince)
-		copy(plaintext[8:], password)
-	} else {
-		// Repeater login: [timestamp:4][password:N]
-		plaintext = make([]byte, 4+len(password))
-		binary.LittleEndian.PutUint32(plaintext[:4], rm.UniqueTimestamp())
-		copy(plaintext[4:], password)
+		req.SyncSince = *roomSyncSince
 	}
-
-	encrypted, err := meshcore.EncryptThenMAC(sharedSecret, plaintext)
+	body, err := meshcore.BuildLoginRequest(req, roomSyncSince != nil)
 	if err != nil {
-		return nil, fmt.Errorf("encrypting login: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrRejected, err)
 	}
-
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-
-	anonReq := &meshcore.AnonReq{
-		Destination:      peerIdentity.PublicKey()[0],
-		EphemeralPubKey:  selfIdentity.PublicKey(),
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}
-
-	payload, err := anonReq.ToBytes()
-	if err != nil {
-		return nil, fmt.Errorf("encoding anon req: %w", err)
-	}
-
 	resultCh := make(chan []byte, 1)
 	pl := &pendingLogin{
 		ch:             resultCh,
@@ -105,33 +89,59 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 		rm.loginMu.Unlock()
 	}()
 
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
-
-	if err := rm.node.SendPacket(pkt); err != nil {
-		return nil, fmt.Errorf("sending login: %w", err)
+	pub := peer.Identity.PublicKey()
+	var (
+		pkt      *meshcore.Packet
+		outPath  []byte
+		hashSize uint8
+	)
+	err = rm.node.SendStamped(func(ts uint32) error {
+		encrypted, err := meshcore.EncryptThenMAC(sharedSecret, meshcore.BuildTaggedPlaintext(ts, body))
+		if err != nil {
+			return fmt.Errorf("encrypting login: %w", err)
+		}
+		var mac [2]byte
+		copy(mac[:], encrypted[:2])
+		payload, err := (&meshcore.AnonReq{
+			Destination:      peerIdentity.PublicKey()[0],
+			EphemeralPubKey:  selfIdentity.PublicKey(),
+			MAC:              mac,
+			EncryptedPayload: encrypted[2:],
+		}).ToBytes()
+		if err != nil {
+			return fmt.Errorf("encoding anon req: %w", err)
+		}
+		pkt, outPath, hashSize = rm.routedPacket(peer, meshcore.PayloadTypeAnonReq, payload)
+		if err := meshpath.Send(rm.node, pkt, rm.floodScope(app, pub[:]), 0); err != nil {
+			return fmt.Errorf("sending login: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	wait := rm.replyTimeout(len(payload), outPath, hashSize, timeout)
+	wait := rm.replyTimeout(len(pkt.Payload), outPath, hashSize, timeout)
 	rm.log.Debug("login sent", "peer", pubkeyHex[:12], "wait", wait)
+	if app != nil {
+		app.Sent(binary.LittleEndian.Uint32(pub[:4]), wait, outPath == nil)
+	}
 
 	select {
 	case data := <-resultCh:
-		isAdmin := len(data) > 6 && data[6] == 1
-		perms := 0
-		if len(data) > 7 {
-			perms = int(data[7])
-		}
+		reply, _ := meshcore.ParseLoginReply(data[4:]) // isLoginReply already parsed it
+		isAdmin := reply.Admin == 1
+		perms := int(reply.Permissions)
 		role := ""
 		if roomSyncSince != nil {
-			// Room login response byte 6: 1=admin, 2=read-only (guest), 0=read-write
-			role = "read-write"
-			if len(data) > 6 {
-				switch data[6] {
-				case 1:
-					role = "admin"
-				case 2:
-					role = "read-only"
-				}
+			// Room login reply admin byte: 1=admin, 2=read-only (guest), 0=read-write
+			switch reply.Admin {
+			case 1:
+				role = "admin"
+			case 2:
+				role = "read-only"
+			default:
+				role = "read-write"
 			}
 		}
 		rm.mu.Lock()
@@ -146,7 +156,7 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 			localPubKey:  selfIdentity.PublicKey(),
 		}
 		rm.mu.Unlock()
-		return &LoginResult{Success: true, IsAdmin: isAdmin, Permissions: perms, Role: role}, nil
+		return &LoginResult{Success: true, IsAdmin: isAdmin, Permissions: perms, Role: role, Reply: data}, nil
 	case <-time.After(wait):
 		// A login that times out on a route drops it so the retry floods, as the firmware's path discovery does (companion MyMesh.cpp:1613-1616); a lost mid-session reply does not.
 		if outPath != nil {
@@ -155,6 +165,6 @@ func (rm *Client) sendLogin(pubkeyHex, password string, roomSyncSince *uint32, t
 			rm.node.Peers().ResetOutPath(peerIdentity.PublicKey())
 			rm.persistOutPath(pubkeyBytes, nil, 0)
 		}
-		return nil, fmt.Errorf("login timed out after %s", wait)
+		return nil, fmt.Errorf("login timed out after %s: %w", wait, ErrNoReply)
 	}
 }

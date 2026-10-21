@@ -12,7 +12,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 var releaseMigrations = flag.String("release-migrations", "", "record every unlisted migration file in migrations.sum as shipped in this release tag")
@@ -281,6 +281,49 @@ func TestOpen_CopiesAreFoundByExactName(t *testing.T) {
 	}
 }
 
+// Going back by copying the pre-upgrade copy into place, not moving it, left it there, and the next upgrade took it for an unfinished one and copied nothing, so what was written since had no way back.
+func TestOpen_ACopyARollbackLeftIsTakenAfresh(t *testing.T) {
+	t.Parallel()
+	for _, to := range []int{LatestSchemaVersion(), LatestSchemaVersion() - 1} {
+		t.Run(fmt.Sprintf("left by v%d", to), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "meshcore.db")
+			markedDB(t, fmt.Sprintf("%s.pre-v16-to-v%d", path, to), 16, "before the rollback")
+			markedDB(t, path, 16, "since the rollback")
+			st, err := Open(t.Context(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.Close()
+			fresh := fmt.Sprintf("%s.pre-v16-to-v%d", path, LatestSchemaVersion())
+			if got := markedName(t, fresh); got != "since the rollback" {
+				t.Errorf("the copy holds %q, want what was written since the rollback", got)
+			}
+			if copies, _ := upgradeCopies(path); len(copies) != 1 {
+				t.Errorf("copies %v, want only %s", copies, fresh)
+			}
+		})
+	}
+}
+
+// An upgrade that stops part way after copying afresh resumes from its own copy, not the one the rollback left with the same starting version.
+func TestOpen_AResumedUpgradeAfterARollbackKeepsItsOwnCopy(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "meshcore.db")
+	markedDB(t, fmt.Sprintf("%s.pre-v16-to-v%d", path, LatestSchemaVersion()-1), 16, "before the rollback")
+	own := fmt.Sprintf("%s.pre-v16-to-v%d", path, LatestSchemaVersion())
+	markedDB(t, own, 16, "since the rollback")
+	dbAt(t, path, 20).Close()
+	st, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if copies, _ := upgradeCopies(path); len(copies) != 1 || copies[0].path != own {
+		t.Errorf("copies %v, want only %s", copies, own)
+	}
+}
+
 // The hint must name the newest copy, which a string sort puts before .pre-v9.
 func TestRestoreHint_NamesTheNewestCopy(t *testing.T) {
 	t.Parallel()
@@ -390,5 +433,146 @@ func TestOpen_NoCopyForAFreshDatabase(t *testing.T) {
 	_, path := openAt(t)
 	if copies, _ := upgradeCopies(path); len(copies) != 0 {
 		t.Errorf("a fresh database left copies %v", copies)
+	}
+}
+
+// markedDB writes a database at version whose one companion is named name, so a test can tell files apart.
+func markedDB(t *testing.T, path string, version int, name string) {
+	t.Helper()
+	db := dbAt(t, path, version)
+	exec(t, db, `INSERT INTO companions (id, name, private_key, pubkey) VALUES (1, ?, 'aa', 'k1')`, name)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func markedName(t *testing.T, path string) string {
+	t.Helper()
+	db, err := openWritableDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var name string
+	if err := db.QueryRow(`SELECT name FROM companions`).Scan(&name); err != nil {
+		t.Fatalf("%s: %v", filepath.Base(path), err)
+	}
+	return name
+}
+
+// A finished upgrade's copy left beside a restored older backup read as an unfinished upgrade, so the backup was upgraded with no copy of its own.
+func TestRestore_OlderBackupGetsItsOwnCopy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "meshcore.db")
+	from := LatestSchemaVersion() - 1
+	restore := func(name string) {
+		t.Helper()
+		markedDB(t, RestorePath(path), from, name)
+		if _, err := AdoptPendingRestore(path); err != nil {
+			t.Fatal(err)
+		}
+		st, err := Open(t.Context(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Close()
+	}
+	copyName := fmt.Sprintf(".pre-v%d-to-v%d", from, LatestSchemaVersion())
+
+	restore("first")
+	restore("second")
+	if got := markedName(t, path+copyName); got != "second" {
+		t.Errorf("the restored backup's copy holds %q, want second", got)
+	}
+	if got := markedName(t, path+".replaced"+copyName); got != "first" {
+		t.Errorf("the set-aside database's copy holds %q, want first", got)
+	}
+
+	restore("third")
+	if got := markedName(t, path+".replaced"+copyName); got != "second" {
+		t.Errorf("after another restore the set-aside copy holds %q, want second", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.pre-v*")); len(left) != 2 {
+		t.Errorf("copies left: %v, want one for the live database and one for the set-aside one", left)
+	}
+}
+
+// With the live database gone, its copies still move aside so the restored one gets its own, and an earlier restore's set-aside database keeps its copy.
+func TestRestore_NoLiveDatabase(t *testing.T) {
+	t.Parallel()
+	from := LatestSchemaVersion() - 1
+	for _, tc := range []struct {
+		name         string
+		earlierAside bool
+	}{
+		{"nothing set aside before", false},
+		{"an earlier restore's database set aside", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "meshcore.db")
+			markedDB(t, path+".pre-v5-to-v9", 5, "orphan")
+			if tc.earlierAside {
+				markedDB(t, path+".replaced", from, "aside")
+				markedDB(t, path+".replaced.pre-v3-to-v9", 3, "aside's copy")
+			}
+			markedDB(t, RestorePath(path), from, "restored")
+			if _, err := AdoptPendingRestore(path); err != nil {
+				t.Fatal(err)
+			}
+			st, err := Open(t.Context(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.Close()
+
+			want := map[string]string{
+				"meshcore.db": "restored",
+				fmt.Sprintf("meshcore.db.pre-v%d-to-v%d", from, LatestSchemaVersion()): "restored",
+				"meshcore.db.replaced.pre-v5-to-v9":                                    "orphan",
+			}
+			if tc.earlierAside {
+				want["meshcore.db.replaced"] = "aside"
+				want["meshcore.db.replaced.pre-v3-to-v9"] = "aside's copy"
+			}
+			for f, name := range want {
+				if got := markedName(t, filepath.Join(dir, f)); got != name {
+					t.Errorf("%s holds %q, want %q", f, got, name)
+				}
+			}
+			if all, _ := filepath.Glob(filepath.Join(dir, "meshcore.db*")); len(all) != len(want) {
+				t.Errorf("files %v, want exactly %d", all, len(want))
+			}
+		})
+	}
+}
+
+// A copy that would land on one an earlier restore set aside is refused before anything moves, rather than overwriting it.
+func TestRestore_RefusesToOverwriteASetAsideCopy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "meshcore.db")
+	markedDB(t, path+".pre-v5-to-v9", 5, "orphan")
+	markedDB(t, path+".replaced", 9, "aside")
+	markedDB(t, path+".replaced.pre-v5-to-v9", 5, "aside's copy")
+	markedDB(t, RestorePath(path), 9, "restored")
+
+	if _, err := AdoptPendingRestore(path); err == nil || !strings.Contains(err.Error(), "pre-v5-to-v9") {
+		t.Fatalf("AdoptPendingRestore = %v, want a refusal naming the clashing copy", err)
+	}
+	for f, name := range map[string]string{
+		"meshcore.db.pre-v5-to-v9":          "orphan",
+		"meshcore.db.replaced":              "aside",
+		"meshcore.db.replaced.pre-v5-to-v9": "aside's copy",
+		"meshcore.db.restore":               "restored",
+	} {
+		if got := markedName(t, filepath.Join(dir, f)); got != name {
+			t.Errorf("%s holds %q, want %q", f, got, name)
+		}
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Error("a database was put in place despite the refusal")
 	}
 }

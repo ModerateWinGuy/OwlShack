@@ -6,23 +6,16 @@ import (
 	"sort"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/buildinfo"
-	"github.com/meshcore-go/OwlShack/internal/sensor"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/buildinfo"
+	"github.com/OwlShack/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 // Admin request types (firmware REQ_TYPE_*), mirroring internal/client/repeater.
 const (
-	reqTypeGetStatus        = 0x01
-	reqTypeGetTelemetryData = 0x03
-	reqTypeGetAccessList    = 0x05
-	reqTypeGetNeighbours    = 0x06
-	reqTypeGetOwnerInfo     = 0x07
-
 	telemChannelSelf = sensor.ChannelSelf
-	maxPacketPayload = 184 // firmware MAX_PACKET_PAYLOAD (sizeof reply_data)
 	// Matches the firmware's results_buffer so a neighbours reply still fits one packet.
 	neighboursMaxBody = 130
 )
@@ -49,18 +42,12 @@ func (r *Repeater) handleReq(pkt *meshcore.Packet) {
 	if tag <= client.LastTimestamp {
 		return // firmware: `timestamp > client->last_timestamp` or it's a replay
 	}
-	reqType := plain[4]
-	params := plain[5:]
-
-	body, ok := r.buildReqResponse(client, reqType, params, sensor.MaxReplyBody(pkt))
+	body, ok := r.buildReqResponse(client, plain[4:], sensor.MaxReplyBody(pkt))
 	if !ok {
 		return
 	}
-
-	// Response plaintext is [reflected tag:4][body]; the client matches its pending request by the echoed tag.
-	reply := make([]byte, 4+len(body))
-	binary.LittleEndian.PutUint32(reply[:4], tag)
-	copy(reply[4:], body)
+	// The client matches its pending request by the reflected tag.
+	reply := meshcore.BuildTaggedPlaintext(tag, body)
 
 	r.touchClient(client, tag)
 
@@ -69,40 +56,41 @@ func (r *Repeater) handleReq(pkt *meshcore.Packet) {
 		copy(clientPub[:], pub)
 	}
 	if err := r.sendServerReply(pkt, clientPub, secret, reply); err != nil {
-		r.log.Error("request reply failed", "reqType", reqType, "error", err)
+		r.log.Error("request reply failed", "reqType", plain[4], "error", err)
 	}
 }
 
-// buildReqResponse builds everything after the reflected tag; false answers nothing, and only telemetry can exceed maxBody.
-func (r *Repeater) buildReqResponse(client *store.RepeaterACLEntry, reqType byte, params []byte, maxBody int) ([]byte, bool) {
-	switch reqType {
-	case reqTypeGetStatus:
+// buildReqResponse builds everything after the reflected tag from the request body req; false answers nothing, and only telemetry can exceed maxBody.
+func (r *Repeater) buildReqResponse(client *store.RepeaterACLEntry, req []byte, maxBody int) ([]byte, bool) {
+	switch req[0] {
+	case meshcore.ReqTypeGetStatus:
 		return r.statusBody(), true
-	case reqTypeGetNeighbours:
-		if len(params) >= 1 && params[0] != 0 {
-			return nil, false // unknown request version
+	case meshcore.ReqTypeGetNeighbours:
+		nr, err := meshcore.ParseNeighboursRequest(req)
+		if err != nil {
+			return nil, false // short, or an unknown request version
 		}
-		return r.neighboursBody(params), true
-	case reqTypeGetOwnerInfo:
-		return r.ownerInfoBody(), true
-	case reqTypeGetAccessList:
+		return r.neighboursBody(nr), true
+	case meshcore.ReqTypeGetOwnerInfo:
+		return meshcore.BuildOwnerInfoReply(meshcore.OwnerInfo{FirmwareVersion: buildinfo.Version, Name: r.cfg.Name, Owner: r.cfg.OwnerInfo}), true
+	case meshcore.ReqTypeGetAccessList:
 		if client.Permissions&permRoleMask != permAdmin {
 			return nil, false // admin-only
 		}
-		if len(params) >= 2 && (params[0] != 0 || params[1] != 0) {
+		if len(req) >= 3 && (req[1] != 0 || req[2] != 0) {
 			return nil, false // reserved query params
 		}
 		return r.accessListBody(), true
-	case reqTypeGetTelemetryData:
-		// payload[0] is an INVERSE mask; handleRequest sends base whatever it says, and a guest nothing more.
-		perms := sensor.PermAll
-		if len(params) >= 1 {
-			perms = ^params[0]
+	case meshcore.ReqTypeGetTelemetryData:
+		// handleRequest sends base whatever the mask says, and a guest nothing more.
+		perms, err := meshcore.ParseTelemetryRequest(req)
+		if err != nil {
+			perms = sensor.PermAll
 		}
 		if client.Permissions&permRoleMask == permGuest {
 			perms = 0
 		}
-		perms |= sensor.PermBase
+		perms |= meshcore.TelemPermBase
 		var entries []sensor.ChannelEntry
 		var statuses []sensor.Status
 		if r.telemetry != nil {
@@ -110,7 +98,7 @@ func (r *Repeater) buildReqResponse(client *store.RepeaterACLEntry, reqType byte
 		}
 		body, dropped := sensor.BuildReply(perms, r.selfReadings(), entries, statuses, maxBody)
 		if dropped {
-			r.log.Error("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
+			r.log.Info("telemetry map too long for one packet, sending the node's own readings only", "max", maxBody)
 		}
 		return body, true
 	default:
@@ -121,95 +109,47 @@ func (r *Repeater) buildReqResponse(client *store.RepeaterACLEntry, reqType byte
 // selfReadings is what the radio board says about itself; one with no cell, or gone quiet, leaves the battery at 0 rather than a stale reading.
 func (r *Repeater) selfReadings() sensor.SelfReadings {
 	var out sensor.SelfReadings
-	if r.haveBattery.Load() {
-		out.BatteryVolts = float64(r.batteryMV.Load()) / 1000
+	ds := r.deviceStats()
+	if ds.HaveBattery {
+		out.BatteryVolts = float64(ds.BatteryMV) / 1000
 	}
-	if r.haveMCUTemp.Load() {
-		c := float64(r.mcuTempC.Load()) / 10
-		out.TempC = &c
+	if ds.HaveMCUTemp {
+		out.TempC = &ds.MCUTempC
 	}
 	return out
 }
 
-// statusBody builds the full 56-byte RepeaterStats blob (firmware layout, little-endian); untracked counters stay zero.
+// statusBody is the repeater's RepeaterStats; untracked counters stay zero.
 func (r *Repeater) statusBody() []byte {
 	rc := r.routeCounters()
 	r.mu.Lock()
 	started := r.startedAt
 	r.mu.Unlock()
-	uptime := uint32(0)
+	var s meshcore.RepeaterStats
 	if !started.IsZero() {
-		uptime = uint32(time.Since(started).Seconds())
+		s.UpTimeSecs = uint32(time.Since(started).Seconds())
 	}
-
-	b := make([]byte, 56)
-	if r.haveDeviceStats.Load() { // real modem readings (poll cache)
-		binary.LittleEndian.PutUint16(b[0:2], uint16(r.batteryMV.Load()))         // batt_milli_volts
-		binary.LittleEndian.PutUint16(b[4:6], uint16(int16(r.noiseFloor.Load()))) // noise_floor (radio getNoiseFloor)
+	ds := r.deviceStats()
+	if ds.HaveBattery {
+		s.BattMilliVolts = ds.BatteryMV
+	}
+	if ds.HaveNoiseFloor { // the firmware reports 0 until it has sampled
+		s.NoiseFloor = ds.NoiseFloor
 	}
 	if r.node != nil {
-		binary.LittleEndian.PutUint16(b[2:4], uint16(r.node.TxQueueLen())) // curr_tx_queue_len
+		s.TxQueueLen = uint16(r.node.TxQueueLen())
 	}
 	if r.haveSignal.Load() {
-		binary.LittleEndian.PutUint16(b[6:8], uint16(int16(r.lastRSSI.Load())))    // last_rssi
-		binary.LittleEndian.PutUint16(b[42:44], uint16(int16(r.lastSNRx4.Load()))) // last_snr (quarter-dB)
+		s.LastRSSI, s.LastSNR = int16(r.lastRSSI.Load()), int16(r.lastSNRx4.Load())
 	}
-	binary.LittleEndian.PutUint32(b[8:12], uint32(r.recvCount.Load()))                      // n_packets_recv
-	binary.LittleEndian.PutUint32(b[12:16], uint32(r.sentFlood.Load()+r.sentDirect.Load())) // n_packets_sent (radio getPacketsSent: every TX)
-	binary.LittleEndian.PutUint32(b[16:20], uint32(r.txAirtimeMs.Load()/1000))              // total_air_time_secs (tx)
-	binary.LittleEndian.PutUint32(b[20:24], uptime)                                         // total_up_time_secs
-	binary.LittleEndian.PutUint32(b[24:28], uint32(r.sentFlood.Load()))                     // n_sent_flood
-	binary.LittleEndian.PutUint32(b[28:32], uint32(r.sentDirect.Load()))                    // n_sent_direct
-	binary.LittleEndian.PutUint32(b[32:36], uint32(rc.FloodReceived))                       // n_recv_flood
-	binary.LittleEndian.PutUint32(b[36:40], uint32(rc.DirectReceived))                      // n_recv_direct
-	binary.LittleEndian.PutUint16(b[44:46], uint16(rc.DirectDuplicates))                    // n_direct_dups
-	binary.LittleEndian.PutUint16(b[46:48], uint16(rc.FloodDuplicates))                     // n_flood_dups
-	binary.LittleEndian.PutUint32(b[48:52], uint32(r.rxAirtimeMs.Load()/1000))              // rx_air_time_secs
-	return b
-}
-
-// neighboursBody builds [total:2][results:2] then [prefix:prefixLen][secsAgo:4][snr:i8] entries.
-func (r *Repeater) neighboursBody(params []byte) []byte {
-	// params: [version:1][count:1][offset:2][order_by:1][prefix_len:1][rand:4]
-	count := 255
-	offset := 0
-	prefixLen := 6
-	var orderBy byte
-	if len(params) >= 6 {
-		count = int(params[1])
-		offset = int(binary.LittleEndian.Uint16(params[2:4]))
-		orderBy = params[4]
-		prefixLen = min(int(params[5]), 32) // firmware clamps to PUB_KEY_SIZE; 0 is allowed
-	}
-
-	now := time.Now()
-	list := r.snapshotNeighbors() // newest-first native order
-	sortNeighbours(list, orderBy)
-
-	total := len(list)
-	if offset > total {
-		offset = total
-	}
-	page := list[offset:]
-	if count < len(page) {
-		page = page[:count]
-	}
-
-	if fit := neighboursMaxBody / (prefixLen + 5); len(page) > fit {
-		page = page[:fit]
-	}
-
-	body := make([]byte, 4, 4+len(page)*(prefixLen+5))
-	binary.LittleEndian.PutUint16(body[0:2], uint16(total))
-	binary.LittleEndian.PutUint16(body[2:4], uint16(len(page)))
-	for _, n := range page {
-		body = append(body, n.pubkey[:prefixLen]...)
-		var secs [4]byte
-		binary.LittleEndian.PutUint32(secs[:], uint32(now.Sub(n.heard).Seconds()))
-		body = append(body, secs[:]...)
-		body = append(body, byte(int8(n.snr*4))) // firmware (int8_t)(snr*4): quarter-dB, truncated
-	}
-	return body
+	s.PacketsRecv = uint32(r.recvCount.Load())
+	s.PacketsSent = uint32(r.sentFlood.Load() + r.sentDirect.Load()) // radio getPacketsSent: every TX
+	s.AirTimeSecs = uint32(r.txAirtimeMs.Load() / 1000)
+	s.SentFlood, s.SentDirect = uint32(r.sentFlood.Load()), uint32(r.sentDirect.Load())
+	s.RecvFlood, s.RecvDirect = uint32(rc.FloodReceived), uint32(rc.DirectReceived)
+	s.DirectDups, s.FloodDups = uint16(rc.DirectDuplicates), uint16(rc.FloodDuplicates)
+	s.RxAirTimeSecs = uint32(r.rxAirtimeMs.Load() / 1000)
+	return meshcore.BuildRepeaterStats(s)
 }
 
 // sortNeighbours applies the firmware order_by selector: 0=newest (native order), 1=oldest, 2=strongest, 3=weakest.
@@ -224,7 +164,21 @@ func sortNeighbours(list []neighbor, orderBy byte) {
 	}
 }
 
-// accessListBody builds [pubkey-prefix:6][permissions:1] per non-guest client, capped like the firmware's `ofs + 7 <= sizeof(reply_data) - 4`.
+// neighboursBody pages the neighbours as the firmware does, stopping where its 130-byte results_buffer is full.
+func (r *Repeater) neighboursBody(req meshcore.NeighboursRequest) []byte {
+	now := time.Now()
+	list := r.snapshotNeighbors()
+	sortNeighbours(list, req.OrderBy)
+	reply := meshcore.NeighboursReply{Total: uint16(len(list))}
+	page := list[min(int(req.Offset), len(list)):]
+	page = page[:min(int(req.Count), len(page), neighboursMaxBody/(int(req.PrefixLen)+5))]
+	for _, n := range page {
+		reply.Neighbours = append(reply.Neighbours, meshcore.Neighbour{Prefix: n.pubkey[:req.PrefixLen], HeardSecsAgo: uint32(now.Sub(n.heard).Seconds()), SNR: meshcore.SNRToWire(float32(n.snr))})
+	}
+	return meshcore.BuildNeighboursReply(reply)
+}
+
+// accessListBody lists each non-guest client, capped like the firmware's `ofs + 7 <= sizeof(reply_data) - 4`.
 func (r *Repeater) accessListBody() []byte {
 	r.acl.RLock()
 	keys := make([]string, 0, len(r.acl.m))
@@ -236,22 +190,13 @@ func (r *Repeater) accessListBody() []byte {
 	r.acl.RUnlock()
 	sort.Strings(keys)
 
-	body := make([]byte, 0, len(keys)*7)
+	var entries []meshcore.ACLEntry
 	for _, k := range keys {
-		if perms[k] == 0 || len(body)+4+7 > maxPacketPayload-4 {
-			continue // guest / deleted, or no room left
-		}
 		pub, err := hex.DecodeString(k)
-		if err != nil || len(pub) < 6 {
+		if perms[k] == 0 || err != nil || len(pub) < 6 || 4+7*(len(entries)+1) > meshcore.MaxPacketPayload-4 {
 			continue
 		}
-		body = append(body, pub[:6]...)
-		body = append(body, byte(perms[k]))
+		entries = append(entries, meshcore.ACLEntry{Prefix: [6]byte(pub), Permissions: byte(perms[k])})
 	}
-	return body
-}
-
-// ownerInfoBody builds the owner-info response: "VERSION\nNODE_NAME\nOWNER_INFO".
-func (r *Repeater) ownerInfoBody() []byte {
-	return []byte(buildinfo.Version + "\n" + r.cfg.Name + "\n" + r.cfg.OwnerInfo)
+	return meshcore.BuildAccessListReply(entries)
 }

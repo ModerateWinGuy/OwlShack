@@ -27,12 +27,18 @@ import { PathDialog } from "@/components/PathDialog";
 import { PositionPicker, round6 } from "@/components/PositionPicker";
 import { PeerTypePill } from "@/components/StatusIndicator";
 import { TelemetryPanel } from "@/components/TelemetryPanel";
+import { CliTerminal } from "@/components/CliTerminal";
+import { apiErrorMessage } from "@/lib/apiError";
 import { advertPathInfo } from "@/components/PeerDetailSheet";
 import {
   MonitoringSettings,
   type MonitorMetadata,
 } from "@/components/MonitoringSettings";
 import { timeAgo, truncateMid } from "@/lib/format";
+import { request, type ConfigCompanion, type FloodScope } from "@/lib/configApi";
+import { RegionSelect, resolveScope, useRegionSettings } from "@/components/RegionSelect";
+import { useApiList } from "@/hooks/useApiList";
+import { useCompanionRef } from "@/hooks/useCompanions";
 
 interface Contact {
   peerPubkey: string;
@@ -45,6 +51,7 @@ interface Contact {
   outPath: string | null; // null = unknown (flood), "" = direct
   outPathHashSize?: number;
   pathHashSize: number; // bytes per hop for everything sent to this contact
+  floodScope: FloodScope; // region for everything flooded to this contact
   lastSeen?: string;
   addedAt: string;
   metadata?: MonitorMetadata;
@@ -96,6 +103,33 @@ export function ContactDetailPage() {
       .then((c: Contact | null) => c && setContact(c))
       .catch(() => {});
   }, [apiBase]);
+
+  const { id: companionId } = useCompanionRef(companion);
+  const regionSettings = useRegionSettings();
+  const { items: configCompanions } = useApiList<ConfigCompanion>(
+    "/api/config/companions",
+    "Failed to load companions",
+  );
+  const companionScope = resolveScope(
+    configCompanions?.find((c) => c.id === companionId)?.floodScope,
+    regionSettings.scope,
+  );
+  const [savingRegion, setSavingRegion] = useState(false);
+  const saveRegion = useCallback(
+    async (floodScope: FloodScope) => {
+      setSavingRegion(true);
+      try {
+        await request(`${apiBase}/region`, "PUT", { floodScope });
+        toast.success("Region saved");
+        refreshContact();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Failed to save the region");
+      } finally {
+        setSavingRegion(false);
+      }
+    },
+    [apiBase, refreshContact],
+  );
 
   const copyKey = useCallback(() => {
     navigator.clipboard.writeText(contactPubkey).then(() => {
@@ -287,6 +321,16 @@ export function ContactDetailPage() {
               </InfoRow>
             </div>
           </section>
+          <section className="panel p-4">
+            <RegionSelect
+              value={contact.floodScope}
+              onChange={saveRegion}
+              regions={regionSettings.regions}
+              inherit={{ from: "companion", resolved: companionScope }}
+              disabled={savingRegion}
+              hint="for messages, logins and requests that flood to this contact, and the ACKs we send it"
+            />
+          </section>
           <PathDialog
             open={pathOpen}
             onOpenChange={setPathOpen}
@@ -312,13 +356,40 @@ export function ContactDetailPage() {
             <MonitoringSettings
               companionRef={companion}
               pubkey={contactPubkey}
-              kind="companion"
+              kind={isSensor ? "sensor" : "companion"}
               metadata={contact.metadata}
             />
           )}
+
+          {contact.type?.toUpperCase() === "CHAT" && <CompanionCliPanel apiBase={apiBase} />}
         </>
       )}
     </div>
+  );
+}
+
+// A firmware 1.18+ companion runs commands from a contact its owner has allowed remote CLI; there is no login.
+function CompanionCliPanel({ apiBase }: { apiBase: string }) {
+  const sendCli = useCallback(
+    async (command: string) => {
+      const r = await fetch(`${apiBase}/cli`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
+      if (!r.ok) throw new Error(await apiErrorMessage(r, "CLI error"));
+      const data: { response: string } = await r.json();
+      return data.response;
+    },
+    [apiBase],
+  );
+  return (
+    <section className="panel overflow-hidden">
+      <PanelHeader eyebrow="Remote admin" title="CLI" />
+      <div className="p-4 space-y-3">
+        <CliTerminal sendCli={sendCli} role="companion" />
+      </div>
+    </section>
   );
 }
 

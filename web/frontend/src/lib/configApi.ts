@@ -24,8 +24,22 @@ export interface Settings {
   pathHashSize: number | null;
   // TX airtime cap as a percentage, the unit the firmware uses. null = 50%.
   dutyCycle: number | null;
+  // Days of packets the log keeps, 1-365; always set.
+  packetRetentionDays: number;
   setupComplete: boolean;
+  // The regions every picker offers, and the default every "same as" level ends at.
+  floodRegions: FloodRegion[];
+  floodScope: FloodScope;
 }
+
+// A name in the Settings region list, under its parent ("*" at the top); the nesting only organises the list.
+export interface FloodRegion {
+  name: string;
+  parent: string;
+}
+
+// Where a flood we send goes: the level above's choice, everywhere (unscoped), or "region:<name>".
+export type FloodScope = "inherit" | "everywhere" | `region:${string}`;
 
 // One SPI radio hat this build knows about, from GET /api/spi/boards.
 export interface SpiBoard {
@@ -77,8 +91,11 @@ export function defaultBoard(boards: SpiBoard[]): SpiBoard | undefined {
   return boards.find((b) => b.verified === "hardware") ?? boards[0];
 }
 
+export type MqttNodeKind = "companion" | "repeater";
+
 export interface MqttSettings {
   enabled: boolean | null;
+  nodeKind: MqttNodeKind;
   nodeCompanionId: number | null;
   iataCode: string | null;
   statusInterval: number | null;
@@ -122,7 +139,24 @@ export interface ConfigCompanion {
   telemetryBase: TelemetryMode;
   telemetryLocation: TelemetryMode;
   telemetryEnvironment: TelemetryMode;
+  floodScope: FloodScope;
+  shareLocation: boolean;
+  // The MeshCore app's TCP access; the port is kept while access is off, 0 when never chosen.
+  app: AppAccess;
 }
+
+export interface AppAccess {
+  enabled: boolean;
+  port: number;
+  // How many messages are held while the app is away.
+  queueSize: number;
+}
+
+// The ports the app may be given, so a container can publish the whole range up front.
+export const APP_PORT_FIRST = 5000;
+export const APP_PORT_LAST = 5015;
+export const APP_QUEUE_MIN = 16;
+export const APP_QUEUE_MAX = 10000;
 
 export type TelemetryMode = "deny" | "selected" | "contacts";
 
@@ -137,6 +171,7 @@ export interface ConfigChannel {
   companionId: number;
   name: string;
   privateKeySet: boolean;
+  floodScope: FloodScope;
 }
 
 export interface Trigger {
@@ -158,6 +193,7 @@ export interface Trigger {
   location: TriggerLocation | null;
   // region ids from /api/regions; null takes alerts from anywhere.
   regions: string[] | null;
+  floodScope: FloodScope;
 }
 
 // The point a cap bot's alerts must cover, or come within radiusKm of; null takes alerts from anywhere.
@@ -188,16 +224,19 @@ export interface ConfigRepeater {
   directTxDelayFactor: number | null;
   rxDelayBase: number | null;
   multiAcks: number | null;
-  defaultRegion: string;
+  floodScope: FloodScope;
   adminPasswordSet: boolean;
   guestPasswordSet: boolean;
   ownerInfo: string;
   regions: RepeaterRegion[];
+  homeRegion: string; // "*" when none is set
 }
 
 // A transport scope the repeater relays; its key derives from the name as SHA256(name)[:16].
 export interface RepeaterRegion {
   name: string;
+  // The region it sits under, "*" at the top; "" only on "*" itself. Organising only: matching ignores it.
+  parent: string;
   denyFlood: boolean;
 }
 
@@ -261,12 +300,14 @@ export interface SettingsInput {
   modemToken?: string; // omit = keep the stored token
   pathHashSize?: number | null;
   dutyCycle?: number | null;
+  packetRetentionDays: number; // required, 1-365
   // Only set by the first-run wizard; omit elsewhere so a radio edit never re-opens setup.
   setupComplete?: boolean;
 }
 
 export interface MqttInput {
   enabled?: boolean | null;
+  nodeKind: MqttNodeKind;
   nodeCompanionId?: number | null;
   iataCode?: string | null;
   statusInterval?: number | null;
@@ -303,11 +344,14 @@ export interface CompanionInput {
   pathHashSize?: number | null; // null = inherit the global default
   dmPolicy?: string;
   dmAllow?: string[] | null;
+  floodScope: FloodScope;
+  shareLocation: boolean;
 }
 
 export interface ChannelInput {
   name: string;
   privateKey?: string;
+  floodScope: FloodScope;
 }
 
 // Repeater node config is edited per-section (no whole-config bulk write).
@@ -336,7 +380,6 @@ export interface RepeaterRelayInput {
   directTxDelayFactor?: number | null;
   rxDelayBase?: number | null;
   multiAcks?: number | null;
-  defaultRegion?: string; // "" = unscoped flood adverts
   advertInterval?: number | null;
   floodAdvertInterval?: number | null;
 }
@@ -401,6 +444,7 @@ export interface TriggerInput {
   url?: string | null;
   location: TriggerLocation | null;
   regions: string[] | null;
+  floodScope: FloodScope;
 }
 
 // A first-level region (state, province, NZ region) with its outline: [lon, lat] rings, read even-odd.
@@ -414,7 +458,7 @@ export interface Region {
 // --- request helper ---
 
 // Validation failures come back as 422 { error }; throw the server's message.
-async function request(
+export async function request(
   url: string,
   method: string,
   body?: unknown,
@@ -447,6 +491,8 @@ async function requestId(url: string, method: string, body?: unknown): Promise<n
 
 export const configApi = {
   putSettings: (input: SettingsInput) => request("/api/config/settings", "PUT", input),
+  putFloodRegions: (regions: FloodRegion[], floodScope: FloodScope) =>
+    request("/api/config/regions", "PUT", { regions, floodScope }),
   // The radio hats this binary knows how to wire. Empty until the backend is
   // up, which the UI shows as "no boards" rather than an empty picker.
   getSpiBoards: () => requestJSON<SpiBoard[]>("/api/spi/boards", "GET"),
@@ -468,6 +514,10 @@ export const configApi = {
   // Its own endpoint: sending these with the rest of a companion would let any other form reset them.
   setCompanionTelemetry: (id: number, input: CompanionTelemetryInput) =>
     request(`/api/config/companions/${id}/telemetry`, "PUT", input),
+
+  // Its own endpoint, so access is only ever turned on here and never by saving another form.
+  setCompanionApp: (id: number, input: AppAccess) =>
+    request(`/api/config/companions/${id}/app`, "PUT", input),
 
   createChannel: (companionId: number, input: ChannelInput) =>
     requestId(`/api/config/companions/${companionId}/channels`, "POST", input),
@@ -502,8 +552,12 @@ export const configApi = {
     request("/api/config/repeater/relay", "PUT", input),
   updateRepeaterAdmin: (input: RepeaterAdminInput) =>
     request("/api/config/repeater/admin", "PUT", input),
-  addRepeaterRegion: (name: string, denyFlood: boolean) =>
-    request("/api/config/repeater/regions", "POST", { name, denyFlood }),
+  setRepeaterHome: (region: string) => request("/api/config/repeater/home", "PUT", { region }),
+  setRepeaterScope: (floodScope: FloodScope) => request("/api/config/repeater/scope", "PUT", { floodScope }),
+  addRepeaterRegion: (name: string, parent: string, denyFlood: boolean) =>
+    request("/api/config/repeater/regions", "POST", { name, parent, denyFlood }),
+  moveRepeaterRegion: (name: string, parent: string) =>
+    request(`/api/config/repeater/regions/${encodeURIComponent(name)}`, "PATCH", { parent }),
   setRepeaterRegionFlood: (name: string, denyFlood: boolean) =>
     request(`/api/config/repeater/regions/${encodeURIComponent(name)}`, "PATCH", { denyFlood }),
   removeRepeaterRegion: (name: string) =>

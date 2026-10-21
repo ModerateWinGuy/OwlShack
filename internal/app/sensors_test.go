@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/api"
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/sensor"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 // A close saves on the way out, so the save has to be written when it returns, not queued behind other writes or dropped by a full queue.
@@ -317,6 +317,58 @@ func TestSetTelemetryMap_RefusesARowForAnotherNode(t *testing.T) {
 	}
 }
 
+// A board sensor that failed to start at boot moves the next onto its channel, which the map and the sensor's edits must not be held to.
+func TestBoardSensor_ARenumberedChannelBlocksNoOtherEdit(t *testing.T) {
+	ctx := t.Context()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "board.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var mu sync.Mutex
+	board := sensor.BoardReadings{Transport: "kiss", At: time.Now(), SensorsAt: time.Now(), HaveSensors: true, Sensors: []meshcore.LPPReading{
+		{Channel: 2, Type: meshcore.LPPTemperature, Value: 22.5},
+		{Channel: 2, Type: meshcore.LPPRelativeHumidity, Value: 55.0},
+		{Channel: 3, Type: meshcore.LPPLuminosity, Value: 120.0},
+	}}
+	read := func() (sensor.BoardReadings, error) { mu.Lock(); defer mu.Unlock(); return board, nil }
+	hub := sensor.NewHub(slog.New(slog.NewTextHandler(io.Discard, nil)), sensor.RadioBoardProvider{Board: read, MaxAge: time.Minute})
+	b := &backend{db: db, sensors: hub, telemetry: newTelemetryPublisher(hub)}
+	c := store.Companion{Name: "home"}
+	db.WriteSync(func() { err = db.Companions.Create(ctx, &c) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]int64{}
+	for name, ch := range map[string]string{"BME": "2", "Light": "3"} {
+		if ids[name], err = b.CreateSensor(ctx, api.SensorInput{Provider: "radio", Kind: "radio-board-sensor", Name: name, Options: map[string]string{"channel": ch}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := api.TelemetryNode{Kind: store.NodeKindCompanion, ID: c.ID}
+	rows := []api.TelemetryMapEntry{{Node: node, Channel: 2, Type: int(meshcore.LPPTemperature), SensorID: ids["BME"], Metric: "temperature"}}
+	if err := b.SetTelemetryMap(ctx, node, rows); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	board.Sensors = []meshcore.LPPReading{{Channel: 2, Type: meshcore.LPPLuminosity, Value: 120.0}}
+	mu.Unlock()
+
+	light := api.TelemetryMapEntry{Node: node, Channel: 3, Type: int(meshcore.LPPLuminosity), SensorID: ids["Light"], Metric: "luminosity"}
+	if err := b.SetTelemetryMap(ctx, node, append(rows, light)); err != nil {
+		t.Errorf("a row for another sensor was refused over the renumbered one's saved row: %v", err)
+	}
+	if err := b.UpdateSensor(ctx, ids["BME"], api.SensorInput{Provider: "radio", Kind: "radio-board-sensor", Name: "BME280", Options: map[string]string{"channel": "2"}}); err != nil {
+		t.Errorf("renaming the renumbered sensor was refused: %v", err)
+	}
+	// Provokes the check still standing: a new row for a reading the channel does not give is refused.
+	humidity := api.TelemetryMapEntry{Node: node, Channel: 4, Type: int(meshcore.LPPRelativeHumidity), SensorID: ids["BME"], Metric: "humidity"}
+	if err := b.SetTelemetryMap(ctx, node, append(rows, light, humidity)); err == nil || !strings.Contains(err.Error(), "channel 4") {
+		t.Errorf("a new row for humidity the channel no longer reads gave %v, want it refused", err)
+	}
+}
+
 // A poll wedged on a bus leaves the last reading in place, and sent on it would read as fresh to every requester.
 func TestFreshOnly_DropsAReadingPastThreePolls(t *testing.T) {
 	now := time.Now()
@@ -344,7 +396,7 @@ func TestCompanionTelemetryModes_SurviveAnEditAndAReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := &backend{db: db}
-	id, err := b.SaveCompanion(ctx, api.CompanionInput{Name: "home"})
+	id, err := b.SaveCompanion(ctx, api.CompanionInput{Name: "home", FloodScope: "inherit", ShareLocation: &share})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +424,7 @@ func TestCompanionTelemetryModes_SurviveAnEditAndAReload(t *testing.T) {
 	}
 	// Checked before the edit too: a swapped scan swaps back when the edit writes what it read.
 	check("once set")
-	if _, err := b.SaveCompanion(ctx, api.CompanionInput{ID: id, Name: "home renamed"}); err != nil {
+	if _, err := b.SaveCompanion(ctx, api.CompanionInput{ID: id, Name: "home renamed", FloodScope: "inherit", ShareLocation: &share}); err != nil {
 		t.Fatal(err)
 	}
 	check("after an edit")

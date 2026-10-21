@@ -23,6 +23,8 @@ export function useWebSocket(topics: string[], onMessage?: MessageHandler, notif
   const topicsKey = topics.join(",");
 
   useEffect(() => {
+    // A listener with nothing to listen for opens no socket; only a pure connection watcher passes no handler.
+    if (topics.length === 0 && onMessageRef.current) return;
     let mounted = true;
     let everOpened = false;
 

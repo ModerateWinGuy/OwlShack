@@ -6,12 +6,12 @@ import (
 	"log/slog"
 	"reflect"
 
-	"github.com/meshcore-go/OwlShack/internal/api"
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/modem"
-	"github.com/meshcore-go/OwlShack/internal/node/repeater"
-	"github.com/meshcore-go/OwlShack/internal/store"
-	"github.com/meshcore-go/meshcore-go/node"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/modem"
+	"github.com/OwlShack/OwlShack/internal/node/repeater"
+	"github.com/OwlShack/OwlShack/internal/store"
+	"github.com/OwlShack/meshcore-go/node"
 )
 
 // At most one repeater runs — a radio hosts one relay identity — so the lifecycle is start/stop, not set reconciliation.
@@ -35,7 +35,7 @@ func startRepeater(ctx context.Context, cfg *config.Config, mux *node.RadioMux, 
 	}
 	hooks := repeater.Hooks{
 		Reconfigure: repeaterReconfigurer(db, reload),
-		PollStats:   statsPoller(stats),
+		BoardStats:  boardStats(stats),
 		Telemetry:   telemetry.MapFor(store.TelemetryNode{Kind: store.NodeKindRepeater, ID: store.RepeaterNodeID}),
 	}
 	rep, err := repeater.NewRepeater(*effectiveRepeaterConfig(cfg), mux, db, hub, hooks)
@@ -63,7 +63,8 @@ func reloadRepeater(ctx context.Context, oldCfg, newCfg *config.Config, running 
 	}
 	// Region-only change: apply it live so the neighbour list, learned routes and relay counters survive.
 	if running != nil && oldCfg != nil && onlyRegionsDiffer(effectiveRepeaterConfig(oldCfg), effectiveRepeaterConfig(newCfg)) {
-		running.ApplyRegions(newCfg.Repeater.Regions, newCfg.Repeater.DefaultRegion, newCfg.Repeater.HomeRegion)
+		eff := effectiveRepeaterConfig(newCfg)
+		running.ApplyRegions(eff.Regions, eff.FloodScope, eff.HomeRegion)
 		return running, nil
 	}
 	stopRepeater(running)
@@ -77,24 +78,25 @@ func onlyRegionsDiffer(a, b *config.RepeaterConfig) bool {
 	}
 	x, y := *a, *b
 	x.Regions, y.Regions = nil, nil
-	x.DefaultRegion, y.DefaultRegion = "", ""
+	x.FloodScope, y.FloodScope = "", ""
 	x.HomeRegion, y.HomeRegion = "", ""
 	return reflect.DeepEqual(x, y)
 }
 
-// statsPoller maps a nil provider to a nil poller, leaving noise floor and battery at 0.
-func statsPoller(stats modem.StatsProvider) func(context.Context) repeater.DeviceStats {
+// boardStats maps a nil provider to nil, leaving noise floor and battery at 0; the modem's liveness probe keeps the cache current.
+func boardStats(stats modem.StatsProvider) func() repeater.DeviceStats {
 	if stats == nil {
 		return nil
 	}
-	return func(ctx context.Context) repeater.DeviceStats {
-		ds := stats.Stats(ctx)
+	return func() repeater.DeviceStats {
+		ds := stats.CachedStats()
 		return repeater.DeviceStats{
-			NoiseFloor:  ds.NoiseFloor,
-			BatteryMV:   ds.BatteryMV,
-			HaveBattery: ds.HaveBattery,
-			MCUTempC:    ds.MCUTempC,
-			HaveMCUTemp: ds.HaveMCUTemp,
+			NoiseFloor:     ds.NoiseFloor,
+			HaveNoiseFloor: ds.HaveNoiseFloor,
+			BatteryMV:      ds.BatteryMV,
+			HaveBattery:    ds.HaveBattery,
+			MCUTempC:       ds.MCUTempC,
+			HaveMCUTemp:    ds.HaveMCUTemp,
 		}
 	}
 }

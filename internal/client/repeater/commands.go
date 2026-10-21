@@ -2,21 +2,21 @@ package repeater
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/telemetry"
+	"github.com/OwlShack/OwlShack/internal/meshpath"
+	"github.com/OwlShack/OwlShack/internal/telemetry"
 )
 
 func (rm *Client) SendStatusReq(pubkeyHex string, timeout time.Duration) (*Status, error) {
-	body := make([]byte, 5)
-	body[0] = reqTypeGetStatus
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "status")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetStatus, random4()), timeout, "status")
 	if err != nil {
 		return nil, err
 	}
@@ -27,57 +27,51 @@ func (rm *Client) SendStatusReq(pubkeyHex string, timeout time.Duration) (*Statu
 func (rm *Client) SendRoomKeepAlive(pubkeyHex string, since uint32) error {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
-		return fmt.Errorf("invalid pubkey hex: %w", err)
+		return fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
 	}
 	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
 	if err != nil {
-		return fmt.Errorf("invalid pubkey: %w", err)
+		return fmt.Errorf("%w: %w", ErrBadPubkey, err)
 	}
 	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
 	if peer == nil {
-		return fmt.Errorf("peer not found in peer table")
+		return ErrUnknownPeer
 	}
 	rm.mu.Lock()
 	sess := rm.sessions[pubkeyHex]
 	rm.mu.Unlock()
 	if sess == nil || sess.sharedSecret == nil {
-		return fmt.Errorf("not logged in to this room")
+		return fmt.Errorf("%w to this room", ErrNotLoggedIn)
 	}
 	if outPath, _ := learnedRoute(peer); outPath == nil {
-		return fmt.Errorf("no direct route to the room yet — it ignores flooded keep-alives; log in (flood) to learn one")
+		return ErrNoDirectRoute
 	}
 
-	// [tag:4][0x02][since:4] — exactly the 9 bytes the room hashes for its ACK.
-	plaintext := make([]byte, 9)
-	binary.LittleEndian.PutUint32(plaintext[:4], rm.UniqueTimestamp())
-	plaintext[4] = reqTypeKeepAlive
-	binary.LittleEndian.PutUint32(plaintext[5:9], since)
-
-	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
-	if err != nil {
-		return fmt.Errorf("encrypting keep-alive: %w", err)
-	}
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-	peerPub := peerIdentity.PublicKey()
-	reqBytes, err := (&meshcore.Request{
-		Destination:      peerPub[0],
-		Source:           sess.localPubKey[0],
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}).ToBytes()
-	if err != nil {
-		return fmt.Errorf("encoding keep-alive: %w", err)
-	}
-	pkt, _, _ := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
-	return rm.node.SendPacket(pkt)
+	return rm.node.SendStamped(func(ts uint32) error {
+		encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, meshcore.BuildTaggedPlaintext(ts, meshcore.BuildKeepAliveRequest(since)))
+		if err != nil {
+			return fmt.Errorf("encrypting keep-alive: %w", err)
+		}
+		var mac [2]byte
+		copy(mac[:], encrypted[:2])
+		peerPub := peerIdentity.PublicKey()
+		reqBytes, err := (&meshcore.Request{
+			Destination:      peerPub[0],
+			Source:           sess.localPubKey[0],
+			MAC:              mac,
+			EncryptedPayload: encrypted[2:],
+		}).ToBytes()
+		if err != nil {
+			return fmt.Errorf("encoding keep-alive: %w", err)
+		}
+		pkt, _, _ := rm.routedPacket(peer, meshcore.PayloadTypeReq, reqBytes)
+		return meshpath.Send(rm.node, pkt, rm.scopeFor(peerPub[:]), 0)
+	})
 }
 
 // SendRoomStatusReq is SendStatusReq for a room server, whose ServerStats trailer differs.
 func (rm *Client) SendRoomStatusReq(pubkeyHex string, timeout time.Duration) (*Status, error) {
-	body := make([]byte, 5)
-	body[0] = reqTypeGetStatus
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "room status")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetStatus, random4()), timeout, "room status")
 	if err != nil {
 		return nil, err
 	}
@@ -85,17 +79,8 @@ func (rm *Client) SendRoomStatusReq(pubkeyHex string, timeout time.Duration) (*S
 }
 
 func (rm *Client) SendNeighborsReq(pubkeyHex string, count uint8, offset uint16, timeout time.Duration) (*Neighbors, error) {
-	// payload: type(1) request_version(1) count(1) offset(2) order_by(1) prefix_len(1) random(4)
-	body := make([]byte, 11)
-	body[0] = reqTypeGetNeighbors
-	body[1] = 0 // request version
-	body[2] = count
-	binary.LittleEndian.PutUint16(body[3:5], offset)
-	body[5] = 2 // order_by: strongest_to_weakest
-	body[6] = 6 // 6-byte pubkey prefix (matches CLI `neighbors` output)
-	if _, err := rand.Read(body[7:11]); err != nil {
-		return nil, fmt.Errorf("generating random: %w", err)
-	}
+	// Strongest first, with the 6-byte prefixes the CLI `neighbors` output shows.
+	body := meshcore.BuildNeighboursRequest(meshcore.NeighboursRequest{Count: count, Offset: offset, OrderBy: 2, PrefixLen: 6}, random4())
 	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "neighbors")
 	if err != nil {
 		return nil, err
@@ -104,9 +89,7 @@ func (rm *Client) SendNeighborsReq(pubkeyHex string, count uint8, offset uint16,
 }
 
 func (rm *Client) SendOwnerInfoReq(pubkeyHex string, timeout time.Duration) (*OwnerInfo, error) {
-	body := make([]byte, 5)
-	body[0] = reqTypeGetOwnerInfo
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "owner")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetOwnerInfo, random4()), timeout, "owner")
 	if err != nil {
 		return nil, err
 	}
@@ -114,13 +97,7 @@ func (rm *Client) SendOwnerInfoReq(pubkeyHex string, timeout time.Duration) (*Ow
 }
 
 func (rm *Client) SendAccessListReq(pubkeyHex string, timeout time.Duration) (*AccessList, error) {
-	// payload: type(1) reserved(2) reserved(2) random(4)
-	body := make([]byte, 9)
-	body[0] = reqTypeGetAccessList
-	if _, err := rand.Read(body[5:9]); err != nil {
-		return nil, fmt.Errorf("generating random: %w", err)
-	}
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "access list")
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetAccessList, random4()), timeout, "access list")
 	if err != nil {
 		return nil, err
 	}
@@ -137,112 +114,205 @@ func (rm *Client) SetAccessPerm(pubkeyHex, targetPubkeyHex string, perms uint8, 
 	resp = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(resp), ">"))
 	resp = strings.TrimSpace(resp)
 	if !strings.HasPrefix(resp, "OK") {
-		return fmt.Errorf("setperm rejected: %s", resp)
+		return fmt.Errorf("setperm %w: %s", ErrRejected, resp)
 	}
 	return nil
 }
 
 // SendSeriesReq bounds are seconds before the sensor's now, start being the older edge; needs read-only or above.
 func (rm *Client) SendSeriesReq(pubkeyHex string, startSecsAgo, endSecsAgo uint32, timeout time.Duration) (*telemetry.Series, error) {
-	// payload: type(1) start(4) end(4) reserved(2)
-	body := make([]byte, 11)
-	body[0] = reqTypeGetAvgMinMax
-	binary.LittleEndian.PutUint32(body[1:5], startSecsAgo)
-	binary.LittleEndian.PutUint32(body[5:9], endSecsAgo)
+	body := meshcore.BuildAvgMinMaxRequest(meshcore.AvgMinMaxRequest{StartSecsAgo: startSecsAgo, EndSecsAgo: endSecsAgo})
 	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "series")
 	if err != nil {
 		return nil, err
 	}
-	return telemetry.ParseSeries(data)
+	return badReply(telemetry.ParseSeries(data))
 }
 
-// telemetryReqBody: type(1) mask(1) reserved(3) random(4); mask 0x00 asks for all and the firmware filters by ACL.
-func telemetryReqBody() ([]byte, error) {
-	body := make([]byte, 9)
-	body[0] = reqTypeGetTelemetryData
-	if _, err := rand.Read(body[5:9]); err != nil {
-		return nil, fmt.Errorf("generating random: %w", err)
+// badReply marks a reply that arrived but would not parse, so it reads as a bad answer (502) rather than a fault here.
+func badReply[T any](v T, err error) (T, error) {
+	if err != nil {
+		var zero T
+		return zero, fmt.Errorf("%w: %w", ErrBadReply, err)
 	}
-	return body, nil
+	return v, nil
+}
+
+// random4 is the random tail that keeps a request's packet hash unique (BaseChatMesh.cpp:697).
+func random4() (r [4]byte) {
+	rand.Read(r[:])
+	return r
 }
 
 func (rm *Client) SendTelemetryReq(pubkeyHex string, timeout time.Duration) (*telemetry.Telemetry, error) {
-	body, err := telemetryReqBody()
+	data, err := rm.sendBinaryRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetTelemetryData, random4()), timeout, "telemetry")
 	if err != nil {
 		return nil, err
 	}
-	data, err := rm.sendBinaryRequest(pubkeyHex, body, timeout, "telemetry")
-	if err != nil {
-		return nil, err
-	}
-	return telemetry.Parse(data)
+	return badReply(telemetry.Parse(data))
 }
 
 // SendContactTelemetryReq needs no login: it encrypts with the ECDH secret shared with the contact.
 func (rm *Client) SendContactTelemetryReq(pubkeyHex string, timeout time.Duration) (*telemetry.Telemetry, error) {
+	data, err := rm.contactRequest(pubkeyHex, meshcore.BuildRequest(meshcore.ReqTypeGetTelemetryData, random4()), timeout, "contact-telemetry", &pendingRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return badReply(telemetry.Parse(data))
+}
+
+// AppRequest sends the MeshCore app's request body as its firmware does, under the contact's own shared secret, and returns the reply after its tag.
+func (rm *Client) AppRequest(pubkeyHex string, body []byte, timeout time.Duration, app AppSend) ([]byte, error) {
+	return rm.contactRequest(pubkeyHex, body, timeout, "app", &pendingRequest{app: &app})
+}
+
+// AppPathDiscovery is the app's path discovery: a flooded base-telemetry request whose reply brings back both paths and leaves the stored route alone.
+func (rm *Client) AppPathDiscovery(pubkeyHex string, timeout time.Duration, app AppSend) (out, in PathBytes, err error) {
+	body := meshcore.BuildTelemetryRequest(meshcore.TelemPermBase, random4())
+	paths := make(chan [2]PathBytes, 1)
+	pr := &pendingRequest{app: &app, discovery: true, onPath: func(o, i PathBytes) {
+		select {
+		case paths <- [2]PathBytes{o, i}: // a repeat of the return finds it full and is dropped, never blocking RX
+		default:
+		}
+	}}
+	if _, err = rm.contactRequest(pubkeyHex, body, timeout, "path-discovery", pr); err != nil {
+		return out, in, err
+	}
+	select {
+	case p := <-paths:
+		return p[0], p[1], nil
+	default:
+		return out, in, ErrNoPath
+	}
+}
+
+// AppCLI sends the app's CLI text as the firmware's sendCommandData does: under the contact's own secret with no login of ours, its ACL deciding; the reply comes back as a received message.
+func (rm *Client) AppCLI(pubkeyHex, text string, txtType, attempt byte, app AppSend) error {
 	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid pubkey hex: %w", err)
+		return fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
 	}
 	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid pubkey: %w", err)
+		return fmt.Errorf("%w: %w", ErrBadPubkey, err)
 	}
 	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
 	if peer == nil {
-		return nil, fmt.Errorf("peer not found in peer table")
+		return ErrUnknownPeer
 	}
+	sent, err := rm.sendText(peer, app.Scope, []byte(text), txtType, int(attempt))
+	if err != nil {
+		return err
+	}
+	app.Sent(0, sent.Timeout, sent.Flood)
+	return nil
+}
 
-	self := rm.node.Identity()
+// sendText sends one attempt of a text to peer along its route, stamped in send order as firmware's sendCommandData.
+func (rm *Client) sendText(peer *node.Peer, scope *meshcore.Region, text []byte, txtType byte, attempt int) (node.TextSent, error) {
+	path, hashSize := learnedRoute(peer)
+	if len(path) == 0 {
+		pub := peer.Identity.PublicKey()
+		hashSize = max(rm.bytesPerHop(pub[:]), 1)
+	}
+	var sent node.TextSent
+	err := rm.node.SendStamped(func(ts uint32) error {
+		var err error
+		sent, err = rm.node.SendTextAttempt(node.TextAttempt{
+			Peer: peer.Identity, Scope: scope, Text: text, Flags: meshcore.TextFlags(txtType),
+			Timestamp: ts, Attempt: attempt, Path: path, PathHashSize: hashSize,
+		}, nil)
+		return err
+	})
+	if err != nil {
+		return node.TextSent{}, fmt.Errorf("sending CLI: %w", err)
+	}
+	return sent, nil
+}
+
+// ErrNoPath is a path discovery answered without the path return that carries both routes.
+var ErrNoPath = errors.New("the node answered without a path return, so no route was learned")
+
+func (rm *Client) contactRequest(pubkeyHex string, body []byte, timeout time.Duration, label string, pr *pendingRequest) ([]byte, error) {
+	peer, err := rm.peerByHex(pubkeyHex)
+	if err != nil {
+		return nil, err
+	}
+	peerIdentity := peer.Identity
 	sharedSecret, err := rm.node.SharedSecret(peerIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
-
-	body, err := telemetryReqBody()
-	if err != nil {
-		return nil, err
-	}
-	data, err := rm.roundtripRequest(peerIdentity.PublicKey(), peer, sharedSecret, self.PublicKey()[0], body, timeout, "contact-telemetry", true)
-	if err != nil {
-		return nil, err
-	}
-	return telemetry.Parse(data)
+	pr.sharedSecret, pr.peerPubKey = sharedSecret, peerIdentity.PublicKey()
+	return rm.roundtripRequest(peerIdentity.PublicKey(), peer, sharedSecret, rm.node.Identity().PublicKey()[0], body, timeout, label, pr)
 }
 
+// ErrRegionLoad: the firmware reads load-mode lines before stripping our "XX|" tag, so none parse and it swallows every later command until rebooted.
+var ErrRegionLoad = errors.New("region load can't run over the mesh: the repeater would take every later command as a region line until it restarts; use region put or region def")
+
 func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (string, error) {
-	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
-	if err != nil {
-		return "", fmt.Errorf("invalid pubkey hex: %w", err)
+	if f := strings.Fields(command); len(f) >= 2 && f[0] == "region" && f[1] == "load" {
+		return "", ErrRegionLoad
 	}
-
-	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
+	peer, err := rm.peerByHex(pubkeyHex)
 	if err != nil {
-		return "", fmt.Errorf("invalid pubkey: %w", err)
-	}
-
-	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
-	if peer == nil {
-		return "", fmt.Errorf("peer not found in peer table")
+		return "", err
 	}
 
 	rm.mu.Lock()
 	sess := rm.sessions[pubkeyHex]
 	rm.mu.Unlock()
 	if sess == nil || sess.sharedSecret == nil {
-		return "", fmt.Errorf("not logged in to this repeater")
+		return "", fmt.Errorf("%w to this repeater", ErrNotLoggedIn)
 	}
 	if !sess.IsAdmin {
-		return "", fmt.Errorf("CLI requires an admin session; the node ignores commands from other roles")
+		return "", ErrNotAdmin
 	}
+	return rm.cliRoundtrip(peer, pubkeyHex, command, meshcore.TxtTypeCLIData, timeout)
+}
 
+// ErrCompanionCLINoReply: a companion that hasn't allowed us remote CLI passes the command to its owner and sends nothing back.
+var ErrCompanionCLINoReply = errors.New("it may be out of reach, or its owner hasn't allowed you remote CLI")
+
+// SendCompanionCLI runs a command on a firmware 1.18+ companion that allows us remote CLI (contact flag 0x10); there is no login.
+func (rm *Client) SendCompanionCLI(pubkeyHex, command string, timeout time.Duration) (string, error) {
+	peer, err := rm.peerByHex(pubkeyHex)
+	if err != nil {
+		return "", err
+	}
+	reply, err := rm.cliRoundtrip(peer, pubkeyHex, command, meshcore.TxtTypeCLICommand, timeout)
+	if errors.Is(err, ErrNoReply) {
+		return "", fmt.Errorf("%w: %w", ErrNoReply, ErrCompanionCLINoReply)
+	}
+	return reply, err
+}
+
+func (rm *Client) peerByHex(pubkeyHex string) (*node.Peer, error) {
+	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
+	}
+	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBadPubkey, err)
+	}
+	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
+	if peer == nil {
+		return nil, ErrUnknownPeer
+	}
+	return peer, nil
+}
+
+// cliRoundtrip tags the command with a free "XX|" prefix, which the firmware echoes, and waits for the reply carrying it.
+func (rm *Client) cliRoundtrip(peer *node.Peer, pubkeyHex, command string, txtType byte, timeout time.Duration) (string, error) {
 	resultCh := make(chan string, 1)
 	var prefix string
 	rm.cliMu.Lock()
 	// The prefix is one hex byte, so a full map would spin the random search below forever holding cliMu.
 	if len(rm.cliPending) >= 256 {
 		rm.cliMu.Unlock()
-		return "", fmt.Errorf("too many CLI commands in flight")
+		return "", ErrBusy
 	}
 	for {
 		var b [1]byte
@@ -262,41 +332,19 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 		rm.cliMu.Unlock()
 	}()
 
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(rm.UniqueTimestamp()), 0), txtTypeCliData<<2, []byte(framedCommand))
-
-	encrypted, err := meshcore.EncryptThenMAC(sess.sharedSecret, plaintext)
-	if err != nil {
-		return "", fmt.Errorf("encrypting CLI: %w", err)
+	pub := peer.Identity.PublicKey()
+	if _, err := rm.sendText(peer, rm.scopeFor(pub[:]), []byte(framedCommand), txtType, 0); err != nil {
+		return "", err
 	}
 
-	var mac [2]byte
-	copy(mac[:], encrypted[:2])
-
-	txtMsg := &meshcore.TextMessage{
-		Destination:      peerIdentity.PublicKey()[0],
-		Source:           sess.localPubKey[0],
-		MAC:              mac,
-		EncryptedPayload: encrypted[2:],
-	}
-
-	msgBytes, err := txtMsg.ToBytes()
-	if err != nil {
-		return "", fmt.Errorf("encoding text message: %w", err)
-	}
-
-	pkt, outPath, hashSize := rm.routedPacket(peer, meshcore.PayloadTypeTxtMsg, msgBytes)
-
-	if err := rm.node.SendPacket(pkt); err != nil {
-		return "", fmt.Errorf("sending CLI: %w", err)
-	}
-
-	wait := rm.replyTimeout(len(msgBytes), outPath, hashSize, timeout)
+	outPath, hashSize := learnedRoute(peer)
+	wait := rm.replyTimeout(0, outPath, hashSize, timeout)
 	rm.log.Debug("CLI sent", "peer", pubkeyHex[:12], "prefix", prefix, "command", command, "wait", wait)
 
 	select {
 	case response := <-resultCh:
 		return response, nil
 	case <-time.After(wait):
-		return "", fmt.Errorf("CLI command timed out after %s", wait)
+		return "", fmt.Errorf("CLI command timed out after %s: %w", wait, ErrNoReply)
 	}
 }

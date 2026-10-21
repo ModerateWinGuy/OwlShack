@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/node/companion"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/node/companion"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 type silentModem struct{}
@@ -64,7 +64,7 @@ func TestHydratePeerTables_SeedsLearnedRoutes(t *testing.T) {
 	}
 
 	c, err := companion.NewCompanion(config.CompanionConfig{ID: comp.ID, Name: "home", PrivateKey: strings.Repeat("11", 32)},
-		node.NewRadioMux(silentModem{}), st, nil, nil, nil, nil)
+		node.NewRadioMux(silentModem{}), st, nil, nil, nil, floodScopeOf)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/logging"
-	"github.com/meshcore-go/OwlShack/internal/trigger"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/logging"
+	"github.com/OwlShack/OwlShack/internal/trigger"
 )
 
 // ReloadTriggers swaps the trigger set without touching the node, adverts or sessions; the new set is validated before the old one is stopped.
@@ -20,7 +20,7 @@ func (c *Companion) ReloadTriggers(newCfg config.CompanionConfig) error {
 
 	ctx := c.runCtx
 	if ctx == nil {
-		return fmt.Errorf("companion %q not started", c.cfg.Name)
+		return fmt.Errorf("companion %q not started", c.conf().Name)
 	}
 
 	// Channels are unchanged here: a config change that alters them takes the full-restart path.
@@ -33,10 +33,12 @@ func (c *Companion) ReloadTriggers(newCfg config.CompanionConfig) error {
 		e.trigger.Stop()
 	}
 	c.triggers = newEntries
-	c.cfg.Triggers = newCfg.Triggers
+	next := *c.conf()
+	next.Triggers = newCfg.Triggers
+	c.live.Store(&next)
 	for _, e := range c.triggers {
 		if err := e.trigger.Start(ctx, c.makeCallback(ctx, e)); err != nil {
-			return fmt.Errorf("companion %q starting reloaded trigger (%s): %w", c.cfg.Name, e.config.Type, err)
+			return fmt.Errorf("companion %q starting reloaded trigger (%s): %w", c.conf().Name, e.config.Type, err)
 		}
 	}
 
@@ -80,11 +82,11 @@ func (c *Companion) buildTriggers(cfg config.CompanionConfig) ([]triggerEntry, e
 		applyTriggerDefaults(&trigCfg)
 		channels, err := triggerChannelFilters(trigCfg)
 		if err != nil {
-			return nil, fmt.Errorf("companion %q: %w", c.cfg.Name, err)
+			return nil, fmt.Errorf("companion %q: %w", c.conf().Name, err)
 		}
 		entry, err := c.buildTrigger(trigCfg, channels)
 		if err != nil {
-			return nil, fmt.Errorf("companion %q trigger %q: %w", c.cfg.Name, trigCfg.Type, err)
+			return nil, fmt.Errorf("companion %q trigger %q: %w", c.conf().Name, trigCfg.Type, err)
 		}
 		entries = append(entries, *entry)
 	}
@@ -97,15 +99,15 @@ func (c *Companion) buildTrigger(cfg config.TriggerConfig, channels []*meshcore.
 
 	switch cfg.Type {
 	case "channel", "group":
-		t, err = trigger.NewChannelTrigger(c.cfg.Name, cfg, c.node, channels, c.log)
+		t, err = trigger.NewChannelTrigger(c.conf().Name, cfg, c.node, channels, c.log)
 	case "dm":
-		t, err = trigger.NewDMTrigger(c.cfg.Name, cfg, c.log)
+		t, err = trigger.NewDMTrigger(c.conf().Name, cfg, c.log)
 	case "cron":
-		t, err = trigger.NewCronTrigger(c.cfg.Name, cfg, c.log)
+		t, err = trigger.NewCronTrigger(c.conf().Name, cfg, c.log)
 	case "rss":
-		t, err = trigger.NewRSSTrigger(c.cfg.Name, cfg, c.log)
+		t, err = trigger.NewRSSTrigger(c.conf().Name, cfg, c.log)
 	case "cap":
-		t, err = trigger.NewCAPTrigger(c.cfg.Name, cfg, c.log)
+		t, err = trigger.NewCAPTrigger(c.conf().Name, cfg, c.log)
 	default:
 		return nil, fmt.Errorf("unknown trigger type %q", cfg.Type)
 	}
@@ -154,7 +156,7 @@ func (c *Companion) makeCallback(ctx context.Context, entry triggerEntry) trigge
 		case "channel":
 			ch, _ := evt.Data["ChannelEntry"].(*meshcore.ChannelEntry)
 			c.log.Debug("sending group txt", "channel", ch.Name, "pathHashSize", hashSize)
-			if err := c.sendGroupReply(ch, rendered, hashSize, retryTimeout, *entry.config.MaxRetries); err != nil {
+			if err := c.sendGroupReply(ch, rendered, hashSize, retryTimeout, *entry.config.MaxRetries, config.ResolveScope(entry.config.FloodScope, c.channelScope(ch.Name))); err != nil {
 				c.log.Error("send error", "error", err)
 			}
 
@@ -162,7 +164,7 @@ func (c *Companion) makeCallback(ctx context.Context, entry triggerEntry) trigge
 			pubkey, _ := evt.Data["SenderPubKey"].(string)
 			hashSize := resolvePathHashSize(entry.config.PathHashSize, evt, c.bytesPerHopHex(pubkey))
 			c.log.Debug("sending dm reply", "peer", pubkey, "pathHashSize", hashSize)
-			if err := c.sendDMReply(pubkey, rendered, hashSize, retryTimeout); err != nil {
+			if err := c.sendDMReply(pubkey, rendered, hashSize, retryTimeout, config.ResolveScope(entry.config.FloodScope, c.contactScopeHex(pubkey))); err != nil {
 				c.log.Error("send error", "error", err)
 			}
 
@@ -171,14 +173,14 @@ func (c *Companion) makeCallback(ctx context.Context, entry triggerEntry) trigge
 		case "cron", "rss", "cap":
 			for _, ch := range entry.channels {
 				c.log.Debug("sending group txt", "channel", ch.Name, "pathHashSize", hashSize)
-				if err := c.sendGroupReply(ch, rendered, hashSize, retryTimeout, *entry.config.MaxRetries); err != nil {
+				if err := c.sendGroupReply(ch, rendered, hashSize, retryTimeout, *entry.config.MaxRetries, config.ResolveScope(entry.config.FloodScope, c.channelScope(ch.Name))); err != nil {
 					c.log.Error("send error", "error", err)
 				}
 			}
 			for _, pubkey := range triggerContacts(entry.config) {
 				hashSize := resolvePathHashSize(entry.config.PathHashSize, evt, c.bytesPerHopHex(pubkey))
 				c.log.Debug("sending dm", "peer", pubkey, "pathHashSize", hashSize)
-				if err := c.sendDMReply(pubkey, rendered, hashSize, retryTimeout); err != nil {
+				if err := c.sendDMReply(pubkey, rendered, hashSize, retryTimeout, config.ResolveScope(entry.config.FloodScope, c.contactScopeHex(pubkey))); err != nil {
 					c.log.Error("send error", "peer", pubkey, "error", err)
 				}
 			}

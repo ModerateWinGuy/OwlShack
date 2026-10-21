@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/modem"
-	meshcore "github.com/meshcore-go/meshcore-go"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/modem"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 // A broker that never connected sits in o.brokers with a nil paho client, and Stop must survive a second call.
@@ -193,5 +193,13 @@ func TestPublishPacket_SelectsDedupCacheByDirection(t *testing.T) {
 	o.publishPacket(pkt, raw, "rx")
 	if got := len(bc.publishCh); got != 2 {
 		t.Errorf("a repeated rx queued %d, want no extra", got)
+	}
+}
+
+// A disabled broker has no connection, so the status lists only the enabled ones, as a stale disabled entry would outlive its edit.
+func TestBrokerStatuses_SkipsDisabled(t *testing.T) {
+	o := &Observer{cfg: config.MqttConfig{Brokers: []config.BrokerConfig{{Name: "on", Enabled: true}, {Name: "off"}}}}
+	if st := o.BrokerStatuses(); len(st) != 1 || st[0].Name != "on" {
+		t.Errorf("statuses = %+v, want only the enabled broker", st)
 	}
 }

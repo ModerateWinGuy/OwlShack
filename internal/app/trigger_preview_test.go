@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/api"
-	"github.com/meshcore-go/OwlShack/internal/store"
-	"github.com/meshcore-go/OwlShack/internal/trigger"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/trigger"
 )
 
 func previewBackend(t *testing.T) (*backend, int64) {

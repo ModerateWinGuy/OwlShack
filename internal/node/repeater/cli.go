@@ -11,25 +11,27 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
 
-	"github.com/meshcore-go/OwlShack/internal/buildinfo"
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/buildinfo"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 const (
-	txtTypePlain   = 0 // legacy plain text
-	txtTypeCliData = 1 // CLI command / response
-	cliReplyDelay  = 600 * time.Millisecond
+	cliReplyDelay = 600 * time.Millisecond
 	// txtAckDelay mirrors the firmware TXT_ACK_DELAY for legacy plain-text CLI.
 	txtAckDelay = 200 * time.Millisecond
 	// Firmware sendSelfAdvertisement(1500, ...): hold a CLI-triggered advert so the reply transmits first.
 	cliAdvertDelay = 1500 * time.Millisecond
 	// Firmware's `dp - reply < 134` loop bound: keep appending while the reply is shorter than this.
 	neighborsTextMax = 134
+	// Firmware RegionMap::exportTo(reply, 160): the tree is cut at 159 bytes.
+	regionTreeMax = 159
+	// Firmware exportNamesTo max_len for `region list`.
+	regionListMax = 160
 
 	// Firmware NodePrefs buffer sizes (StrHelper::strncpy truncates to size-1).
 	maxNameLen          = 31
@@ -67,7 +69,7 @@ func (r *Repeater) handleCLI(pkt *meshcore.Packet) {
 	}
 	isRetry := ts == client.LastTimestamp
 	flags := plain[4] >> 2
-	if flags != txtTypeCliData && flags != txtTypePlain {
+	if flags != meshcore.TxtTypeCLIData && flags != meshcore.TxtTypePlain && flags != meshcore.TxtTypeCLICommand {
 		return
 	}
 
@@ -81,7 +83,7 @@ func (r *Repeater) handleCLI(pkt *meshcore.Packet) {
 	}
 
 	command := cString(plain[5:])
-	if flags == txtTypePlain { // legacy CLI gets an ack (firmware TXT_TYPE_PLAIN branch), even on retries
+	if flags == meshcore.TxtTypePlain { // legacy CLI gets an ack (firmware TXT_TYPE_PLAIN branch), even on retries
 		r.sendLegacyAck(pkt, clientPub, plain[:5+len(command)])
 	}
 	if isRetry {
@@ -111,9 +113,9 @@ func (r *Repeater) sendLegacyAck(reqPkt *meshcore.Packet, clientPub [32]byte, ac
 	}
 	var err error
 	if routeType == meshcore.RouteTypeFlood {
-		err = r.sendFloodScoped(out, reqPkt, node.PrioritySend, txtAckDelay)
+		err = r.sendFloodScoped(out, reqPkt, txtAckDelay)
 	} else {
-		err = r.sendPkt(out, node.PrioritySend, txtAckDelay)
+		err = r.sendPkt(out, nil, txtAckDelay)
 	}
 	if err != nil {
 		r.log.Error("legacy cli ack failed", "error", err)
@@ -122,6 +124,9 @@ func (r *Repeater) sendLegacyAck(reqPkt *meshcore.Packet, clientPub [32]byte, ac
 
 // runCLI strips the optional "XX|" correlation prefix and reflects it back so async clients can match responses.
 func (r *Repeater) runCLI(command string) string {
+	if reply, ok := r.regionLoadLine(command); ok {
+		return reply
+	}
 	command = strings.TrimLeft(command, " ")
 	prefix := ""
 	if len(command) > 4 && command[2] == '|' {
@@ -162,6 +167,8 @@ func (r *Repeater) dispatchCLI(cmd string) string {
 	// matched separately or the app's "Remove all Neighbours" reads as an unknown command.
 	case cmd == "neighbor.remove", strings.HasPrefix(cmd, "neighbor.remove "):
 		return r.cliNeighborRemove(strings.TrimSpace(strings.TrimPrefix(cmd, "neighbor.remove")))
+	case cmd == "power":
+		return r.cliPower()
 	case cmd == "clear stats":
 		r.clearStats()
 		return "(OK - stats reset)"
@@ -190,6 +197,15 @@ func (r *Repeater) dispatchCLI(cmd string) string {
 	default:
 		return "Unknown command"
 	}
+}
+
+// cliPower answers in CommonCLI's shape, with the base board's answers for what a host can't sense.
+func (r *Repeater) cliPower() string {
+	var mv uint16
+	if ds := r.deviceStats(); ds.HaveBattery {
+		mv = ds.BatteryMV
+	}
+	return fmt.Sprintf("batt:%d mV usb:n/a solar_chg:n/a ext:no charger:no", mv)
 }
 
 // isUnsupportedCmd reports firmware commands a Linux-hosted relay can't do, answered with a clear error not "Unknown command".
@@ -374,12 +390,12 @@ func (r *Repeater) advertAfterReply(flood bool) {
 
 // sendText replies as a TXT_MSG datagram, never a PATH-return, with a timestamp never equal to the command's (firmware CLI-view workaround).
 func (r *Repeater) sendText(reqPkt *meshcore.Packet, clientPub [32]byte, secret []byte, senderTS uint32, text string) error {
-	ts := r.uniqueTimestamp()
+	ts := r.node.UniqueTimestamp()
 	if ts == senderTS {
-		ts = r.uniqueTimestamp()
+		ts = r.node.UniqueTimestamp()
 	}
 	me := r.node.Identity().PublicKey()
-	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), txtTypeCliData<<2, []byte(text))
+	plaintext := meshcore.BuildTextPlaintext(time.Unix(int64(ts), 0), meshcore.TxtTypeCLIData<<2, []byte(text))
 	payload, err := encPacket(secret, func(mac [2]byte, enc []byte) ([]byte, error) {
 		return (&meshcore.TextMessage{Destination: clientPub[0], Source: me[0], MAC: mac, EncryptedPayload: enc}).ToBytes()
 	}, plaintext)
@@ -394,9 +410,9 @@ func (r *Repeater) sendText(reqPkt *meshcore.Packet, clientPub [32]byte, secret 
 		Payload:    payload,
 	}
 	if routeType == meshcore.RouteTypeFlood {
-		return r.sendFloodScoped(out, reqPkt, node.PrioritySend, cliReplyDelay)
+		return r.sendFloodScoped(out, reqPkt, cliReplyDelay)
 	}
-	return r.sendPkt(out, node.PrioritySend, cliReplyDelay)
+	return r.sendPkt(out, nil, cliReplyDelay)
 }
 
 // cliSet handles `set <key> <value>` for the repeater's own config.
@@ -542,10 +558,10 @@ func (r *Repeater) cliNeighborRemove(pubHex string) string {
 	return "OK"
 }
 
-// cliRegion ports CommonCLI::handleRegionCmd onto our flat list: no parent tree, so `region def` isn't supported and parents are only validated.
+// cliRegion ports CommonCLI::handleRegionCmd; parents are kept by name, with "*" at the top.
 func (r *Repeater) cliRegion(cmd string) string {
 	if cmd == "region def" || strings.HasPrefix(cmd, "region def ") {
-		return notSupportedOnNode
+		return r.cliRegionDef(strings.TrimPrefix(cmd, "region def"))
 	}
 	parts := strings.SplitN(cmd, " ", 5)
 	if len(parts) > 4 {
@@ -566,7 +582,10 @@ func (r *Repeater) cliRegion(cmd string) string {
 	case n == 1:
 		return r.regionTree()
 	case sub == "load":
-		return "" // firmware reloads asynchronously and replies nothing
+		r.mu.Lock()
+		r.regionLoad = &regionLoad{stack: [8]string{config.WildcardRegion}}
+		r.mu.Unlock()
+		return "" // the firmware replies nothing; each following line is a region until a blank one
 	case sub == "save":
 		return "OK" // every change is already persisted by reconfigure
 	case n >= 3 && (sub == "allowf" || sub == "denyf"):
@@ -584,6 +603,9 @@ func (r *Repeater) cliRegion(cmd string) string {
 		flag := "F"
 		if regionDenies(cfg.Regions, name) {
 			flag = ""
+		}
+		if p := regionParent(cfg.Regions, name); p != "" && p != config.WildcardRegion {
+			return " " + name + " (" + p + ") " + flag
 		}
 		return " " + name + " " + flag
 	case n >= 3 && sub == "home":
@@ -603,27 +625,30 @@ func (r *Repeater) cliRegion(cmd string) string {
 		return " home is " + cfg.HomeRegion
 	case n >= 3 && sub == "default": // the default advert scope (firmware default_scope)
 		if arg == "<null>" {
-			return r.applyCfg(func(c *config.RepeaterConfig) { c.DefaultRegion = "" }, " default scope is now <null>")
+			return r.applyCfg(func(c *config.RepeaterConfig) { c.FloodScope = config.ScopeEverywhere }, " default scope is now <null>")
 		}
 		name, ok := regionByPrefix(cfg.Regions, arg)
 		if !ok {
-			if !isValidRegionName(arg) {
-				return "Err - region table full" // putRegion refused it
+			if _, name, ok = putRegion(cfg.Regions, arg, config.WildcardRegion); !ok {
+				return "Err - region table full"
 			}
-			name = truncate(arg, maxRegionNameLen)
 		}
 		if name == config.WildcardRegion {
 			return "Err - region table full" // our config can't scope adverts to "*"
 		}
+		if strings.HasPrefix(name, "$") {
+			return "Err - a private region can't be the default here" // we can't load its keys, so adverts would go unscoped
+		}
 		return r.applyCfg(func(c *config.RepeaterConfig) {
 			setRegionDeny(c, name, false) // firmware: def->flags = 0, auto-creating if missing
-			c.DefaultRegion = name
+			c.FloodScope = config.ScopeForRegionName(name)
 		}, " default scope is now "+name)
 	case n == 2 && sub == "default":
-		if cfg.DefaultRegion == "" {
+		name, ok := cfg.FloodScope.RegionName()
+		if !ok {
 			return " default scope is <null>"
 		}
-		return " default scope is " + cfg.DefaultRegion
+		return " default scope is " + name
 	case n >= 3 && sub == "put":
 		parent := config.WildcardRegion
 		if n >= 4 {
@@ -633,11 +658,15 @@ func (r *Repeater) cliRegion(cmd string) string {
 			}
 			parent = p
 		}
-		name := truncate(arg, maxRegionNameLen)
-		if !isValidRegionName(name) || name == config.WildcardRegion || name == parent {
+		if _, _, ok := putRegion(cfg.Regions, arg, parent); !ok {
 			return "Err - unable to put"
 		}
-		return r.applyCfg(func(c *config.RepeaterConfig) { setRegionDeny(c, name, false) }, "OK - (flood allowed)")
+		return r.applyCfg(func(c *config.RepeaterConfig) {
+			if regions, name, ok := putRegion(c.Regions, arg, parent); ok {
+				c.Regions = regions
+				setRegionDeny(c, name, false) // firmware: region->flags = 0
+			}
+		}, "OK - (flood allowed)")
 	case n >= 3 && sub == "remove":
 		if arg == config.WildcardRegion {
 			return "Err - not empty" // the wildcard can't be removed
@@ -646,19 +675,22 @@ func (r *Repeater) cliRegion(cmd string) string {
 		if !ok {
 			return "Err - not found"
 		}
+		if slices.ContainsFunc(cfg.Regions, func(rg config.RepeaterRegion) bool { return rg.Parent == name }) {
+			return "Err - not empty" // RegionMap::removeRegion: children first
+		}
 		return r.applyCfg(func(c *config.RepeaterConfig) {
 			c.Regions = slices.DeleteFunc(c.Regions, func(rg config.RepeaterRegion) bool { return rg.Name == name })
-			if c.DefaultRegion == name {
-				c.DefaultRegion = "" // a dangling reference fails validation
-			}
 			if c.HomeRegion == name {
 				c.HomeRegion = ""
+			}
+			if c.FloodScope.NamesRegion(name) {
+				c.FloodScope = config.ScopeEverywhere // the firmware's default_id no longer finds a region
 			}
 		}, "OK")
 	case n >= 3 && sub == "list":
 		switch arg {
 		case "allowed", "denied":
-			if names := regionNames(cfg.Regions, arg == "denied"); names != "" {
+			if names := regionList(cfg.Regions, arg == "denied"); names != "" {
 				return names
 			}
 			return "-none-"
@@ -699,14 +731,14 @@ func regionByPrefix(regions []config.RepeaterRegion, prefix string) (string, boo
 	return partial, partial != ""
 }
 
-// regionDenies reports the deny-flood flag; the wildcard denies when it has no config entry.
+// regionDenies reports the deny-flood flag; an absent "*" allows, as the firmware's wildcard always exists and starts allowing.
 func regionDenies(regions []config.RepeaterRegion, name string) bool {
 	for _, rg := range regions {
 		if rg.Name == name {
 			return rg.DenyFlood
 		}
 	}
-	return true
+	return name != config.WildcardRegion
 }
 
 // setRegionDeny creates the entry if needed, so `allowf *` materialises the wildcard.
@@ -717,7 +749,11 @@ func setRegionDeny(c *config.RepeaterConfig, name string, deny bool) {
 			return
 		}
 	}
-	c.Regions = append(c.Regions, config.RepeaterRegion{Name: name, DenyFlood: deny})
+	parent := config.WildcardRegion // firmware putRegion(name, 0): under the wildcard
+	if name == config.WildcardRegion {
+		parent = ""
+	}
+	c.Regions = append(c.Regions, config.RepeaterRegion{Name: name, Parent: parent, DenyFlood: deny})
 }
 
 // isValidRegionName is RegionMap::is_name_char per byte: alnum, "-", "$", "#" and anything at or above 'A'.
@@ -726,46 +762,235 @@ func isValidRegionName(s string) bool {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c == '-' || c == '$' || c == '#' || (c >= '0' && c <= '9') || c >= 'A') {
+		if !isRegionNameChar(s[i]) {
 			return false
 		}
 	}
 	return true
 }
 
-// cfgRegions is safe to iterate after unlocking because ApplyRegions replaces the slice rather than mutating it.
-func (r *Repeater) cfgRegions() []config.RepeaterRegion {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cfg.Regions
+func isRegionNameChar(c byte) bool {
+	return c == '-' || c == '$' || c == '#' || (c >= '0' && c <= '9') || c >= 'A'
 }
 
-// cfgSnapshot copies the config under the lock (scalar reads like DefaultRegion).
+// regionParent is the parent a region was saved with, "" if it isn't listed.
+func regionParent(regions []config.RepeaterRegion, name string) string {
+	for _, rg := range regions {
+		if rg.Name == name {
+			return rg.Parent
+		}
+	}
+	return ""
+}
+
+// putRegion is RegionMap::putRegion on a copy, refusing a move into the region's own subtree and a name not UTF-8 once cut to 30 bytes.
+func putRegion(regions []config.RepeaterRegion, name, parent string) ([]config.RepeaterRegion, string, bool) {
+	if !isValidRegionName(name) || name == config.WildcardRegion {
+		return nil, "", false
+	}
+	if name = truncate(name, maxRegionNameLen); !utf8.ValidString(name) {
+		return nil, "", false
+	}
+	if existing, ok := regionByName(regions, name); ok {
+		for p := parent; p != config.WildcardRegion && p != ""; p = regionParent(regions, p) {
+			if p == existing {
+				return nil, "", false
+			}
+		}
+		out := slices.Clone(regions)
+		for i := range out {
+			if out[i].Name == existing {
+				out[i].Parent = parent
+			}
+		}
+		return out, existing, true
+	}
+	named := 0
+	for _, rg := range regions {
+		if rg.Name != config.WildcardRegion {
+			named++
+		}
+	}
+	if named >= meshcore.MaxRegions {
+		return nil, "", false
+	}
+	return append(slices.Clone(regions), config.RepeaterRegion{Name: name, Parent: parent, DenyFlood: true}), name, true
+}
+
+// cliRegionDef is `region def a b|jump c`: each name goes under the one before it (or the jump), flood allowed, and the reply is the tree.
+func (r *Repeater) cliRegionDef(payload string) string {
+	if strings.TrimSpace(payload) == "" {
+		return "Err - empty def"
+	}
+	cfg := r.cfgSnapshot()
+	regions, errText := regionDef(cfg.Regions, payload)
+	if regions == nil {
+		return errText
+	}
+	reply := errText
+	if reply == "" {
+		reply = truncate(renderRegionTree(regions, cfg.HomeRegion), regionTreeMax)
+	}
+	// Like the firmware, the names before a failing one stay put.
+	return r.applyCfg(func(c *config.RepeaterConfig) {
+		if regions, _ := regionDef(c.Regions, payload); regions != nil {
+			c.Regions = regions
+		}
+	}, reply)
+}
+
+// regionDef applies CommonCLI's processRegionDefSegment per token; nil regions means nothing changed.
+func regionDef(regions []config.RepeaterRegion, payload string) ([]config.RepeaterRegion, string) {
+	changed := false
+	cursor := config.WildcardRegion
+	for _, tok := range strings.Fields(payload) {
+		name, jump, hasJump := tok, "", false
+		if i := strings.IndexAny(tok, "|,"); i >= 0 {
+			name, jump, hasJump = tok[:i], tok[i+1:], true
+		}
+		fail := func(msg string) ([]config.RepeaterRegion, string) {
+			if !changed {
+				return nil, msg
+			}
+			return regions, msg
+		}
+		if name == "" {
+			return fail("Err - empty name")
+		}
+		if hasJump && jump == "" {
+			return fail("Err - empty jump")
+		}
+		out, stored, ok := putRegion(regions, name, cursor)
+		if !ok {
+			return fail("Err - put failed: " + name)
+		}
+		for i := range out {
+			if out[i].Name == stored {
+				out[i].DenyFlood = false
+			}
+		}
+		regions, changed = out, true
+		cursor = stored
+		if hasJump {
+			j, ok := regionByPrefix(regions, jump)
+			if !ok {
+				return fail("Err - unknown jump: " + jump)
+			}
+			cursor = j
+		}
+	}
+	return regions, ""
+}
+
+// regionLoad is MyMesh's temp_map and load_stack: the tree being read in, and the last region seen at each indent.
+type regionLoad struct {
+	regions []config.RepeaterRegion
+	stack   [8]string
+}
+
+// regionLoadLine takes the lines after `region load`: indent picks the parent, a trailing F allows flood for a new region, a blank line swaps the tree in.
+// Unlike the firmware, the swap keeps "*"'s flood setting and the home region, which its temp map would reset.
+func (r *Repeater) regionLoadLine(line string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ld := r.regionLoad
+	if ld == nil {
+		return "", false
+	}
+	if strings.TrimSpace(line) == "" {
+		r.regionLoad = nil
+		loaded := ld.regions
+		reply := fmt.Sprintf("OK - loaded %d regions", len(loaded))
+		if r.reconfigure == nil {
+			return "ERR: config changes not available", true
+		}
+		r.reconfigureAfterReply(func(c *config.RepeaterConfig) {
+			var regions []config.RepeaterRegion
+			for _, rg := range c.Regions {
+				if rg.Name == config.WildcardRegion {
+					regions = append(regions, rg)
+				}
+			}
+			c.Regions = append(regions, loaded...)
+			if _, ok := regionByName(c.Regions, c.HomeRegion); !ok {
+				c.HomeRegion = ""
+			}
+			if !slices.ContainsFunc(c.Regions, func(rg config.RepeaterRegion) bool { return c.FloodScope.NamesRegion(rg.Name) }) {
+				c.FloodScope = config.ScopeEverywhere
+			}
+		})
+		return reply, true
+	}
+
+	name := strings.TrimLeft(line, " ")
+	indent := len(line) - len(name)
+	end := 0
+	for end < len(name) && isRegionNameChar(name[end]) {
+		end++
+	}
+	rest := ""
+	if end < len(name) {
+		rest = name[end+1:]
+	}
+	name = name[:end]
+	if indent > 0 && indent < len(ld.stack) && name != "" && ld.stack[indent-1] != "" {
+		if out, stored, ok := putRegion(ld.regions, name, ld.stack[indent-1]); ok {
+			deny := !strings.Contains(rest, "F")
+			if old, ok := regionByName(r.cfg.Regions, name); ok {
+				deny = regionDenies(r.cfg.Regions, old) // carries over the current flags
+			}
+			for i := range out {
+				if out[i].Name == stored {
+					out[i].DenyFlood = deny
+				}
+			}
+			ld.regions = out
+			ld.stack[indent] = stored
+		}
+	}
+	return "", true
+}
+
+// cfgSnapshot copies the config under the lock (scalar reads like FloodScope).
 func (r *Repeater) cfgSnapshot() config.RepeaterConfig {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.cfg
 }
 
-// regionNames renders RegionMap::exportNamesTo(mask=DENY_FLOOD): names matching `denied`, "*" first, leading "#" stripped.
-func regionNames(regions []config.RepeaterRegion, denied bool) string {
+// floodRegionNames is what RegionMap::exportNamesTo(mask=DENY_FLOOD) lists: the names whose DenyFlood is denied, "*" first.
+func floodRegionNames(regions []config.RepeaterRegion, denied bool) []string {
 	var names []string
 	if regionDenies(regions, config.WildcardRegion) == denied {
 		names = append(names, config.WildcardRegion)
 	}
 	for _, rg := range regions {
 		if rg.Name != config.WildcardRegion && rg.DenyFlood == denied {
-			names = append(names, strings.TrimPrefix(rg.Name, "#"))
+			names = append(names, rg.Name)
 		}
 	}
-	return strings.Join(names, ",")
+	return names
+}
+
+// regionList is the `region list` reply: exportNamesTo into the CLI's 160 bytes, leading "#" stripped and a name that does not fit skipped.
+func regionList(regions []config.RepeaterRegion, denied bool) string {
+	var b []byte
+	for _, name := range floodRegionNames(regions, denied) {
+		name = strings.TrimPrefix(name, "#")
+		if len(b)+len(name)+2 < regionListMax {
+			b = append(append(b, name...), ',')
+		}
+	}
+	return strings.TrimSuffix(string(b), ",")
 }
 
 // regionTree renders the firmware exportTo shape: wildcard first, children indented one space, "^" for home and " F" for flood-allowed.
 func (r *Repeater) regionTree() string {
 	cfg := r.cfgSnapshot()
-	home := cfg.HomeRegion
+	return truncate(renderRegionTree(cfg.Regions, cfg.HomeRegion), regionTreeMax)
+}
+
+func renderRegionTree(regions []config.RepeaterRegion, home string) string {
 	if home == "" {
 		home = config.WildcardRegion
 	}
@@ -781,12 +1006,16 @@ func (r *Repeater) regionTree() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(line(config.WildcardRegion, regionDenies(cfg.Regions, config.WildcardRegion), ""))
-	for _, rg := range cfg.Regions {
-		if rg.Name != config.WildcardRegion {
-			b.WriteString(line(rg.Name, rg.DenyFlood, " "))
+	var walk func(name, indent string)
+	walk = func(name, indent string) {
+		b.WriteString(line(name, regionDenies(regions, name), indent))
+		for _, rg := range regions {
+			if rg.Parent == name && rg.Name != config.WildcardRegion {
+				walk(rg.Name, indent+" ")
+			}
 		}
 	}
+	walk(config.WildcardRegion, "")
 	return b.String()
 }
 
@@ -819,7 +1048,7 @@ func (r *Repeater) neighborsList() string {
 		if b.Len() > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "%s:%d:%d", hex.EncodeToString(n.pubkey[:4]), int64(now.Sub(n.heard).Seconds()), int8(n.snr*4))
+		fmt.Fprintf(&b, "%s:%d:%d", hex.EncodeToString(n.pubkey[:4]), int64(now.Sub(n.heard).Seconds()), meshcore.SNRToWire(float32(n.snr)))
 	}
 	return b.String()
 }

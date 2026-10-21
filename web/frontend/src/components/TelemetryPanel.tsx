@@ -6,6 +6,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { CoordLink } from "@/components/CoordLink";
 import { cn } from "@/lib/utils";
 import { apiErrorMessage } from "@/lib/apiError";
+import { useRemoteFetch } from "@/lib/remoteFetch";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 export interface TelemetryReading {
   channel: number;
@@ -25,32 +27,51 @@ export function TelemetryPanel({
   apiBase,
   autoFetch = false,
   errorHint,
+  live,
 }: {
   apiBase: string;
   autoFetch?: boolean;
   // Shown under a failed request — e.g. a sensor only replies to clients in its ACL.
   errorHint?: string;
+  // A sensor's key and companion: pushes Monitoring gets from it replace the readings shown.
+  live?: { pubkey: string; companionId: number };
 }) {
   const [data, setData] = useState<TelemetryData | null>(null);
+  const [pushedAt, setPushedAt] = useState<Date | null>(null);
+  const livePubkey = live?.pubkey;
+  const liveCompanion = live?.companionId;
+  const onPush = useCallback(
+    (_topic: string, payload: unknown) => {
+      const m = payload as { pubkey?: string; companionId?: number; readings?: TelemetryReading[]; receivedAt?: string };
+      if (m.pubkey !== livePubkey || m.companionId !== liveCompanion || !Array.isArray(m.readings)) return;
+      const readings = m.readings;
+      setData((d) => ({ readings, raw: d?.raw ?? "" }));
+      setPushedAt(new Date(m.receivedAt ?? Date.now()));
+    },
+    [livePubkey, liveCompanion],
+  );
+  useWebSocket(live ? ["telemetry"] : [], onPush);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const fetchedRef = useRef(false);
+  const remoteFetch = useRemoteFetch();
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch(`${apiBase}/telemetry`);
+      const r = await remoteFetch(`${apiBase}/telemetry`);
       if (!r.ok) throw new Error(await apiErrorMessage(r));
       const body: TelemetryData = await r.json();
       setData(body);
+      setPushedAt(null);
       fetchedRef.current = true;
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed");
     } finally {
       setLoading(false);
     }
-  }, [apiBase]);
+  }, [apiBase, remoteFetch]);
 
   useEffect(() => {
     if (autoFetch && !fetchedRef.current) {
@@ -107,6 +128,11 @@ export function TelemetryPanel({
             <TelemetryTile key={`${reading.channel}-${reading.type}-${idx}`} reading={reading} />
           ))}
         </div>
+      )}
+      {pushedAt && (
+        <p className="text-xs text-muted-foreground">
+          Pushed by the sensor at {pushedAt.toLocaleTimeString()}.
+        </p>
       )}
     </div>
   );

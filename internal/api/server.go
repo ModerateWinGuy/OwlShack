@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"mime"
@@ -11,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 func init() {
@@ -46,10 +47,16 @@ type RepeaterOps struct {
 	RoomLogin func(pubkeyHex, password string, syncSince uint32) (any, error)
 	StatusReq func(pubkeyHex string) (any, error)
 	CLI       func(pubkeyHex, command string) (string, error)
-	Session   func(pubkeyHex string) any
-	Logout    func(pubkeyHex string)
-	PathGet   func(pubkeyHex string) (any, error)
-	PathReset func(pubkeyHex string) error
+	// CompanionCLI runs a command on a remote companion that allows us remote CLI; there is no login.
+	CompanionCLI func(pubkeyHex, command string) (string, error)
+	// Unsubscribe ends the watch this companion holds on a sensor.
+	Unsubscribe func(pubkeyHex string) error
+	// Subscription is Monitoring's watch on the sensor: {active, expires, scope, refused}.
+	Subscription func(pubkeyHex string) any
+	Session      func(pubkeyHex string) any
+	Logout       func(pubkeyHex string)
+	PathGet      func(pubkeyHex string) (any, error)
+	PathReset    func(pubkeyHex string) error
 	// PathSet takes a nil path to flood and an empty one for a direct neighbour.
 	PathSet      func(pubkeyHex string, path []byte, pathHashSize uint8) error
 	NeighborsReq func(pubkeyHex string, count uint8, offset uint16) (any, error)
@@ -64,7 +71,9 @@ type RepeaterOps struct {
 	// ContactTelemetryReq uses the ECDH secret with the contact, not a login session.
 	ContactTelemetryReq func(pubkeyHex string) (any, error)
 	AccessList          func(pubkeyHex string) (any, error)
-	SetPerm             func(pubkeyHex, targetPubkeyHex string, perms uint8) error
+	// Regions reads the node's region map over the CLI; a firmware without regions is an Invalid error.
+	Regions func(ctx context.Context, pubkeyHex string) (any, error)
+	SetPerm func(pubkeyHex, targetPubkeyHex string, perms uint8) error
 }
 
 type Server struct {
@@ -100,6 +109,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/peers/delete", s.handleBulkDeletePeers)
 	s.mux.HandleFunc("DELETE /api/peers/{pubkey}", s.handleDeletePeer)
 	s.mux.HandleFunc("GET /api/packets", s.handleListPackets)
+	s.mux.HandleFunc("GET /api/connection-web", s.handleConnectionWeb)
+	s.mux.HandleFunc("PUT /api/connection-web/pins/{hash}", s.handlePinHop)
+	s.mux.HandleFunc("DELETE /api/connection-web/pins/{hash}", s.handleUnpinHop)
 	s.mux.HandleFunc("GET /api/companions", s.handleListCompanions)
 	s.mux.HandleFunc("GET /api/companions/{name}/contacts", s.handleListContacts)
 	s.mux.HandleFunc("GET /api/companions/{name}/contacts/{pubkey}", s.handleGetContact)
@@ -107,7 +119,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/companions/{name}/contacts/{pubkey}", s.handleDeleteContact)
 	s.mux.HandleFunc("PATCH /api/companions/{name}/contacts/{pubkey}", s.handleUpdateContactMetadata)
 	s.mux.HandleFunc("PUT /api/companions/{name}/contacts/{pubkey}/location", s.handleSetContactLocation)
+	s.mux.HandleFunc("PUT /api/companions/{name}/contacts/{pubkey}/region", s.handleSetContactFloodScope)
 	s.mux.HandleFunc("GET /api/companions/{name}/contacts/{pubkey}/telemetry", s.handleContactTelemetry)
+	s.mux.HandleFunc("POST /api/companions/{name}/contacts/{pubkey}/cli", s.handleCompanionCLI)
 	// Per-resource config REST (reads; scoped + secret-redacted).
 	s.mux.HandleFunc("GET /api/config/settings", s.handleGetSettings)
 	s.mux.HandleFunc("GET /api/config/mqtt", s.handleGetMqtt)
@@ -115,6 +129,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/mqtt/status", s.handleMqttStatus)
 	s.mux.HandleFunc("GET /api/discover", s.handleDiscoveryState)
 	s.mux.HandleFunc("POST /api/discover", s.handleStartDiscovery)
+	s.mux.HandleFunc("GET /api/discover/regions", s.handleRegionScanState)
+	s.mux.HandleFunc("POST /api/discover/regions", s.handleStartRegionScan)
 	s.mux.HandleFunc("GET /api/spi/boards", s.handleSPIBoards)
 	s.mux.HandleFunc("GET /api/serial/ports", s.handleSerialPorts)
 	s.mux.HandleFunc("GET /api/radio/status", s.handleRadioStatus)
@@ -141,6 +157,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/config/repeater", s.handleGetRepeater)
 	// Per-resource config REST (writes; validated + reloaded server-side).
 	s.mux.HandleFunc("PUT /api/config/settings", s.handlePutSettings)
+	s.mux.HandleFunc("PUT /api/config/regions", s.handlePutFloodRegions)
 	s.mux.HandleFunc("PUT /api/config/mqtt", s.handlePutMqtt)
 	s.mux.HandleFunc("POST /api/config/mqtt/brokers", s.handleSaveBroker)
 	s.mux.HandleFunc("PUT /api/config/mqtt/brokers/{id}", s.handleSaveBroker)
@@ -148,6 +165,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/config/companions", s.handleSaveCompanion)
 	s.mux.HandleFunc("PUT /api/config/companions/{id}", s.handleSaveCompanion)
 	s.mux.HandleFunc("PUT /api/config/companions/{id}/telemetry", s.handleSetCompanionTelemetry)
+	s.mux.HandleFunc("PUT /api/config/companions/{id}/app", s.handleSetCompanionApp)
 	s.mux.HandleFunc("DELETE /api/config/companions/{id}", s.handleDeleteCompanion)
 	s.mux.HandleFunc("POST /api/config/companions/{id}/channels", s.handleCreateChannel)
 	s.mux.HandleFunc("PUT /api/config/channels/{id}", s.handleSaveChannel)
@@ -165,6 +183,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/config/repeater/node", s.handleUpdateRepeaterNode)
 	s.mux.HandleFunc("PUT /api/config/repeater/relay", s.handleUpdateRepeaterRelay)
 	s.mux.HandleFunc("PUT /api/config/repeater/admin", s.handleUpdateRepeaterAdmin)
+	s.mux.HandleFunc("PUT /api/config/repeater/scope", s.handleSetRepeaterScope)
+	s.mux.HandleFunc("PUT /api/config/repeater/home", s.handleSetRepeaterHome)
 	s.mux.HandleFunc("POST /api/config/repeater/regions", s.handleAddRepeaterRegion)
 	s.mux.HandleFunc("PATCH /api/config/repeater/regions/{name}", s.handlePatchRepeaterRegion)
 	s.mux.HandleFunc("DELETE /api/config/repeater/regions/{name}", s.handleDeleteRepeaterRegion)
@@ -191,6 +211,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/companions/{name}/contacts/{pubkey}/path", s.handleRepeaterPathSet)
 	s.mux.HandleFunc("POST /api/companions/{name}/trace", s.handleSendTrace)
 	s.mux.HandleFunc("POST /api/companions/{name}/advert", s.handleSendAdvert)
+	s.mux.HandleFunc("GET /api/companions/{name}/app", s.handleCompanionApp)
+	s.mux.HandleFunc("POST /api/companions/{name}/app/disconnect", s.handleDisconnectCompanionApp)
 	s.mux.HandleFunc("POST /api/companions/{name}/repeaters/{pubkey}/login", s.handleRepeaterLogin)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/status", s.handleRepeaterStatus)
 	s.mux.HandleFunc("POST /api/companions/{name}/repeaters/{pubkey}/cli", s.handleRepeaterCLI)
@@ -202,8 +224,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/neighbors", s.handleRepeaterNeighbors)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/owner", s.handleRepeaterOwnerInfo)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/telemetry", s.handleRepeaterTelemetry)
+	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/subscription", s.handleSensorSubscription)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/history", s.handleRepeaterSeries)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/access", s.handleRepeaterAccessList)
+	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/regions", s.handleRepeaterRegions)
 	s.mux.HandleFunc("PUT /api/companions/{name}/repeaters/{pubkey}/access/{target}", s.handleRepeaterAccessSet)
 	s.mux.HandleFunc("DELETE /api/companions/{name}/repeaters/{pubkey}/access/{target}", s.handleRepeaterAccessRemove)
 	s.mux.HandleFunc("POST /api/companions/{name}/rooms/{pubkey}/login", s.handleRoomLogin)
@@ -393,6 +417,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeOpError answers a failed operation with its reason: a refusal 422, a marked failure its own status, anything else 500 and logged.
+func (s *Server) writeOpError(w http.ResponseWriter, msg string, err error) {
+	var verr *ValidationError
+	var serr *StatusError
+	switch {
+	case errors.Is(err, context.Canceled): // the browser left; nobody reads the answer
+		s.log.Debug(msg, "error", err)
+	case errors.As(err, &verr):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.As(err, &serr):
+		s.log.Debug(msg, "error", err)
+		writeError(w, serr.Status, err.Error())
+	default:
+		s.log.Error(msg, "error", err)
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
 }
 
 // serverError returns an opaque 500; the underlying error must never leak to API clients.

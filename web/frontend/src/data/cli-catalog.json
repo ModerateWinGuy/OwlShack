@@ -10,7 +10,13 @@
     },
     {
       "command": "board",
-      "hint": "board manufacturer name"
+      "hint": "board manufacturer name",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "command": "clear stats",
@@ -41,7 +47,13 @@
     },
     {
       "command": "get ",
-      "hint": "read a config value: get <key>"
+      "hint": "read a config value: get <key>",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "command": "get acl",
@@ -62,6 +74,10 @@
     {
       "command": "gps advert share",
       "hint": "advertise current GPS location"
+    },
+    {
+      "command": "gps diag",
+      "hint": "GPS diagnostics: enabled, fix, sats, NMEA counters (1.18+, GPS builds only)"
     },
     {
       "command": "gps off",
@@ -128,8 +144,18 @@
       "hint": "change admin password"
     },
     {
+      "command": "power",
+      "hint": "battery mV, USB / solar / charger state (1.18+)"
+    },
+    {
       "command": "poweroff",
-      "hint": "power off (alias: shutdown)"
+      "hint": "power off (alias: shutdown)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "command": "powersaving",
@@ -145,7 +171,13 @@
     },
     {
       "command": "reboot",
-      "hint": "soft reboot the device"
+      "hint": "soft reboot the device",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "command": "region",
@@ -184,7 +216,8 @@
       "hint": "reload the region table from storage",
       "roles": [
         "repeater",
-        "room"
+        "room",
+        "sensor"
       ]
     },
     {
@@ -200,7 +233,8 @@
       "hint": "persist the region table",
       "roles": [
         "repeater",
-        "room"
+        "room",
+        "sensor"
       ]
     },
     {
@@ -224,7 +258,13 @@
     },
     {
       "command": "set ",
-      "hint": "write a config value: set <key> <value>"
+      "hint": "write a config value: set <key> <value>",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "command": "setperm ",
@@ -232,7 +272,13 @@
     },
     {
       "command": "shutdown",
-      "hint": "power off (alias: poweroff)"
+      "hint": "power off (alias: poweroff)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "command": "start ota",
@@ -260,7 +306,13 @@
     },
     {
       "command": "ver",
-      "hint": "firmware version + build date"
+      "hint": "firmware version + build date",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     }
   ],
   "configKeys": [
@@ -274,11 +326,23 @@
     },
     {
       "key": "af",
-      "hint": "airtime factor (raw)"
+      "hint": "airtime factor, 0-9",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "agc.reset.interval",
-      "hint": "AGC reset interval, secs (rounded /4)"
+      "hint": "AGC reset interval, secs 0-1020 (rounded /4)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "allow.read.only",
@@ -342,15 +406,33 @@
     },
     {
       "key": "cad",
-      "hint": "channel activity detection on/off"
+      "hint": "channel activity detection on/off",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "direct.txdelay",
-      "hint": "direct-mode TX delay factor (0-2)"
+      "hint": "direct-mode TX delay factor (0-2)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "dutycycle",
-      "hint": "duty cycle %, 1-100 (sets airtime_factor)"
+      "hint": "duty cycle %, 1-100 (sets airtime_factor)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "extra.sf",
@@ -382,7 +464,13 @@
     },
     {
       "key": "freq",
-      "hint": "frequency in MHz (set: serial only, reboot to apply)"
+      "hint": "frequency in MHz (change it with set radio)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "guest.password",
@@ -394,7 +482,13 @@
     },
     {
       "key": "int.thresh",
-      "hint": "interference threshold"
+      "hint": "interference threshold",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "lat",
@@ -406,18 +500,30 @@
     },
     {
       "key": "loop.detect",
-      "hint": "off / minimal / moderate / strict",
+      "hint": "off / minimal / moderate / strict (new 1.18 repeaters: minimal)",
       "roles": [
         "repeater"
       ]
     },
     {
       "key": "multi.acks",
-      "hint": "number of repeated ACKs to send"
+      "hint": "number of repeated ACKs to send",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "name",
-      "hint": "node name (set: max 31 chars, no special chars)"
+      "hint": "node name (set: max 31 chars, no special chars)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "owner.info",
@@ -425,7 +531,20 @@
     },
     {
       "key": "path.hash.mode",
-      "hint": "path hash size: 0=1B, 1=2B, 2=3B"
+      "hint": "path hash size: 0=1B, 1=2B, 2=3B",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
+    },
+    {
+      "key": "pin",
+      "hint": "BLE pairing PIN, 6 digits (set only)",
+      "roles": [
+        "companion"
+      ]
     },
     {
       "key": "prv.key",
@@ -453,19 +572,43 @@
     },
     {
       "key": "radio",
-      "hint": "freq,bw,sf,cr — reboot to apply"
+      "hint": "freq,bw,sf,cr — reboot to apply",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "radio.fem.rxgain",
-      "hint": "front-end LNA gain on/off (board must support it)"
+      "hint": "front-end LNA gain on/off (board must support it)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "radio.fem.txgain",
-      "hint": "front-end PA gain on/off (board must support it)"
+      "hint": "front-end PA gain on/off (board must support it)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "radio.rxgain",
-      "hint": "RX boosted gain (on/off, SX126x/LR1110 only)"
+      "hint": "RX boosted gain (on/off, SX126x/LR1110 only)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "repeat",
@@ -477,15 +620,82 @@
     },
     {
       "key": "rxdelay",
-      "hint": "RX delay base, dB (0-20)"
+      "hint": "RX delay base, dB (0-20)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "tx",
-      "hint": "TX power in dBm"
+      "hint": "TX power in dBm",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
     },
     {
       "key": "txdelay",
-      "hint": "TX delay factor (0-2)"
+      "hint": "TX delay factor (0-2)",
+      "roles": [
+        "repeater",
+        "sensor",
+        "room",
+        "companion"
+      ]
+    },
+    {
+      "key": "tz.offset",
+      "hint": "time zone offset in hours, -12 to +14",
+      "roles": [
+        "companion"
+      ]
+    },
+    {
+      "key": "wifi.clear",
+      "hint": "forget the WiFi network, reboot to apply (set only, WiFi builds)",
+      "roles": [
+        "companion"
+      ]
+    },
+    {
+      "key": "wifi.enabled",
+      "hint": "WiFi on 1 / off 0, reboot to apply (WiFi builds)",
+      "roles": [
+        "companion"
+      ]
+    },
+    {
+      "key": "wifi.ip",
+      "hint": "WiFi IP address (get only, WiFi builds)",
+      "roles": [
+        "companion"
+      ]
+    },
+    {
+      "key": "wifi.pwd",
+      "hint": "WiFi password, reboot to apply (WiFi builds)",
+      "roles": [
+        "companion"
+      ]
+    },
+    {
+      "key": "wifi.ssid",
+      "hint": "WiFi network name; set wifi.pwd too, then reboot (WiFi builds)",
+      "roles": [
+        "companion"
+      ]
+    },
+    {
+      "key": "wifi.status",
+      "hint": "WiFi connected or not (get only, WiFi builds)",
+      "roles": [
+        "companion"
+      ]
     }
   ]
 }

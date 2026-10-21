@@ -1,36 +1,26 @@
 package companion
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/echo"
-	"github.com/meshcore-go/OwlShack/internal/meshpath"
-	"github.com/meshcore-go/OwlShack/internal/store"
-	"github.com/meshcore-go/OwlShack/internal/trigger"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/echo"
+	"github.com/OwlShack/OwlShack/internal/meshpath"
+	"github.com/OwlShack/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/trigger"
 )
 
 const dmAckDelay = 200 * time.Millisecond
-
-// txtTypePlain (TXT_TYPE_PLAIN): the text type is the upper 6 bits of the flags byte — plaintext[4]>>2 for DMs, payload.Flags>>2 for channel text.
-const txtTypePlain = 0
-
-// txtTypeCliData (TXT_TYPE_CLI_DATA) marks a repeater CLI reply.
-const txtTypeCliData = 1
-
-// txtTypeSignedPlain (TXT_TYPE_SIGNED_PLAIN) marks a post pushed by a room server.
-const txtTypeSignedPlain = 2
 
 // sendDMAck's ackPayload is the firmware's ack bytes: 6 ([crc][attempt][random]) for a plain DM, a bare 4-byte CRC for a room post push.
 func (c *Companion) sendDMAck(pkt *meshcore.Packet, senderPubKey []byte, sharedSecret []byte, ackPayload []byte) {
@@ -40,7 +30,7 @@ func (c *Companion) sendDMAck(pkt *meshcore.Packet, senderPubKey []byte, sharedS
 			c.log.Debug("failed to build path return for DM ACK", "error", err)
 			return
 		}
-		if err := c.node.SendPacketDelayed(pathReturn, node.PriorityFloodRelay, dmAckDelay); err != nil {
+		if err := meshpath.Send(c.node, pathReturn, c.contactScope(senderPubKey).MeshRegion(), dmAckDelay); err != nil {
 			c.log.Debug("failed to send DM ACK (path return)", "error", err)
 		}
 	} else {
@@ -48,7 +38,7 @@ func (c *Companion) sendDMAck(pkt *meshcore.Packet, senderPubKey []byte, sharedS
 		size := c.bytesPerHop(senderPubKey)
 		ackPkt := &meshcore.Packet{
 			Header:     meshcore.MakeHeader(meshcore.RouteTypeFlood, meshcore.PayloadTypeAck, 0),
-			PathLength: (size - 1) << 6,
+			PathLength: meshcore.MakePathLen(size, 0),
 			Payload:    ackPayload,
 		}
 
@@ -58,10 +48,10 @@ func (c *Companion) sendDMAck(pkt *meshcore.Packet, senderPubKey []byte, sharedS
 			}
 			ackPkt.Header = meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeAck, 0)
 			ackPkt.Path = outPath
-			ackPkt.PathLength = (hs-1)<<6 | byte(len(outPath)/int(hs))
+			ackPkt.PathLength = meshcore.MakePathLen(hs, uint8(len(outPath)/int(hs)))
 		}
 
-		if err := c.node.SendPacketDelayed(ackPkt, node.PriorityFloodRelay, dmAckDelay); err != nil {
+		if err := meshpath.Send(c.node, ackPkt, c.contactScope(senderPubKey).MeshRegion(), dmAckDelay); err != nil {
 			c.log.Debug("failed to send DM ACK", "error", err)
 		}
 	}
@@ -69,10 +59,35 @@ func (c *Companion) sendDMAck(pkt *meshcore.Packet, senderPubKey []byte, sharedS
 
 // bytesPerHop is what everything sent to a node goes out at: its contact's setting, else the companion's own.
 func (c *Companion) bytesPerHop(pubkey []byte) uint8 {
-	if ct, err := c.store.Contacts.Get(c.runCtx, c.cfg.ID, pubkey); err == nil && ct != nil {
+	if ct, err := c.store.Contacts.Get(c.runCtx, c.conf().ID, pubkey); err == nil && ct != nil {
 		return ct.PathHashSize
 	}
 	return c.pathHashSize()
+}
+
+// contactScope is the region floods to a node go in: its contact's, else the companion's own.
+func (c *Companion) contactScope(pubkey []byte) config.FloodScope {
+	if ct, err := c.store.Contacts.Get(c.runCtx, c.conf().ID, pubkey); err == nil && ct != nil {
+		return config.ResolveScope(config.FloodScope(ct.FloodScope), c.conf().FloodScope)
+	}
+	return c.conf().FloodScope
+}
+
+// contactScopeHex is contactScope for a hex pubkey; a bad one gets the companion's own, and the send then fails on it.
+func (c *Companion) contactScopeHex(pubkeyHex string) config.FloodScope {
+	pubkey, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return c.conf().FloodScope
+	}
+	return c.contactScope(pubkey)
+}
+
+// channelScope is the region a channel's posts go in: its own, else the companion's.
+func (c *Companion) channelScope(name string) config.FloodScope {
+	c.chanScopesMu.Lock()
+	own := c.chanScopes[name]
+	c.chanScopesMu.Unlock()
+	return config.ResolveScope(own, c.conf().FloodScope)
 }
 
 // bytesPerHopHex is bytesPerHop for a hex pubkey; a bad one gets the companion's own, and the send then fails on it.
@@ -90,26 +105,18 @@ func (c *Companion) buildPathReturn(destPubKey []byte, sharedSecret []byte, inPa
 	if err != nil {
 		return nil, err
 	}
-	// Flooded at this companion's hash size, as the firmware's sendFloodScoped does.
-	pkt.PathLength = (c.pathHashSize() - 1) << 6
+	// Flooded at this companion's hash size and in the contact's region, as the firmware's sendFloodScoped does.
+	pkt.PathLength = meshcore.MakePathLen(c.pathHashSize(), 0)
+	pkt.SetScope(c.contactScope(destPubKey).MeshRegion())
 	return pkt, nil
 }
 
-func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, roomPubKeyHex string, sharedSecret []byte, plaintext []byte) {
-	if len(plaintext) < 9 {
-		c.log.Debug("room push plaintext too short", "room", roomPubKeyHex[:12])
-		return
-	}
-
-	postTs := binary.LittleEndian.Uint32(plaintext[:4])
-	authorPrefix := plaintext[5:9]
-	text := strings.TrimRight(string(plaintext[9:]), "\x00")
+func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, roomPubKeyHex string, sharedSecret []byte, plaintext []byte, post meshcore.TextPlaintext) {
+	postTs, authorPrefix, text := post.Timestamp, post.Author, string(post.Text)
 
 	// Pushes are ACK-gated: the server sends no further post until it sees a CRC hashed with OUR pubkey, and each retry needs its own ACK.
 	selfPubKey := c.node.Identity().PublicKey()
-	ack := make([]byte, 4)
-	binary.LittleEndian.PutUint32(ack, meshcore.CalcAckHash(plaintext[:9+len(text)], selfPubKey[:]))
-	c.sendDMAck(pkt, roomPubKey, sharedSecret, ack)
+	c.sendDMAck(pkt, roomPubKey, sharedSecret, binary.LittleEndian.AppendUint32(nil, meshcore.SignedTextAckHash(plaintext, selfPubKey[:])))
 
 	channelKey := "dm:" + roomPubKeyHex
 
@@ -122,7 +129,7 @@ func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, room
 
 	// The server's backlog holds at most 32 posts, so 50 recent rows cover the resync window;
 	// this still catches a repost from before a restart, which the in-memory set has forgotten.
-	recent, err := c.store.Messages.List(c.runCtx, c.cfg.ID, channelKey, 50, 0)
+	recent, err := c.store.Messages.List(c.runCtx, c.conf().ID, channelKey, 50, 0)
 	if err == nil {
 		for _, m := range recent {
 			if m.Direction == "rx" && m.Timestamp.Unix() == int64(postTs) && m.Text == text {
@@ -131,6 +138,11 @@ func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, room
 			}
 		}
 	}
+	if a := c.app(); a != nil {
+		m := AppMessage{Channel: -1, TxtType: meshcore.TxtTypeSignedPlain, Timestamp: postTs, Signer: append([]byte(nil), authorPrefix...), Text: text, Packet: pkt}
+		copy(m.From[:], roomPubKey)
+		a.AppMessage(m)
+	}
 
 	authorName := hex.EncodeToString(authorPrefix) + "…"
 	if names, lookupErr := c.store.Peers.LookupByHash(c.runCtx, authorPrefix); lookupErr == nil && len(names) > 0 {
@@ -138,13 +150,15 @@ func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, room
 	}
 
 	msg := &store.Message{
-		CompanionID: c.cfg.ID,
+		CompanionID: c.conf().ID,
 		Channel:     channelKey,
 		ChannelHash: 0,
 		Sender:      authorName,
 		Text:        text,
 		Direction:   "rx",
 		Timestamp:   time.Unix(int64(postTs), 0),
+		ReceivedAt:  time.Now(),
+		FloodScope:  c.floodScopeOf(pkt),
 	}
 	if pkt.HasSignalInfo {
 		snr := float64(pkt.SNR)
@@ -162,14 +176,16 @@ func (c *Companion) handleRoomPush(pkt *meshcore.Packet, roomPubKey []byte, room
 
 		if c.hub != nil {
 			wsMsg := map[string]any{
-				"companion":   c.cfg.Name,
-				"companionId": c.cfg.ID,
+				"companion":   c.conf().Name,
+				"companionId": c.conf().ID,
 				"channel":     channelKey,
 				"sender":      authorName,
 				"text":        text,
 				"direction":   "rx",
 				"timestamp":   msg.Timestamp.UTC().Format(time.RFC3339),
+				"receivedAt":  msg.ReceivedAt.UTC().Format(time.RFC3339),
 				"id":          msg.ID,
+				"floodScope":  msg.FloodScope,
 			}
 			if pkt.HasSignalInfo {
 				wsMsg["snr"] = pkt.SNR
@@ -191,6 +207,8 @@ func (c *Companion) handleDMPathReturn(pkt *meshcore.Packet) {
 	if path.Destination != selfPubKey[0] {
 		return
 	}
+	// A path return from a peer the node knows has already set the route, confirmed the ACK and been answered by the library; only persisting is ours.
+	handled := pkt.IsMarkedDoNotRetransmit()
 
 	// Same candidate set as an inbound DM: sendDM will route to a non-contact peer, so a path
 	// return from one has to be decryptable or its ack is missed and the route never learned.
@@ -216,18 +234,29 @@ func (c *Companion) handleDMPathReturn(pkt *meshcore.Packet) {
 			"peer", hex.EncodeToString(cand.pubkey[:6]),
 			"hops", pp.PathHashCount(),
 			"pathHex", hex.EncodeToString(returnPath))
-		var pubkey [32]byte
-		copy(pubkey[:], cand.pubkey)
-		c.node.Peers().SetOutPath(pubkey, returnPath, pp.PathHashSize())
+		if !handled {
+			var pubkey [32]byte
+			copy(pubkey[:], cand.pubkey)
+			c.node.Peers().SetOutPath(pubkey, returnPath, pp.PathHashSize())
+		}
 		hs := pp.PathHashSize()
 		peerPubKey := cand.pubkey
 		c.store.WriteAsync(func() {
-			if err := c.store.Contacts.UpdateOutPath(context.Background(), c.cfg.ID, peerPubKey, returnPath, hs); err != nil {
+			if err := c.store.Contacts.UpdateOutPath(context.Background(), c.conf().ID, peerPubKey, returnPath, hs); err != nil {
 				c.log.Error("failed to persist out_path", "error", err)
+				return
+			}
+			if a := c.app(); a != nil {
+				var k [32]byte
+				copy(k[:], peerPubKey)
+				a.AppPathUpdated(k)
 			}
 		})
 
 		if extraType == meshcore.PayloadTypeAck && len(extraData) >= 4 {
+			c.sentAcks.take(binary.LittleEndian.Uint32(extraData[:4]))
+		}
+		if extraType == meshcore.PayloadTypeAck && len(extraData) >= 4 && !handled {
 			ackCRC := binary.LittleEndian.Uint32(extraData[:4])
 			c.node.NotifyACK(ackCRC)
 			c.log.Debug("DM ACK received via path return",
@@ -238,8 +267,10 @@ func (c *Companion) handleDMPathReturn(pkt *meshcore.Packet) {
 		// Firmware Mesh.cpp:173-178: answer a FLOOD path return with a reciprocal one, sent direct
 		// along the route we just learned. Without it the peer never learns its route to us and
 		// keeps flooding every reply.
-		if pkt.IsRouteFlood() {
-			c.sendReciprocalPathReturn(cand.pubkey, secret, pkt, returnPath, hs)
+		if pkt.IsRouteFlood() && !handled {
+			if err := c.node.SendReciprocalPath(peerID, pkt, returnPath, hs, meshpath.ReciprocalDelay); err != nil {
+				c.log.Debug("failed to send reciprocal path return", "error", err)
+			}
 		}
 		return
 	}
@@ -250,104 +281,28 @@ func (c *Companion) registerPacketHandlers() {
 
 	radio.SetRawDataHandler(func(data []byte, snr float32, rssi int8, hasSignalInfo bool) {
 		if c.echoTracker != nil {
-			c.echoTracker.OnRawPacket(c.cfg.Name, data, snr, rssi, hasSignalInfo)
+			c.echoTracker.OnRawPacket(c.conf().Name, data, snr, rssi, hasSignalInfo)
+		}
+		if a := c.app(); a != nil {
+			a.AppRawRX(data, snr, rssi)
 		}
 	})
 
 	radio.AddOutboundHandler(func(data []byte) {
-		if c.echoTracker == nil {
-			return
-		}
 		pkt, err := meshcore.PacketFromBytes(data)
 		if err != nil || pkt.PayloadType() != meshcore.PayloadTypeGrpTxt {
 			return
 		}
-
-		c.pendingOutbound.Lock()
-		msgID := c.pendingOutbound.msgID
-		channel := c.pendingOutbound.channel
-		c.pendingOutbound.msgID = 0
-		c.pendingOutbound.channel = ""
-		c.pendingOutbound.Unlock()
-
-		if msgID == 0 {
-			return
-		}
-		c.echoTracker.Track(pkt.PacketHash(), echo.Sent{
-			MessageID:   msgID,
-			CompanionID: c.cfg.ID,
-			Companion:   c.cfg.Name,
-			Channel:     channel,
-		})
-	})
-
-	c.node.OnPacket(meshcore.PayloadTypeAdvert, func(pkt *meshcore.Packet) {
-		adv, err := meshcore.AdvertFromBytes(pkt.Payload)
+		payload, _, err := c.node.DecryptGroupText(pkt)
 		if err != nil {
 			return
 		}
-		if !adv.Verify() {
-			return
+		if sent, ok := c.takePendingPost(payload.Timestamp); ok && c.echoTracker != nil {
+			c.echoTracker.TrackQueued(pkt.PacketHash(), sent)
 		}
-
-		appData := adv.AppData()
-		p := &store.Peer{
-			PubKey:          adv.PublicKey.PublicKeyBytes(),
-			Name:            appData.Name,
-			Type:            appData.Type,
-			Lat:             appData.Lat,
-			Lon:             appData.Lon,
-			Feat1:           appData.Feat1,
-			Feat2:           appData.Feat2,
-			OutPath:         pkt.Path,
-			OutPathHashSize: meshpath.AdvertHashSize(pkt),
-			LastAdvertTS:    adv.Timestamp,
-			LastSeen:        time.Now(),
-		}
-		if pkt.HasSignalInfo {
-			snr := float64(pkt.SNR)
-			p.SNR = &snr
-			p.RSSI = &pkt.RSSI
-		}
-
-		c.store.WriteAsync(func() {
-			if err := c.store.Peers.Upsert(context.Background(), p); err != nil {
-				c.log.Error("failed to persist peer", "error", err)
-				return
-			}
-
-			// Advert wins on location, but only when it carries one — a no-GPS advert leaves a hand-set location alone.
-			hasLoc := p.HasLocation()
-			if err := c.store.Contacts.RefreshFromAdvert(
-				context.Background(), p.PubKey, appData.Name, appData.Type,
-				p.Lat, p.Lon, p.Feat1, p.Feat2, p.LastSeen, p.LastAdvertTS, hasLoc,
-			); err != nil {
-				c.log.Error("failed to refresh contact from advert", "error", err)
-			}
-
-			c.log.Debug("peer persisted",
-				"name", appData.Name,
-				"type", appData.Type,
-				"pubkey", hex.EncodeToString(p.PubKey[:8]),
-			)
-
-			if c.hub != nil {
-				c.hub.Broadcast("peers", map[string]any{
-					"pubkey":          hex.EncodeToString(p.PubKey),
-					"name":            p.Name,
-					"type":            p.Type,
-					"lat":             p.Lat,
-					"lon":             p.Lon,
-					"snr":             p.SNR,
-					"rssi":            p.RSSI,
-					"outPath":         hex.EncodeToString(p.OutPath),
-					"outPathHashSize": p.OutPathHashSize,
-					"lastAdvertTs":    p.LastAdvertTS,
-					"lastSeen":        p.LastSeen.Format(time.RFC3339),
-				})
-			}
-		})
 	})
+
+	c.node.OnPacket(meshcore.PayloadTypeAdvert, c.handleAdvert)
 
 	c.node.OnPacket(meshcore.PayloadTypeGrpTxt, func(pkt *meshcore.Packet) {
 		payload, ch, err := c.node.DecryptGroupText(pkt)
@@ -355,12 +310,12 @@ func (c *Companion) registerPacketHandlers() {
 			return
 		}
 
-		if payload.Sender == c.cfg.Name {
+		if payload.Sender == c.conf().Name {
 			return
 		}
 
 		// Firmware gate (BaseChatMesh::onGroupDataRecv): real chat is TXT_TYPE_PLAIN, dropping ~63/64 of the garbage a 1-byte-hash channel collision decrypts to.
-		if txtType := payload.Flags >> 2; txtType != txtTypePlain {
+		if txtType := payload.Flags >> 2; txtType != meshcore.TxtTypePlain {
 			c.log.Debug("dropping non-plain channel message",
 				"channel", ch.Name, "channelHash", ch.Hash, "txtType", txtType)
 			return
@@ -384,24 +339,29 @@ func (c *Companion) registerPacketHandlers() {
 		pathHashSize := int(pkt.PathHashSize())
 
 		msg := &store.Message{
-			CompanionID:  c.cfg.ID,
+			CompanionID:  c.conf().ID,
 			Channel:      ch.Name,
 			ChannelHash:  ch.Hash,
 			Sender:       payload.Sender,
 			Text:         payload.Text,
 			Direction:    "rx",
 			Timestamp:    time.Unix(int64(payload.Timestamp), 0),
+			ReceivedAt:   time.Now(),
 			SNR:          snrPtr,
 			RSSI:         rssiPtr,
 			PathHashes:   pkt.Path,
 			PathHashSize: &pathHashSize,
 			Hops:         &hops,
+			FloodScope:   c.floodScopeOf(pkt),
 		}
 
 		convoID := "channel:" + ch.Name
-		if blocked, err := c.store.BlockedSenders.IsBlocked(c.runCtx, c.cfg.ID, convoID, payload.Sender); err == nil && blocked {
+		if blocked, err := c.store.BlockedSenders.IsBlocked(c.runCtx, c.conf().ID, convoID, payload.Sender); err == nil && blocked {
 			c.log.Debug("blocked sender filtered", "sender", payload.Sender, "channel", ch.Name)
 			return
+		}
+		if a := c.app(); a != nil {
+			a.AppMessage(AppMessage{Channel: c.channelSlot(ch.Name), TxtType: meshcore.TxtTypePlain, Timestamp: payload.Timestamp, Text: channelText(payload.Sender, payload.Text), Packet: pkt})
 		}
 
 		c.store.WriteAsync(func() {
@@ -413,8 +373,8 @@ func (c *Companion) registerPacketHandlers() {
 			if c.echoTracker != nil && msg.ID != 0 {
 				c.echoTracker.Track(pkt.PacketHash(), echo.Sent{
 					MessageID:   msg.ID,
-					CompanionID: c.cfg.ID,
-					Companion:   c.cfg.Name,
+					CompanionID: c.conf().ID,
+					Companion:   c.conf().Name,
 					Channel:     ch.Name,
 				})
 			}
@@ -426,14 +386,16 @@ func (c *Companion) registerPacketHandlers() {
 
 			if c.hub != nil {
 				wsMsg := map[string]any{
-					"companion":    c.cfg.Name,
-					"companionId":  c.cfg.ID,
+					"companion":    c.conf().Name,
+					"companionId":  c.conf().ID,
 					"channel":      ch.Name,
 					"sender":       payload.Sender,
 					"text":         payload.Text,
 					"direction":    "rx",
 					"timestamp":    msg.Timestamp.UTC().Format(time.RFC3339),
+					"receivedAt":   msg.ReceivedAt.UTC().Format(time.RFC3339),
 					"id":           msg.ID,
+					"floodScope":   msg.FloodScope,
 					"hops":         hops,
 					"pathHashSize": pathHashSize,
 				}
@@ -510,39 +472,34 @@ func (c *Companion) registerPacketHandlers() {
 			return
 		}
 
-		if len(plaintext) < 5 {
-			c.log.Debug("DM plaintext too short")
+		dm, err := meshcore.ParseTextPlaintext(plaintext)
+		if err != nil {
+			c.log.Debug("DM plaintext too short", "error", err)
 			return
 		}
+		text := string(dm.Text)
 
-		flags := plaintext[4] >> 2
-		text, attemptByte := parseTextPlaintext(plaintext)
-
-		switch flags {
-		case txtTypeCliData:
+		switch dm.TxtType {
+		case meshcore.TxtTypeCLIData:
 			var senderKey [32]byte
 			copy(senderKey[:], senderPubKey)
-			c.repeaters.HandleCLIResponse(senderKey, text)
-			if pkt.IsRouteFlood() { // firmware: teach the sender our path (no ACK as extra)
-				if pr, err := c.buildPathReturn(senderPubKey, sharedSecret, pkt.Path, pkt.PathLength, 0, nil); err == nil {
-					if err := c.node.SendPacketDelayed(pr, node.PriorityFloodRelay, 0); err != nil {
-						c.log.Debug("failed to send CLI path return", "error", err)
-					}
-				}
+			// The firmware sends no ACK or path return for a CLI reply; one none of ours waits for is the app's, which it queues as it comes (onCommandDataRecv).
+			if a := c.app(); !c.repeaters.HandleCLIResponse(senderKey, text) && a != nil && senderIsContact {
+				a.AppMessage(AppMessage{Channel: -1, From: senderKey, TxtType: meshcore.TxtTypeCLIData, Timestamp: binary.LittleEndian.Uint32(plaintext[:4]), Text: text, Packet: pkt})
 			}
 			return
-		case txtTypeSignedPlain:
-			c.handleRoomPush(pkt, senderPubKey, senderPubKeyHex, sharedSecret, plaintext)
+		case meshcore.TxtTypeSignedPlain:
+			c.handleRoomPush(pkt, senderPubKey, senderPubKeyHex, sharedSecret, plaintext, dm)
 			return
-		case txtTypePlain:
+		case meshcore.TxtTypePlain:
 		default:
-			c.log.Debug("unsupported DM text type", "flags", flags)
+			c.log.Debug("unsupported DM text type", "flags", dm.TxtType)
 			return
 		}
 
 		// Gate before the ACK, so a sender the policy turns away sees a failed send rather than silence.
-		if !c.cfg.AllowsDMFrom(senderPubKeyHex, senderIsContact) {
-			c.log.Info("DM rejected", "from", senderName, "policy", c.cfg.DMPolicyOrDefault())
+		if !c.conf().AllowsDMFrom(senderPubKeyHex, senderIsContact) {
+			c.log.Info("DM rejected", "from", senderName, "policy", c.conf().DMPolicyOrDefault())
 			return
 		}
 
@@ -551,17 +508,20 @@ func (c *Companion) registerPacketHandlers() {
 			c.addDMSenderAsContact(senderPubKey, senderName)
 		}
 
-		// Plain-DM ack payload: [crc:4][attempt][random]
-		ackPlaintext := plaintext[:5+len(text)]
 		var randomByte [1]byte
 		rand.Read(randomByte[:])
-		c.sendDMAck(pkt, senderPubKey, sharedSecret, meshcore.BuildAckPayload(ackPlaintext, senderPubKey, attemptByte, randomByte[0]))
+		c.sendDMAck(pkt, senderPubKey, sharedSecret, meshcore.BuildTextAck(plaintext, senderPubKey, randomByte[0]))
 
 		// The ack goes out first: a retry means the sender never got one, and answering is the
 		// whole point. Past that a retransmission must not become a second message.
 		if c.recentDM(senderPubKey, binary.LittleEndian.Uint32(plaintext[:4]), text) {
-			c.log.Debug("duplicate DM ignored", "from", senderName, "attempt", attemptByte)
+			c.log.Debug("duplicate DM ignored", "from", senderName, "attempt", dm.Attempt)
 			return
+		}
+		if a := c.app(); a != nil {
+			m := AppMessage{Channel: -1, TxtType: meshcore.TxtTypePlain, Timestamp: binary.LittleEndian.Uint32(plaintext[:4]), Text: text, Packet: pkt}
+			copy(m.From[:], senderPubKey)
+			a.AppMessage(m)
 		}
 
 		channelKey := "dm:" + senderPubKeyHex
@@ -576,17 +536,20 @@ func (c *Companion) registerPacketHandlers() {
 			hopsPtr, sizePtr = &hops, &pathHashSize
 		}
 
+		now := time.Now()
 		msg := &store.Message{
-			CompanionID:  c.cfg.ID,
+			CompanionID:  c.conf().ID,
 			Channel:      channelKey,
 			ChannelHash:  0,
 			Sender:       senderName,
 			Text:         text,
 			Direction:    "rx",
-			Timestamp:    time.Now(),
+			Timestamp:    now,
+			ReceivedAt:   now,
 			PathHashes:   pkt.Path,
 			PathHashSize: sizePtr,
 			Hops:         hopsPtr,
+			FloodScope:   c.floodScopeOf(pkt),
 		}
 		if pkt.HasSignalInfo {
 			snr := float64(pkt.SNR)
@@ -604,14 +567,16 @@ func (c *Companion) registerPacketHandlers() {
 
 			if c.hub != nil {
 				wsMsg := map[string]any{
-					"companion":   c.cfg.Name,
-					"companionId": c.cfg.ID,
+					"companion":   c.conf().Name,
+					"companionId": c.conf().ID,
 					"channel":     channelKey,
 					"sender":      senderName,
 					"text":        text,
 					"direction":   "rx",
 					"timestamp":   msg.Timestamp.UTC().Format(time.RFC3339),
+					"receivedAt":  msg.ReceivedAt.UTC().Format(time.RFC3339),
 					"id":          msg.ID,
+					"floodScope":  msg.FloodScope,
 				}
 				if hopsPtr != nil {
 					wsMsg["hops"] = *hopsPtr
@@ -667,11 +632,14 @@ func (c *Companion) registerPacketHandlers() {
 			snrPtr = &snr
 		}
 		c.notifyTraceWaiter(tr.Tag, traceEcho{hops: hops, pathHex: pathHexes, hopSNRs: hopSNRs, snr: snrPtr})
+		if a := c.app(); a != nil {
+			a.AppTrace(pkt, tr)
+		}
 
 		if c.hub != nil {
 			wsMsg := map[string]any{
-				"companion":   c.cfg.Name,
-				"companionId": c.cfg.ID,
+				"companion":   c.conf().Name,
+				"companionId": c.conf().ID,
 				"tag":         tr.Tag,
 				"hops":        hops,
 				"path":        pathHexes,
@@ -695,6 +663,14 @@ func (c *Companion) registerPacketHandlers() {
 
 	c.node.OnPacket(meshcore.PayloadTypeReq, c.handleReq)
 
+	c.node.OnPacket(meshcore.PayloadTypeControl, func(pkt *meshcore.Packet) {
+		if a := c.app(); a != nil {
+			a.AppControl(pkt)
+		}
+	})
+
+	c.node.OnPacket(meshcore.PayloadTypeAck, c.handleAck)
+
 	c.node.OnPacket(meshcore.PayloadTypePath, func(pkt *meshcore.Packet) {
 		if c.repeaters.HandlePathPacket(pkt) {
 			return
@@ -717,7 +693,7 @@ func (c *Companion) dmCandidates(source byte) []dmCandidate {
 	var out []dmCandidate
 	seen := make(map[string]bool)
 
-	contacts, err := c.store.Contacts.List(c.runCtx, c.cfg.ID)
+	contacts, err := c.store.Contacts.List(c.runCtx, c.conf().ID)
 	if err != nil {
 		c.log.Error("failed to list contacts for DM decryption", "error", err)
 	}
@@ -766,7 +742,7 @@ func (c *Companion) addDMSenderAsContact(pubkey []byte, name string) {
 
 	c.store.WriteAsync(func() {
 		ctx := context.Background()
-		if err := c.store.Contacts.Add(ctx, c.cfg.ID, pubkey, name, peerType); err != nil {
+		if err := c.store.Contacts.Add(ctx, c.conf().ID, pubkey, name, peerType); err != nil {
 			c.log.Error("failed to add DM sender as contact", "error", err)
 			return
 		}
@@ -789,23 +765,6 @@ func (c *Companion) dispatchDMTriggers(dm trigger.DirectMessage, pkt *meshcore.P
 			h.HandleDirectMessage(dm, pkt)
 		}
 	}
-}
-
-// parseTextPlaintext splits a TXT_MSG plaintext into its text and the sender's attempt number.
-// The text ends at the first NUL, as the firmware's strlen does (BaseChatMesh.cpp:241): a retry
-// past attempt 3 hides the attempt byte AFTER that terminator, so trimming trailing NULs instead
-// leaves the suffix in the message and computes the ack over the wrong bytes, which the sender
-// then never accepts.
-func parseTextPlaintext(plaintext []byte) (string, byte) {
-	body := plaintext[5:]
-	if i := bytes.IndexByte(body, 0); i >= 0 {
-		body = body[:i]
-	}
-	var attempt byte
-	if 5+len(body)+1 < len(plaintext) {
-		attempt = plaintext[5+len(body)+1]
-	}
-	return string(body), attempt
 }
 
 // dmRetryWindow bounds how long a message is remembered for retry collapsing. The firmware gives up
@@ -850,21 +809,98 @@ func (c *Companion) learnedRoute(pubkey []byte) ([]byte, uint8, bool) {
 	return nil, 0, false
 }
 
-// reciprocalPathDelay matches the firmware's 500 ms on a reciprocal path return (Mesh.cpp:177).
-const reciprocalPathDelay = 500 * time.Millisecond
+// handleAck resends our route direct after a flood ACK from a peer we route to, as BaseChatMesh::onAckRecv (BaseChatMesh.cpp:372-382) does.
+func (c *Companion) handleAck(pkt *meshcore.Packet) {
+	if len(pkt.Payload) < 4 {
+		return
+	}
+	peer, ok := c.sentAcks.take(binary.LittleEndian.Uint32(pkt.Payload[:4]))
+	if !ok || !pkt.IsRouteFlood() {
+		return
+	}
+	pub := peer.PublicKey()
+	path, hashSize, ok := c.learnedRoute(pub[:])
+	if !ok {
+		return
+	}
+	if err := c.node.SendReciprocalPath(peer, pkt, path, hashSize, meshpath.ReturnRetryDelay); err != nil {
+		c.log.Debug("failed to send return path retry", "error", err)
+		return
+	}
+	c.log.Debug("sent return path retry", "peer", hex.EncodeToString(pub[:6]))
+}
 
-// sendReciprocalPathReturn teaches a peer its route to us, sent direct down the route they just
-// taught us. It carries no extra payload, so buildPathReturn salts it to keep the packet unique.
-func (c *Companion) sendReciprocalPathReturn(peerPubKey, secret []byte, pkt *meshcore.Packet, learnedPath []byte, hashSize uint8) {
-	rpath, err := c.buildPathReturn(peerPubKey, secret, pkt.Path, pkt.PathLength, 0, nil)
+// handleAdvert records a peer as firmware BaseChatMesh::onAdvertRecv does: an advert with invalid app data or no name is ignored.
+func (c *Companion) handleAdvert(pkt *meshcore.Packet) {
+	adv, err := meshcore.AdvertFromBytes(pkt.Payload)
 	if err != nil {
-		c.log.Debug("failed to build reciprocal path return", "error", err)
 		return
 	}
-	meshpath.Direct(rpath, learnedPath, hashSize)
-	if err := c.node.SendPacketDelayed(rpath, node.PriorityFloodRelay, reciprocalPathDelay); err != nil {
-		c.log.Debug("failed to send reciprocal path return", "error", err)
+	if !adv.Verify() {
 		return
 	}
-	c.log.Debug("sent reciprocal path return", "peer", hex.EncodeToString(peerPubKey[:min(6, len(peerPubKey))]), "hops", len(learnedPath)/int(max(hashSize, 1)))
+
+	appData := adv.AppData()
+	if appData.Name == "" { // the library accepts these on their signature, and they would blank a known peer's name, type and position
+		return
+	}
+	p := &store.Peer{
+		PubKey:          adv.PublicKey.PublicKeyBytes(),
+		Name:            appData.Name,
+		Type:            appData.Type,
+		Lat:             appData.Lat,
+		Lon:             appData.Lon,
+		Feat1:           appData.Feat1,
+		Feat2:           appData.Feat2,
+		OutPath:         pkt.Path,
+		OutPathHashSize: meshpath.AdvertHashSize(pkt),
+		LastAdvertTS:    adv.Timestamp,
+		LastSeen:        time.Now(),
+	}
+	if pkt.HasSignalInfo {
+		snr := float64(pkt.SNR)
+		p.SNR = &snr
+		p.RSSI = &pkt.RSSI
+	}
+
+	c.store.WriteAsync(func() {
+		if err := c.store.Peers.Upsert(context.Background(), p); err != nil {
+			c.log.Error("failed to persist peer", "error", err)
+			return
+		}
+
+		// Advert wins on location, but only when it carries one — a no-GPS advert leaves a hand-set location alone.
+		hasLoc := p.HasLocation()
+		if err := c.store.Contacts.RefreshFromAdvert(
+			context.Background(), p.PubKey, appData.Name, appData.Type,
+			p.Lat, p.Lon, p.Feat1, p.Feat2, p.LastSeen, p.LastAdvertTS, hasLoc,
+		); err != nil {
+			c.log.Error("failed to refresh contact from advert", "error", err)
+		}
+		if a := c.app(); a != nil && adv.PublicKey.PublicKey() != c.node.Identity().PublicKey() {
+			a.AppAdvert(adv.PublicKey.PublicKey())
+		}
+
+		c.log.Debug("peer persisted",
+			"name", appData.Name,
+			"type", appData.Type,
+			"pubkey", hex.EncodeToString(p.PubKey[:8]),
+		)
+
+		if c.hub != nil {
+			c.hub.Broadcast("peers", map[string]any{
+				"pubkey":          hex.EncodeToString(p.PubKey),
+				"name":            p.Name,
+				"type":            p.Type,
+				"lat":             p.Lat,
+				"lon":             p.Lon,
+				"snr":             p.SNR,
+				"rssi":            p.RSSI,
+				"outPath":         hex.EncodeToString(p.OutPath),
+				"outPathHashSize": p.OutPathHashSize,
+				"lastAdvertTs":    p.LastAdvertTS,
+				"lastSeen":        p.LastSeen.Format(time.RFC3339),
+			})
+		}
+	})
 }

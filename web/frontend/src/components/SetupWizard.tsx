@@ -143,6 +143,8 @@ export function SetupWizard({
           latitude: lat === "" ? null : parseFloat(lat) || 0,
           longitude: lon === "" ? null : parseFloat(lon) || 0,
           privateKey: privateKey.trim() || undefined,
+          floodScope: "inherit",
+          shareLocation: true,
           advertInterval: advertInterval.trim()
             ? parseInt(advertInterval, 10) || 0
             : undefined,
@@ -163,6 +165,7 @@ export function SetupWizard({
         tx: tx === "" ? null : parseInt(tx, 10),
         pathHashSize: parseInt(pathHashSize, 10) || 1,
         dutyCycle: settings.dutyCycle,
+        packetRetentionDays: settings.packetRetentionDays,
         ...(modemToken !== "" ? { modemToken } : {}),
         setupComplete: true,
       });
@@ -435,7 +438,7 @@ export function SetupWizard({
         )}
 
         {/* Footer / navigation */}
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4">
           <div>
             {step !== "welcome" && (
               <Button
@@ -458,7 +461,7 @@ export function SetupWizard({
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2">
             {step === "companion" && (
               <Button
                 variant="ghost"

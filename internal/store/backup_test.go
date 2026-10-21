@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -197,6 +198,65 @@ func TestStageRestore_AndAdopt(t *testing.T) {
 	}
 }
 
+// A crash leaves the last writes in the WAL, which a restore deleted rather than keeping them with the database it set aside.
+func TestAdoptPendingRestore_TheSetAsideDatabaseKeepsItsLastWrites(t *testing.T) {
+	for _, foldable := range []bool{true, false} {
+		t.Run(fmt.Sprintf("foldable %v", foldable), func(t *testing.T) {
+			if !foldable && os.Getuid() == 0 {
+				t.Skip("root reads a file whatever its mode")
+			}
+			dir := t.TempDir()
+			running := filepath.Join(dir, "running.db")
+			st, err := Open(t.Context(), running)
+			if err != nil {
+				t.Fatal(err)
+			}
+			exec(t, st.db, `INSERT INTO companions (id, name, private_key, pubkey) VALUES (1, 'last write', 'aa', 'k1')`)
+			// Copying the files while the store still holds them open is what a kill -9 leaves on disk.
+			live := filepath.Join(dir, "meshcore.db")
+			for _, sfx := range []string{"", "-wal"} {
+				data, err := os.ReadFile(running + sfx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(live+sfx, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st.Close()
+			if fileSize(t, live+"-wal") == 0 {
+				t.Fatal("the crashed database has an empty WAL, so this tests nothing")
+			}
+			markedDB(t, RestorePath(live), LatestSchemaVersion(), "restored")
+			// An unreadable WAL cannot be folded in, so it has to move with the database instead.
+			if !foldable {
+				if err := os.Chmod(live+"-wal", 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := AdoptPendingRestore(live); err != nil {
+				t.Fatal(err)
+			}
+			_, err = os.Stat(live + ".replaced-wal")
+			if foldable && err == nil {
+				t.Error("the set-aside database needs a WAL beside it, so moving it back alone loses its last writes")
+			}
+			if !foldable {
+				if err := os.Chmod(live+".replaced-wal", 0o600); err != nil {
+					t.Fatalf("the WAL did not move with the database: %v", err)
+				}
+			}
+			if got := markedName(t, live+".replaced"); got != "last write" {
+				t.Errorf("the set-aside database holds %q, want its last write", got)
+			}
+			if got := markedName(t, live); got != "restored" {
+				t.Errorf("the live database holds %q, want the restore", got)
+			}
+		})
+	}
+}
+
 // seedForPrune returns a backup copy of a DB with two companions and mixed fresh/stale history.
 func seedForPrune(t *testing.T, opts PruneOptions) *sql.DB {
 	t.Helper()
@@ -215,20 +275,22 @@ func seedForPrune(t *testing.T, opts PruneOptions) *sql.DB {
 	}
 	exec(`INSERT INTO companions (id, name, private_key, pubkey) VALUES
 		(1,'keep','aa','k1'), (2,'drop','bb','k2')`)
-	exec(`INSERT INTO companion_contacts (companion_id, peer_pubkey, name) VALUES
-		(1, X'01', 'c-keep'), (2, X'02', 'c-drop')`)
-	exec(`INSERT INTO messages (companion_id, channel, channel_hash, direction, timestamp) VALUES
-		(1,'Public',0,'rx', datetime('now','-1 days')),
-		(1,'Public',0,'rx', datetime('now','-40 days')),
-		(2,'Public',0,'rx', datetime('now','-1 days'))`)
+	exec(`INSERT INTO companion_contacts (companion_id, peer_pubkey, name, added_at) VALUES
+		(1, X'01', 'c-keep', unixepoch() * 1000), (2, X'02', 'c-drop', unixepoch() * 1000)`)
+	exec(`INSERT INTO messages (companion_id, channel, channel_hash, direction, timestamp, received_at) VALUES
+		(1,'Public',0,'rx', unixepoch('now','-1 days') * 1000, unixepoch('now','-1 days') * 1000),
+		(1,'Public',0,'rx', unixepoch('now','-40 days') * 1000, unixepoch('now','-40 days') * 1000),
+		(2,'Public',0,'rx', unixepoch('now','-1 days') * 1000, unixepoch('now','-1 days') * 1000)`)
+	exec(`INSERT INTO message_echoes (message_id, received_at) VALUES (1, unixepoch() * 1000), (2, unixepoch() * 1000), (3, unixepoch() * 1000)`)
 	exec(`INSERT INTO packets (direction, raw, received_at) VALUES
-		('rx','00', datetime('now','-1 days')),
-		('rx','01', datetime('now','-40 days'))`)
-	exec(`INSERT INTO discovered_peers (pubkey, name) VALUES ('p1','peer')`)
+		('rx','00', unixepoch('now','-1 days') * 1000),
+		('rx','01', unixepoch('now','-40 days') * 1000)`)
+	exec(`INSERT INTO discovered_peers (pubkey, name, last_seen) VALUES ('p1','peer', unixepoch() * 1000)`)
 	exec(`INSERT INTO node_metrics (ts, pubkey, metric, value) VALUES
 		(unixepoch('now','-1 days'),'p1','battery',1),
 		(unixepoch('now','-40 days'),'p1','battery',2)`)
 	exec(`INSERT INTO repeater (id, name, private_key) VALUES (1,'rptr','cc')`)
+	exec(`INSERT INTO mqtt_settings (id, node_kind) VALUES (1,'repeater')`)
 	exec(`INSERT INTO sensors (id, provider, kind, name) VALUES (1,'i2c','shtc3','air')`)
 	exec(`INSERT INTO telemetry_map (node_kind, node_id, channel, lpp_type, sensor_id, metric) VALUES
 		('companion',1,2,103,1,'temperature'),
@@ -302,6 +364,28 @@ func TestPruneBackup_SelectsCompanionsAndWindows(t *testing.T) {
 	}
 	if n := count(t, db, "SELECT count(*) FROM repeater WHERE private_key <> ''"); n != 0 {
 		t.Error("repeater identity key was not stripped")
+	}
+}
+
+// An echo goes with its message, so a day window kept no echoes at all, even those of the messages it kept.
+func TestPruneBackup_EchoesFollowTheirMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		days int
+		want string
+	}{
+		{"7 days", 7, "1"},
+		{"none", DaysNone, ""},
+		{"all", DaysAll, "1,2"},
+	} {
+		db := seedForPrune(t, PruneOptions{CompanionIDs: []int64{1}, MessageDays: tc.days})
+		var got string
+		if err := db.QueryRow(`SELECT coalesce(group_concat(message_id), '') FROM (SELECT message_id FROM message_echoes ORDER BY message_id)`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: echoes kept for messages %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -402,6 +486,34 @@ func TestCountForBackup_MatchesSelection(t *testing.T) {
 	}
 }
 
+// The wizard's counts use the same cutoffs PruneBackup deletes by: an hour either side of the window decides it.
+func TestCountForBackup_DayWindows(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	exec(t, st.db, `INSERT INTO companions (id, name, private_key) VALUES (1,'a','aa')`)
+	exec(t, st.db, `INSERT INTO messages (companion_id, channel, channel_hash, direction, timestamp, received_at) VALUES
+		(1,'Public',0,'rx', unixepoch('now','-7 days','+1 hour') * 1000, unixepoch('now','-7 days','+1 hour') * 1000),
+		(1,'Public',0,'rx', unixepoch('now','-7 days','-1 hour') * 1000, unixepoch('now','-7 days','-1 hour') * 1000)`)
+	exec(t, st.db, `INSERT INTO packets (direction, raw, received_at) VALUES
+		('rx','00', unixepoch('now','-7 days','+1 hour') * 1000),
+		('rx','01', unixepoch('now','-7 days','-1 hour') * 1000)`)
+	exec(t, st.db, `INSERT INTO node_metrics (ts, pubkey, metric, value) VALUES
+		(unixepoch('now','-7 days','+1 hour'),'p1','battery',1),
+		(unixepoch('now','-7 days','-1 hour'),'p1','battery',2)`)
+
+	got, err := st.CountForBackup(ctx, PruneOptions{CompanionIDs: []int64{1}, MessageDays: 7, PacketDays: 7, MetricDays: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Messages != 1 || got.Packets != 1 || got.Metrics != 1 {
+		t.Errorf("messages %d, packets %d, metrics %d, want 1 of each inside 7 days", got.Messages, got.Packets, got.Metrics)
+	}
+}
+
 func TestPruneBackup_DropsAllHistoryByDefault(t *testing.T) {
 	db := seedForPrune(t, PruneOptions{
 		CompanionIDs: []int64{1, 2}, Contacts: true, Repeater: true,
@@ -454,5 +566,19 @@ func TestPruneBackup_KeepsRepeaterMap(t *testing.T) {
 	})
 	if n := count(t, db, "SELECT COUNT(*) FROM telemetry_map WHERE node_kind='repeater'"); n != 1 {
 		t.Errorf("repeater map rows = %d, want 1", n)
+	}
+}
+
+// MQTT fed by a repeater the backup leaves out would stop the restored install starting, so it falls back to a companion.
+func TestPruneBackup_MqttFollowsTheRepeater(t *testing.T) {
+	for _, keep := range []bool{true, false} {
+		db := seedForPrune(t, PruneOptions{CompanionIDs: []int64{1}, Repeater: keep})
+		var kind string
+		if err := db.QueryRow("SELECT node_kind FROM mqtt_settings WHERE id = 1").Scan(&kind); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[bool]string{true: "repeater", false: "companion"}[keep]; kind != want {
+			t.Errorf("repeater kept %v: mqtt fed by %q, want %q", keep, kind, want)
+		}
 	}
 }

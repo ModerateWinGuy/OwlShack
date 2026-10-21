@@ -3,7 +3,7 @@ package api
 import (
 	"fmt"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 type ChannelInfo struct {
@@ -62,7 +62,7 @@ func PacketSummary(pkt *meshcore.Packet, channels ChannelLookup) string {
 		if err != nil {
 			return "Control"
 		}
-		switch ctrl.Flags {
+		switch ctrl.SubType() {
 		case meshcore.ControlSubTypeDiscoverReq:
 			return "Control: Discover Request"
 		case meshcore.ControlSubTypeDiscoverResp:

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 // The full-document PUT carries no surrogate ids, so companions are upserted BY NAME to keep theirs stable; children are replaced wholesale.
@@ -116,24 +116,27 @@ func loadConfigRows(ctx context.Context, st *store.Store) (*configRows, error) {
 func assembleFromRows(rows *configRows) *config.Config {
 	s := rows.settings
 	cfg := &config.Config{
-		LogLevel:       s.LogLevel,
-		ConnectionType: emptyToNil(s.ConnectionType),
-		Connection:     s.Connection,
-		BaudRate:       s.BaudRate,
-		SPIBoard:       s.SPIBoard,
-		Freq:           s.Freq,
-		Bw:             s.BW,
-		SF:             intToU8Ptr(s.SF),
-		CR:             intToU8Ptr(s.CR),
-		TX:             intToU8Ptr(s.TX),
-		ListenAddr:     s.ListenAddr,
-		MapProvider:    &s.MapProvider,
-		MapDarkStyle:   &s.MapDarkStyle,
-		MapTileKey:     s.MapTileKey,
-		ModemToken:     s.ModemToken,
-		PathHashSize:   s.PathHashSize,
-		DutyCycle:      s.DutyCyclePct,
-		SetupComplete:  boolPtr(s.SetupComplete),
+		LogLevel:            s.LogLevel,
+		ConnectionType:      emptyToNil(s.ConnectionType),
+		Connection:          s.Connection,
+		BaudRate:            s.BaudRate,
+		SPIBoard:            s.SPIBoard,
+		Freq:                s.Freq,
+		Bw:                  s.BW,
+		SF:                  intToU8Ptr(s.SF),
+		CR:                  intToU8Ptr(s.CR),
+		TX:                  intToU8Ptr(s.TX),
+		ListenAddr:          s.ListenAddr,
+		MapProvider:         &s.MapProvider,
+		MapDarkStyle:        &s.MapDarkStyle,
+		MapTileKey:          s.MapTileKey,
+		ModemToken:          s.ModemToken,
+		PathHashSize:        s.PathHashSize,
+		DutyCycle:           s.DutyCyclePct,
+		PacketRetentionDays: &s.PacketRetentionDays,
+		SetupComplete:       boolPtr(s.SetupComplete),
+		FloodRegions:        floodRegionsToConfig(s.FloodRegions),
+		FloodScope:          config.FloodScope(s.FloodScope),
 	}
 
 	chansByComp := make(map[int64][]store.CompanionChannel)
@@ -164,11 +167,14 @@ func assembleFromRows(rows *configRows) *config.Config {
 			TelemetryBase:        emptyToNil(c.TelemBase),
 			TelemetryLocation:    emptyToNil(c.TelemLoc),
 			TelemetryEnvironment: emptyToNil(c.TelemEnv),
+			FloodScope:           config.FloodScope(c.FloodScope),
+			App:                  config.AppAccess{Enabled: c.AppEnabled, Port: c.AppPort, QueueSize: c.AppQueueSize},
+			ShareLocation:        &c.ShareLocation,
 		}
 		if chs := chansByComp[c.ID]; len(chs) > 0 {
 			list := make(config.ChannelList, 0, len(chs))
 			for _, ch := range chs {
-				list = append(list, config.ChannelRef{Name: ch.Name, PrivateKey: ch.PrivateKey})
+				list = append(list, config.ChannelRef{Name: ch.Name, PrivateKey: ch.PrivateKey, FloodScope: config.FloodScope(ch.FloodScope), Slot: ch.Slot})
 			}
 			comp.Channels = &list
 		}
@@ -190,12 +196,13 @@ func assembleFromRows(rows *configRows) *config.Config {
 					FailoverTimeout:    t.FailoverTimeout,
 					Location:           locationFromStore(t.Location),
 					Regions:            t.Regions,
+					FloodScope:         config.FloodScope(t.FloodScope),
 				}
 				if len(t.ChannelIDs) > 0 {
 					cl := make(config.ChannelList, 0, len(t.ChannelIDs))
 					for _, cid := range t.ChannelIDs {
 						if ch, ok := chanByID[cid]; ok {
-							cl = append(cl, config.ChannelRef{Name: ch.Name, PrivateKey: ch.PrivateKey})
+							cl = append(cl, config.ChannelRef{Name: ch.Name, PrivateKey: ch.PrivateKey, FloodScope: config.FloodScope(ch.FloodScope)})
 						}
 					}
 					tc.Channels = &cl
@@ -225,14 +232,14 @@ func assembleFromRows(rows *configRows) *config.Config {
 			DirectTxDelayFactor: r.DirectTxDelayFactor,
 			RxDelayBase:         r.RxDelayBase,
 			MultiAcks:           r.MultiAcks,
-			DefaultRegion:       r.DefaultRegion,
+			FloodScope:          config.FloodScope(r.FloodScope),
 			HomeRegion:          r.HomeRegion,
 			AdminPassword:       r.AdminPassword,
 			GuestPassword:       r.GuestPassword,
 			OwnerInfo:           r.OwnerInfo,
 		}
 		for _, rg := range r.Regions {
-			cfg.Repeater.Regions = append(cfg.Repeater.Regions, config.RepeaterRegion{Name: rg.Name, DenyFlood: rg.DenyFlood})
+			cfg.Repeater.Regions = append(cfg.Repeater.Regions, config.RepeaterRegion{Name: rg.Name, Parent: rg.Parent, DenyFlood: rg.DenyFlood})
 		}
 	}
 
@@ -245,7 +252,10 @@ func assembleFromRows(rows *configRows) *config.Config {
 			Owner:          mq.Owner,
 			Email:          mq.Email,
 		}
-		if mq.NodeCompanionID != nil {
+		if mq.NodeKind == config.MqttNodeRepeater {
+			kind := config.MqttNodeRepeater
+			m.NodeKind = &kind
+		} else if mq.NodeCompanionID != nil {
 			if name, ok := idToName[*mq.NodeCompanionID]; ok {
 				m.Node = &name
 			}
@@ -290,7 +300,7 @@ func hasMqttConfig(mq *store.MqttSettings, brokers []store.Broker) bool {
 	if len(brokers) > 0 {
 		return true
 	}
-	return mq.Enabled != nil || mq.NodeCompanionID != nil || mq.IataCode != nil ||
+	return mq.Enabled != nil || mq.NodeKind == config.MqttNodeRepeater || mq.NodeCompanionID != nil || mq.IataCode != nil ||
 		mq.StatusInterval != nil || mq.Owner != nil || mq.Email != nil
 }
 
@@ -304,24 +314,27 @@ func writeConfigToTables(ctx context.Context, st *store.Store, cfg *config.Confi
 		connType = scheme
 	}
 	if err := st.Settings.Set(ctx, &store.Settings{
-		LogLevel:       cfg.LogLevel,
-		ConnectionType: connType,
-		Connection:     cfg.Connection,
-		BaudRate:       cfg.BaudRate,
-		SPIBoard:       cfg.SPIBoard,
-		Freq:           cfg.Freq,
-		BW:             cfg.Bw,
-		SF:             u8ToIntPtr(cfg.SF),
-		CR:             u8ToIntPtr(cfg.CR),
-		TX:             u8ToIntPtr(cfg.TX),
-		ListenAddr:     cfg.ListenAddr,
-		MapProvider:    cfg.MapProviderOr(),
-		MapDarkStyle:   cfg.MapDarkStyleOr(),
-		MapTileKey:     cfg.MapTileKey,
-		ModemToken:     cfg.ModemToken,
-		PathHashSize:   cfg.PathHashSize,
-		DutyCyclePct:   cfg.DutyCycle,
-		SetupComplete:  cfg.SetupComplete != nil && *cfg.SetupComplete,
+		LogLevel:            cfg.LogLevel,
+		ConnectionType:      connType,
+		Connection:          cfg.Connection,
+		BaudRate:            cfg.BaudRate,
+		SPIBoard:            cfg.SPIBoard,
+		Freq:                cfg.Freq,
+		BW:                  cfg.Bw,
+		SF:                  u8ToIntPtr(cfg.SF),
+		CR:                  u8ToIntPtr(cfg.CR),
+		TX:                  u8ToIntPtr(cfg.TX),
+		ListenAddr:          cfg.ListenAddr,
+		MapProvider:         cfg.MapProviderOr(),
+		MapDarkStyle:        cfg.MapDarkStyleOr(),
+		MapTileKey:          cfg.MapTileKey,
+		ModemToken:          cfg.ModemToken,
+		PathHashSize:        cfg.PathHashSize,
+		DutyCyclePct:        cfg.DutyCycle,
+		PacketRetentionDays: cfg.PacketRetentionDaysOr(),
+		SetupComplete:       cfg.SetupComplete != nil && *cfg.SetupComplete,
+		FloodRegions:        floodRegionsToStore(cfg.FloodRegions),
+		FloodScope:          string(cfg.FloodScope),
 	}); err != nil {
 		return err
 	}
@@ -353,6 +366,12 @@ func writeConfigToTables(ctx context.Context, st *store.Store, cfg *config.Confi
 			TelemBase: config.TelemetryModeOrDefault(cc.TelemetryBase),
 			TelemLoc:  config.TelemetryModeOrDefault(cc.TelemetryLocation),
 			TelemEnv:  config.TelemetryModeOrDefault(cc.TelemetryEnvironment),
+
+			FloodScope:    string(cc.FloodScope),
+			AppEnabled:    cc.App.Enabled,
+			AppPort:       cc.App.Port,
+			AppQueueSize:  cc.App.QueueSize,
+			ShareLocation: cc.SharesLocation(),
 		}
 		if prev, ok := byName[cc.Name]; ok {
 			row.ID = prev.ID
@@ -393,7 +412,7 @@ func writeRepeater(ctx context.Context, st *store.Store, cfg *config.Config) err
 	pub, _ := config.PubKeyHexFromSeed(r.PrivateKey)
 	var regions []store.RepeaterRegion
 	for _, rg := range r.Regions {
-		regions = append(regions, store.RepeaterRegion{Name: rg.Name, DenyFlood: rg.DenyFlood})
+		regions = append(regions, store.RepeaterRegion{Name: rg.Name, Parent: rg.Parent, DenyFlood: rg.DenyFlood})
 	}
 	return st.Repeater.Set(ctx, &store.Repeater{
 		Name:                r.Name,
@@ -413,7 +432,7 @@ func writeRepeater(ctx context.Context, st *store.Store, cfg *config.Config) err
 		DirectTxDelayFactor: r.DirectTxDelayFactor,
 		RxDelayBase:         r.RxDelayBase,
 		MultiAcks:           r.MultiAcks,
-		DefaultRegion:       r.DefaultRegion,
+		FloodScope:          string(r.FloodScope),
 		HomeRegion:          r.HomeRegion,
 		AdminPassword:       r.AdminPassword,
 		GuestPassword:       r.GuestPassword,
@@ -436,12 +455,18 @@ func replaceCompanionChildren(ctx context.Context, st *store.Store, companionID 
 
 	chanID := make(map[string]int64)
 	if cc.Channels != nil {
-		for _, ch := range *cc.Channels {
-			cr := store.CompanionChannel{CompanionID: companionID, Name: ch.Name, PrivateKey: ch.PrivateKey}
-			if err := st.Channels.Create(ctx, &cr); err != nil {
-				return err
+		// Channels with a slot first, so one without cannot take it.
+		for _, pass := range []bool{true, false} {
+			for _, ch := range *cc.Channels {
+				if (ch.Slot != nil) != pass {
+					continue
+				}
+				cr := store.CompanionChannel{CompanionID: companionID, Name: ch.Name, PrivateKey: ch.PrivateKey, FloodScope: string(ch.FloodScope), Slot: ch.Slot}
+				if err := st.Channels.Create(ctx, &cr); err != nil {
+					return err
+				}
+				chanID[ch.Name] = cr.ID
 			}
-			chanID[ch.Name] = cr.ID
 		}
 	}
 
@@ -464,7 +489,7 @@ func replaceCompanionChildren(ctx context.Context, st *store.Store, companionID 
 				id, ok := chanID[ref.Name]
 				if !ok {
 					// A trigger channel outside the companion's list shouldn't happen; create it so a private key is never dropped.
-					cr := store.CompanionChannel{CompanionID: companionID, Name: ref.Name, PrivateKey: ref.PrivateKey}
+					cr := store.CompanionChannel{CompanionID: companionID, Name: ref.Name, PrivateKey: ref.PrivateKey, FloodScope: string(ref.FloodScope)}
 					if err := st.Channels.Create(ctx, &cr); err != nil {
 						return err
 					}
@@ -491,6 +516,7 @@ func replaceCompanionChildren(ctx context.Context, st *store.Store, companionID 
 			Location:           locationToStore(tg.Location),
 			Regions:            tg.Regions,
 			ChannelIDs:         chIDs,
+			FloodScope:         string(tg.FloodScope),
 		}
 		if err := st.Triggers.Create(ctx, &tr); err != nil {
 			return err
@@ -500,18 +526,23 @@ func replaceCompanionChildren(ctx context.Context, st *store.Store, companionID 
 }
 
 func writeMqtt(ctx context.Context, st *store.Store, cfg *config.Config, nameToID map[string]int64) error {
-	var mq store.MqttSettings
+	mq := store.MqttSettings{NodeKind: config.MqttNodeCompanion}
 	var brokers []config.BrokerConfig
+	if cfg.Mqtt.FedByRepeater() {
+		mq.NodeKind = config.MqttNodeRepeater
+	}
 	if cfg.Mqtt != nil {
 		mq.Enabled = cfg.Mqtt.Enabled
 		mq.IataCode = cfg.Mqtt.IataCode
 		mq.StatusInterval = cfg.Mqtt.StatusInterval
 		mq.Owner = cfg.Mqtt.Owner
 		mq.Email = cfg.Mqtt.Email
-		if cfg.Mqtt.Node != nil && *cfg.Mqtt.Node != "" {
-			if id, ok := nameToID[*cfg.Mqtt.Node]; ok {
-				mq.NodeCompanionID = &id
-			}
+		node := ""
+		if cfg.Mqtt.Node != nil {
+			node = *cfg.Mqtt.Node
+		}
+		if id, ok := nameToID[node]; ok && node != "" {
+			mq.NodeCompanionID = &id
 		}
 		brokers = cfg.Mqtt.Brokers
 	}
@@ -571,6 +602,7 @@ func initConfigTables(ctx context.Context, st *store.Store) (*config.Config, err
 		if err := cfg.EnsureNodeKeys(); err != nil {
 			return nil, err
 		}
+		nameImportedMqttNode(cfg)
 		if err := persistToTables(ctx, st, cfg); err != nil {
 			return nil, err
 		}
@@ -592,6 +624,15 @@ func initConfigTables(ctx context.Context, st *store.Store) (*config.Config, err
 	return readConfigFromTables(ctx, st)
 }
 
+// nameImportedMqttNode stores the node an imported MQTT block spoke as when it named none: the first companion.
+func nameImportedMqttNode(cfg *config.Config) {
+	if cfg.Mqtt == nil || cfg.Mqtt.FedByRepeater() || (cfg.Mqtt.Node != nil && *cfg.Mqtt.Node != "") || len(cfg.Companions) == 0 {
+		return
+	}
+	name := cfg.Companions[0].Name
+	cfg.Mqtt.Node = &name
+}
+
 // persistToTables writes a config through the store's single writer goroutine.
 func persistToTables(ctx context.Context, st *store.Store, cfg *config.Config) error {
 	var werr error
@@ -606,4 +647,20 @@ func ptrToSlice(p *[]string) []string {
 		return nil
 	}
 	return *p
+}
+
+func floodRegionsToConfig(in []store.FloodRegion) []config.FloodRegion {
+	out := make([]config.FloodRegion, len(in))
+	for i, rg := range in {
+		out[i] = config.FloodRegion{Name: rg.Name, Parent: rg.Parent}
+	}
+	return out
+}
+
+func floodRegionsToStore(in []config.FloodRegion) []store.FloodRegion {
+	out := make([]store.FloodRegion, len(in))
+	for i, rg := range in {
+		out[i] = store.FloodRegion{Name: rg.Name, Parent: rg.Parent}
+	}
+	return out
 }

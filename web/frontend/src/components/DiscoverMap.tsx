@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
-import { themeTileLayer, useThemeTiles } from "@/lib/leaflet";
+import { labelMarker, themeTileLayer, useThemeTiles } from "@/lib/leaflet";
 import { snrFill } from "@/components/SignalStrength";
 import { drawLink, LINK_STAGGER } from "@/lib/mapLinks";
 import { cn } from "@/lib/utils";
@@ -25,7 +25,7 @@ function dotIcon(color: string): L.DivIcon {
   });
 }
 
-function originIcon(): L.DivIcon {
+export function originIcon(): L.DivIcon {
   return L.divIcon({
     className: "meshcore-discover-origin",
     html: `<span style="display:block;width:16px;height:16px;border-radius:9999px;border:3px solid var(--primary);background:transparent;box-shadow:0 0 0 2px rgba(0,0,0,0.65),0 0 8px var(--primary);"></span>`,
@@ -85,8 +85,7 @@ export function DiscoverMap({
     if (nodes.length === 0) return;
 
     nodes.forEach((n) => {
-      L.marker([n.lat, n.lon], { icon: dotIcon(snrFill(n.snr)) })
-        .addTo(layer)
+      labelMarker(L.marker([n.lat, n.lon], { icon: dotIcon(snrFill(n.snr)) }).addTo(layer), n.name || "unknown")
         .bindTooltip(
           `${n.name || "unknown"} · we hear ${n.snr.toFixed(2)} dB · they hear ${n.reportedSnr.toFixed(2)} dB`,
         )
@@ -96,8 +95,7 @@ export function DiscoverMap({
     // Last and lifted: a node can sit metres from us, and our own position is the one marker that
     // must never end up hidden under another.
     if (origin) {
-      L.marker(origin, { icon: originIcon(), zIndexOffset: 1000 })
-        .addTo(layer)
+      labelMarker(L.marker(origin, { icon: originIcon(), zIndexOffset: 1000 }).addTo(layer), "This node")
         .bindTooltip("this node");
     }
 

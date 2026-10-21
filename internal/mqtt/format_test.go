@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/meshcore-go/OwlShack/internal/modem"
-	meshcore "github.com/meshcore-go/meshcore-go"
+	"github.com/OwlShack/OwlShack/internal/modem"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 // Busy and queue drops mean opposite things to an operator, so a cross-wired mapping inverts the diagnosis silently.
@@ -117,7 +117,7 @@ func TestFormatStatus_BoardReadings(t *testing.T) {
 		return got
 	}
 
-	msg := read(modem.DeviceStats{BatteryMV: 3900, HaveBattery: true, NoiseFloor: -120})
+	msg := read(modem.DeviceStats{BatteryMV: 3900, HaveBattery: true, NoiseFloor: -120, HaveNoiseFloor: true})
 	if _, ok := msg["battery_percent"]; ok {
 		t.Error("battery_percent is not in the schema; battery_mv inside stats is")
 	}
@@ -145,6 +145,11 @@ func TestFormatStatus_BoardReadings(t *testing.T) {
 	stats, _ = read(modem.DeviceStats{NoiseFloor: -120})["stats"].(map[string]any)
 	if _, ok := stats["battery_mv"]; ok {
 		t.Errorf("battery_mv = %v, must be omitted when there is no battery to measure", stats["battery_mv"])
+	}
+
+	// A radio that hasn't sampled yet has no noise floor; 0 dBm would read as a deafening channel.
+	if nf, ok := stats["noise_floor"]; ok {
+		t.Errorf("noise_floor = %v before the radio measured one, want it omitted", nf)
 	}
 }
 
@@ -190,7 +195,7 @@ func TestFormatStatus_SPICountersAreOmittedUnlessMeasured(t *testing.T) {
 	}
 }
 
-// The KISS-only counters went to pointers internally; this schema is shared with meshcore-bot and
+// The KISS-only counters went to pointers internally; this schema is shared with OwlBot and
 // CoreScope, so a nil must still publish 0 there rather than silently dropping the key.
 func TestFormatStatus_KISSCountersStayOnTheWireWhenUnmeasured(t *testing.T) {
 	raw, err := formatStatus("online", "n", "id", modem.RadioInfo{}, modem.DeviceStats{},

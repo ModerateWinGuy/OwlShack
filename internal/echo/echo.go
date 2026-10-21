@@ -7,9 +7,9 @@ import (
 
 	"log/slog"
 
-	"github.com/meshcore-go/OwlShack/internal/api"
-	"github.com/meshcore-go/OwlShack/internal/store"
-	meshcore "github.com/meshcore-go/meshcore-go"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/store"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
 
 // Sent identifies the message a tracked packet belongs to. A struct rather than four arguments:
@@ -39,15 +39,18 @@ type pendingKey struct {
 type Tracker struct {
 	mu      sync.Mutex
 	pending map[pendingKey]*entry
-	store   *store.Store
-	hub     *api.Hub
-	log     *slog.Logger
-	ttl     time.Duration
+	// queued is each post handed to the radio whose transmit result has not come yet.
+	queued map[[meshcore.PacketHashSize]byte]Sent
+	store  *store.Store
+	hub    *api.Hub
+	log    *slog.Logger
+	ttl    time.Duration
 }
 
 func NewTracker(st *store.Store, hub *api.Hub, log *slog.Logger) *Tracker {
 	return &Tracker{
 		pending: make(map[pendingKey]*entry),
+		queued:  make(map[[meshcore.PacketHashSize]byte]Sent),
 		store:   st,
 		hub:     hub,
 		log:     log,
@@ -63,6 +66,45 @@ func (t *Tracker) Track(hash [meshcore.PacketHashSize]byte, sent Sent) {
 	}
 	t.mu.Unlock()
 	t.log.Debug("echo tracked", "messageID", sent.MessageID, "hash", hash, "companion", sent.Companion, "channel", sent.Channel)
+}
+
+// TrackQueued tracks an outgoing post from when it joins the TX queue, so its transmit result can settle it.
+func (t *Tracker) TrackQueued(hash [meshcore.PacketHashSize]byte, sent Sent) {
+	t.mu.Lock()
+	t.queued[hash] = sent
+	t.mu.Unlock()
+	t.Track(hash, sent)
+}
+
+// TxResult is the radio's outcome for every packet: a post's first one settles it, and one that never went out is failed.
+func (t *Tracker) TxResult(data []byte, txErr error) {
+	pkt, err := meshcore.PacketFromBytes(data)
+	if err != nil {
+		return
+	}
+	t.mu.Lock()
+	s, ok := t.queued[pkt.PacketHash()]
+	delete(t.queued, pkt.PacketHash())
+	t.mu.Unlock()
+	if !ok || txErr == nil {
+		return
+	}
+	t.log.Warn("post never went out", "messageID", s.MessageID, "companion", s.Companion, "channel", s.Channel, "error", txErr)
+	t.store.WriteAsync(func() {
+		if err := t.store.Messages.UpdateStatus(context.Background(), s.MessageID, "failed"); err != nil {
+			t.log.Error("failed to mark an unsent post failed", "error", err, "messageID", s.MessageID)
+		}
+	})
+	if t.hub != nil {
+		t.hub.Broadcast("messages", map[string]any{
+			"action":      "status",
+			"companion":   s.Companion,
+			"companionId": s.CompanionID,
+			"channel":     s.Channel,
+			"id":          s.MessageID,
+			"status":      "failed",
+		})
+	}
 }
 
 // OnRawPacket is called by each companion for every frame it hears, so companion scopes the lookup

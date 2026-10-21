@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +21,7 @@ const writerQueueDepth = 1024
 type Store struct {
 	db             *sql.DB
 	Peers          *PeerRepo
+	HopPins        *HopPinRepo
 	Contacts       *ContactRepo
 	Packets        *PacketRepo
 	Messages       *MessageRepo
@@ -39,6 +42,7 @@ type Store struct {
 	LinkMonitors   *LinkMonitorRepo
 	Repeater       *RepeaterRepo
 	RepeaterACL    *RepeaterACLRepo
+	AppQueue       *AppQueueRepo
 
 	path       string
 	writerCh   chan func()
@@ -54,8 +58,7 @@ type Store struct {
 const walSizeLimit = 4 << 20
 
 func Open(ctx context.Context, path string) (*Store, error) {
-	// modernc.org/sqlite only honours the "_pragma=" form; the mattn-style "_journal_mode=WAL" is silently ignored.
-	// NORMAL syncs at checkpoints rather than every commit, sparing the SD card; WriteSync checkpoints so a save is on disk when it returns.
+	// Only the "_pragma=" form takes (mattn-style is ignored), and each runs on every pooled connection, so none may write.
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)" +
 		fmt.Sprintf("&_pragma=journal_size_limit(%d)&_pragma=synchronous(NORMAL)", walSizeLimit)
 	db, err := sql.Open("sqlite", dsn)
@@ -72,8 +75,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db:             db,
 		path:           path,
 		Peers:          &PeerRepo{db: db},
+		HopPins:        &HopPinRepo{db: db},
 		Contacts:       &ContactRepo{db: db},
-		Packets:        &PacketRepo{db: db, maxRows: DefaultMaxPackets},
+		Packets:        &PacketRepo{db: db},
 		Messages:       &MessageRepo{db: db, maxRows: DefaultMaxMessages},
 		Conversations:  &ConversationRepo{db: db},
 		Echoes:         &EchoRepo{db: db},
@@ -92,6 +96,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		LinkMonitors:   &LinkMonitorRepo{db: db},
 		Repeater:       &RepeaterRepo{db: db},
 		RepeaterACL:    &RepeaterACLRepo{db: db},
+		AppQueue:       &AppQueueRepo{db: db},
 		writerCh:       make(chan func(), writerQueueDepth),
 		writerDone:     make(chan struct{}),
 		closing:        make(chan struct{}),
@@ -100,6 +105,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
+	}
+	if err := s.useIncrementalVacuum(ctx); err != nil {
+		slog.Warn("space the database frees stays in its file until a later start can rewrite it", "error", err)
 	}
 
 	go s.writerLoop()
@@ -172,6 +180,49 @@ func (s *Store) checkpoint() {
 	}
 }
 
+// useIncrementalVacuum lets ReleaseFreePages give space back a batch at a time, which a file takes on only through one full VACUUM, so Open runs it before anything else writes.
+func (s *Store) useIncrementalVacuum(ctx context.Context) error {
+	var mode, pages, free, size int64
+	if err := s.db.QueryRowContext(ctx, `SELECT auto_vacuum, page_count, freelist_count, page_size
+		FROM pragma_auto_vacuum(), pragma_page_count(), pragma_freelist_count(), pragma_page_size()`).Scan(&mode, &pages, &free, &size); err != nil {
+		return err
+	}
+	if mode == 2 {
+		return nil
+	}
+	// VACUUM writes what is left to a temp file, kept beside the database rather than a tmpfs /tmp, and again to the WAL.
+	need := 2 * (pages - free) * size
+	if avail, ok := s.DiskFreeBytes(); ok && avail < uint64(need) {
+		return fmt.Errorf("it needs %d bytes free and the disk has %d", need, avail)
+	}
+	slog.Info("rewriting the database once so the space it frees can go back to the disk", "bytes", pages*size)
+	dir := strings.ReplaceAll(filepath.Dir(s.path), "'", "''")
+	defer s.db.ExecContext(context.Background(), "PRAGMA temp_store_directory = ''")
+	// One Exec, so the setting and the VACUUM that applies it share a connection.
+	if _, err := s.db.ExecContext(ctx, "PRAGMA temp_store_directory = '"+dir+"'; PRAGMA auto_vacuum = INCREMENTAL; VACUUM"); err != nil {
+		return err
+	}
+	s.checkpoint()
+	return nil
+}
+
+// FreePages is how many of the file's pages are free; SQLite reuses them but gives none back to the disk unless ReleaseFreePages does.
+func (s *Store) FreePages(ctx context.Context) (free, total int64, err error) {
+	if err := s.db.QueryRowContext(ctx, `SELECT freelist_count, page_count FROM pragma_freelist_count(), pragma_page_count()`).Scan(&free, &total); err != nil {
+		return 0, 0, fmt.Errorf("counting free pages: %w", err)
+	}
+	return free, total, nil
+}
+
+// ReleaseFreePages gives up to n free pages back to the disk and reports how many are left; run it on the writer, where n bounds the turn.
+func (s *Store) ReleaseFreePages(ctx context.Context, n int) (left int64, err error) {
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", n)); err != nil {
+		return 0, fmt.Errorf("releasing free pages: %w", err)
+	}
+	left, _, err = s.FreePages(ctx)
+	return left, err
+}
+
 // WALBytes is the write-ahead log's size on disk, 0 when there is none; one that keeps growing means checkpoints are not completing.
 func (s *Store) WALBytes() int64 {
 	fi, err := os.Stat(s.path + "-wal")
@@ -224,4 +275,21 @@ func (s *Store) Close() error {
 		<-s.writerDone
 	})
 	return s.db.Close()
+}
+
+// unixMS scans a time column, which holds UTC unix milliseconds; NULL scans as the zero time.
+func unixMS(t *time.Time) sql.Scanner { return msScanner{t} }
+
+type msScanner struct{ t *time.Time }
+
+func (s msScanner) Scan(v any) error {
+	switch v := v.(type) {
+	case int64:
+		*s.t = time.UnixMilli(v)
+	case nil:
+		*s.t = time.Time{}
+	default:
+		return fmt.Errorf("time column holds %T %v, want unix milliseconds", v, v)
+	}
+	return nil
 }

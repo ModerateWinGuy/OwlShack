@@ -12,7 +12,7 @@ Plug a MeshCore radio into any Linux, macOS or Windows machine (a Raspberry Pi
 is plenty), open `http://localhost:8080`, and you get a live console for the
 mesh: chat, packet capture, mapping, remote repeater administration, and
 telemetry, all persisted to SQLite. Built on the pure Go
-[meshcore-go](https://github.com/meshcore-go/meshcore-go) library.
+[meshcore-go](https://github.com/OwlShack/meshcore-go) library.
 
 ![Overview](docs/screenshots/overview.png)
 
@@ -32,6 +32,8 @@ telemetry, all persisted to SQLite. Built on the pure Go
   (KISS), an openHop Modem over USB or the network, or a bare SX1262 driven
   straight off a Pi's SPI bus, no firmware node needed.
 - **Bridges to MQTT.** Feeds aggregators like LetsMesh and CoreScope.
+- **Lets the MeshCore app in.** Turn on app access for a companion and the
+  official MeshCore app connects to it over TCP, as it would to a WiFi radio.
 
 The web UI is the configuration surface and the database is the source of
 truth; there is nothing to hand-edit.
@@ -61,7 +63,7 @@ Installable as a PWA, with a mobile layout and a light theme.
 | Monitoring | Polled nodes with status and telemetry history charts |
 | Radio | Modem diagnostics: TX outcomes, RX losses, board readings, faults |
 | Discover | Zero-hop scan: which repeaters and sensors are in direct range |
-| Sensors | I2C sensors and a PiSugar UPS on this host, the radio board's battery and MCU temperature, read every 5 s, values read from a web address such as a weather report, and values worked out from them |
+| Sensors | I2C sensors and a PiSugar UPS on this host, the radio board's battery and MCU temperature and the sensors wired to a KISS modem's board, read every 5 s, values read from a web address such as a weather report, and values worked out from them |
 | Companions | Per-companion chat, contacts, channels, remote repeaters, rooms, sensors, and the telemetry each one publishes |
 | Bots | Create and edit triggers across every companion (group, dm and cron) |
 | Repeater | The repeater this instance runs: relay stats, neighbours, access, the telemetry it publishes, settings |
@@ -166,7 +168,7 @@ node's admin or guest password.
 ### Release binary
 
 Pre-built binaries for Linux, macOS and Windows are on the
-[Releases](https://github.com/meshcore-go/OwlShack/releases) page.
+[Releases](https://github.com/OwlShack/OwlShack/releases) page.
 
 ```bash
 chmod +x OwlShack-linux-arm64
@@ -179,11 +181,11 @@ The installer picks the right package for the machine, installs it, and leaves
 OwlShack running under systemd — nothing has to stay in a terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/meshcore-go/OwlShack/dev/packaging/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/OwlShack/OwlShack/dev/packaging/install.sh | sudo sh
 ```
 
 Or take the `.deb` for `amd64`, `arm64`, `armhf` or `i386` from the
-[Releases](https://github.com/meshcore-go/OwlShack/releases) page yourself:
+[Releases](https://github.com/OwlShack/OwlShack/releases) page yourself:
 
 ```bash
 sudo apt install ./owlshack_1.4.0_arm64.deb
@@ -212,29 +214,31 @@ and messages, so take a backup from the Settings page first.
 
 ### Docker
 
-Published to `ghcr.io/meshcore-go/owlshack` for `linux/386`, `amd64`,
+Published to `ghcr.io/owlshack/owlshack` for `linux/386`, `amd64`,
 `arm/v6`, `arm/v7`, `arm64/v8`, `ppc64le`, `riscv64` and `s390x`.
 
 ```bash
 docker run -d \
   --device /dev/ttyACM0 \
   -p 8080:8080 \
+  -p 5000-5015:5000-5015 \
   -v "$PWD/data:/data" \
   -e TZ=Pacific/Auckland \
-  ghcr.io/meshcore-go/owlshack
+  ghcr.io/owlshack/owlshack
 ```
 
-Drop `--device` for a TCP radio connection. Set `TZ` to your own zone: the
+Drop `--device` for a TCP radio connection, and the `5000-5015` ports unless
+you let the MeshCore app connect to a companion. Set `TZ` to your own zone: the
 image carries the zone database but selects nothing, so without it the
 container's idea of local time is UTC.
 
 ### From source
 
-Requires Go 1.26+ and Node. The SPA is embedded into the binary, so it has to
+Requires Go 1.27.3+ and Node. The SPA is embedded into the binary, so it has to
 be built first:
 
 ```bash
-git clone https://github.com/meshcore-go/OwlShack.git
+git clone https://github.com/OwlShack/OwlShack.git
 cd OwlShack
 ./build.sh          # builds the SPA, then a version-stamped binary
 ```
@@ -329,6 +333,7 @@ Companions page.
 | `name` | Display name on the mesh, and the storage key for this companion's history |
 | `privateKey` | 64-hex ed25519 seed; leave it unset and one is generated and stored |
 | `latitude` / `longitude` | Advertised position (decimal degrees) |
+| `shareLocation` | Whether adverts carry the position; default `true` |
 | `advertInterval` | Seconds between adverts; `0` = never |
 | `channels` | Channels to join |
 | `trigger` | Triggers attached to this companion |
@@ -516,6 +521,12 @@ There is **no authentication** on the REST API or the UI. Anyone who can reach
 the port can reconfigure your radio, post as your companions, and drive any
 repeater you have logged into. Bind it to localhost, or put it behind a reverse
 proxy that authenticates.
+
+The MeshCore app's ports (5000 to 5015, off until you turn one on for a
+companion) have no password either, because the app protocol has none: anyone
+who can reach one can read that companion's messages and channel keys and send
+as it. They bind to the same host as the web UI, and the app cannot change the
+companion's settings, the radio or anything else in OwlShack.
 
 ## Docs
 

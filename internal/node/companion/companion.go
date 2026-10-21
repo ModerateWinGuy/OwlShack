@@ -8,23 +8,21 @@ import (
 	"sync"
 	"sync/atomic"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/api"
-	"github.com/meshcore-go/OwlShack/internal/client/repeater"
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/echo"
-	"github.com/meshcore-go/OwlShack/internal/modem"
-	"github.com/meshcore-go/OwlShack/internal/mqtt"
-	"github.com/meshcore-go/OwlShack/internal/sensor"
-	"github.com/meshcore-go/OwlShack/internal/store"
-	"github.com/meshcore-go/OwlShack/internal/trigger"
+	"github.com/OwlShack/OwlShack/internal/api"
+	"github.com/OwlShack/OwlShack/internal/client/repeater"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/echo"
+	"github.com/OwlShack/OwlShack/internal/modem"
+	"github.com/OwlShack/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/trigger"
 )
 
-// modemReadings is the slice of the modem a companion needs, so a send and a telemetry reply test without a radio.
+// modemReadings is the slice of the modem a companion needs, so a telemetry reply tests without a radio.
 type modemReadings interface {
-	EstAirtimeMs(packetLen int) uint32
 	// CachedStats is the last poll, never a fresh one: this is read on the packet path.
 	CachedStats() modem.DeviceStats
 }
@@ -46,7 +44,9 @@ type dmTextHandler interface {
 }
 
 type Companion struct {
-	cfg config.CompanionConfig
+	// cfg is the config the companion was built with; settings applied since live in live, read through conf.
+	cfg  config.CompanionConfig
+	live atomic.Pointer[config.CompanionConfig]
 
 	node      *node.Node
 	radio     *node.MuxRadio
@@ -59,27 +59,43 @@ type Companion struct {
 
 	echoTracker *echo.Tracker
 	repeaters   *repeater.Client
-	// stats is narrowed to what a send and a telemetry reply need: modem.StatsProvider satisfies it.
+	// stats is narrowed to what a telemetry reply needs: modem.StatsProvider satisfies it.
 	stats modemReadings
 
 	// telemetry is the operator's channel map and the readings behind it; nil publishes no sensors.
 	telemetry func() ([]sensor.ChannelEntry, []sensor.Status)
 
-	pendingOutbound struct {
+	// pendingPosts is each channel post not yet handed to the radio, by its unique timestamp, so each takes only its own packet.
+	pendingPosts struct {
 		sync.Mutex
-		msgID   int64
-		channel string
+		m map[uint32]echo.Sent
 	}
 
 	traceWaiters traceWaiters
 
+	// floodScopeOf names the region a received packet carried; the app's knows the region list.
+	floodScopeOf func(*meshcore.Packet) string
+
+	// chanScopes is each channel's own region choice, keyed by the node's channel name; channel edits run beside sends.
+	chanScopesMu sync.Mutex
+	chanScopes   map[string]config.FloodScope
+	// dropped names the channels removed or renamed away here, under chanScopesMu, so a save deletes only stored channels the node let go of.
+	dropped map[string]bool
+	// chanEditMu makes each channel edit whole, so two that pick the same free slot cannot both win.
+	chanEditMu sync.Mutex
+
 	// dmSeen collapses a sender's retransmissions of one message; see recentDM.
-	dmSeen dmSeen
+	dmSeen      dmSeen
+	dmsInFlight dmsInFlight
+	sentAcks    sentAcks
+	appDMs      struct {
+		sync.Mutex
+		m map[string]*appDM
+	}
 
 	triggers []triggerEntry
 
-	// MQTT: outbound only
-	obs *mqtt.Observer
+	appSink atomic.Pointer[appSinkBox]
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -87,14 +103,37 @@ type Companion struct {
 	runCtx context.Context
 }
 
-func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Store, hub *api.Hub, echoTracker *echo.Tracker, stats modem.StatsProvider, parseErrors *atomic.Uint64, nodeOpts ...node.Option) (*Companion, error) {
+func (c *Companion) conf() *config.CompanionConfig {
+	if p := c.live.Load(); p != nil {
+		return p
+	}
+	return &c.cfg
+}
+
+// ApplySettings takes a block that differs from the running one only in settings read as they are used, so no rebuild is needed.
+func (c *Companion) ApplySettings(block config.CompanionConfig) {
+	next := block
+	c.live.Store(&next)
+	if block.Channels != nil {
+		c.chanScopesMu.Lock()
+		for _, ref := range *block.Channels {
+			if _, ok := c.chanScopes[ref.Name]; ok {
+				c.chanScopes[ref.Name] = ownScope(ref.FloodScope)
+			}
+		}
+		c.chanScopesMu.Unlock()
+	}
+	c.log.Info("settings applied in place")
+}
+
+func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Store, hub *api.Hub, echoTracker *echo.Tracker, stats modem.StatsProvider, floodScopeOf func(*meshcore.Packet) string, nodeOpts ...node.Option) (*Companion, error) {
 	name := strings.TrimSpace(cfg.Name)
 	if name == "" {
 		return nil, fmt.Errorf("companion name is required")
 	}
 
 	radio := mux.NewRadio()
-	log := slog.Default().With("component", "companion", "name", name)
+	log := slog.Default().With("component", "companion", "id", cfg.ID, "name", name)
 	opts := append([]node.Option{
 		node.WithMaxPeers(100_000),
 		node.WithErrorHandler(func(err error) {
@@ -114,28 +153,48 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 
 	companion := &Companion{
 		// RX handlers are live before Start sets the real one, and a DM in between must not query with a nil context.
-		runCtx:      context.Background(),
-		cfg:         cfg,
-		node:        n,
-		radio:       &radio,
-		mux:         mux,
-		templater:   trigger.NewTemplater(),
-		log:         log,
-		store:       st,
-		hub:         hub,
-		echoTracker: echoTracker,
-		stats:       stats,
+		runCtx:       context.Background(),
+		cfg:          cfg,
+		node:         n,
+		radio:        &radio,
+		mux:          mux,
+		templater:    trigger.NewTemplater(),
+		log:          log,
+		store:        st,
+		hub:          hub,
+		echoTracker:  echoTracker,
+		stats:        stats,
+		chanScopes:   make(map[string]config.FloodScope),
+		floodScopeOf: floodScopeOf,
 	}
-	companion.repeaters = repeater.NewClient(n, st, cfg.ID, log, stats, companion.pathHashSize)
+	companion.live.Store(&cfg)
+	companion.repeaters = repeater.NewClient(n, st, cfg.ID, log, stats, companion.pathHashSize,
+		func(pubkey []byte) *meshcore.Region { return companion.contactScope(pubkey).MeshRegion() })
+	companion.repeaters.SetTelemetryPushHandler(companion.broadcastTelemetryPush)
 
 	// The companion's channels are the only ones this node listens on; triggers reference them by name and register none of their own.
 	if cfg.Channels != nil {
-		for i, chRef := range *cfg.Channels {
-			ch, err := channelFromRef(chRef)
-			if err != nil {
-				return nil, fmt.Errorf("channel %q: %w", chRef.Name, err)
+		// Each in its own slot, as the MeshCore app numbers them; one without a slot, or past the node's last as v1.5.0 kept them, takes the first free.
+		for _, pass := range []bool{true, false} {
+			for _, chRef := range *cfg.Channels {
+				fixed := chRef.Slot != nil && *chRef.Slot < node.DefaultMaxChannels
+				if fixed != pass {
+					continue
+				}
+				ch, err := channelFromRef(chRef)
+				if err != nil {
+					return nil, fmt.Errorf("channel %q: %w", chRef.Name, err)
+				}
+				slot := companion.nextFreeChannelIndex()
+				if fixed {
+					slot = *chRef.Slot
+				}
+				if slot < 0 || !n.SetChannel(slot, ch) {
+					log.Error("channel not joined: the node has no room for it", "channel", chRef.Name, "slots", node.DefaultMaxChannels)
+					continue
+				}
+				companion.chanScopes[ch.Name] = ownScope(chRef.FloodScope)
 			}
-			n.SetChannel(i, ch)
 		}
 	}
 
@@ -144,27 +203,9 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 		return nil, err
 	}
 
-	if companion.cfg.Mqtt != nil {
-		mqttCfg := *companion.cfg.Mqtt
-
-		obs, err := mqtt.NewObserver(mqttCfg, name, mux, companion.node.Identity(), stats, parseErrors)
-		if err != nil {
-			return nil, fmt.Errorf("creating mqtt observer: %w", err)
-		}
-		companion.obs = obs
-	}
-
 	companion.registerPacketHandlers()
 
 	return companion, nil
-}
-
-// MqttStatus reports this companion's MQTT broker state; ok=false when it isn't the node feeding MQTT.
-func (c *Companion) MqttStatus() ([]mqtt.BrokerStatus, bool) {
-	if c.obs == nil {
-		return nil, false
-	}
-	return c.obs.BrokerStatuses(), true
 }
 
 func (c *Companion) Start(ctx context.Context) error {
@@ -182,14 +223,7 @@ func (c *Companion) Start(ctx context.Context) error {
 		}
 	}
 
-	if c.obs != nil {
-		obsErr := c.obs.Start(ctx)
-		if obsErr != nil {
-			return fmt.Errorf("starting mqtt observer: %w", obsErr)
-		}
-	}
-
-	if c.cfg.AdvertInterval == nil || *c.cfg.AdvertInterval != 0 {
+	if c.conf().AdvertInterval == nil || *c.conf().AdvertInterval != 0 {
 		go c.advertLoop(ctx)
 	}
 
@@ -207,21 +241,18 @@ func (c *Companion) Stop() error {
 		trig.trigger.Stop()
 	}
 
-	if c.obs != nil {
-		c.obs.Stop()
-	}
-
 	c.node.Stop()
+	c.dmsInFlight.abortAll()
 	return nil
 }
 
 func (c *Companion) Name() string {
-	return c.cfg.Name
+	return c.conf().Name
 }
 
 // ID returns the surrogate primary key all of this companion's history is stored under, so a rename keeps it attached.
 func (c *Companion) ID() int64 {
-	return c.cfg.ID
+	return c.conf().ID
 }
 
 // SetTelemetry binds this companion's channel map hook; the app owns the map across reloads.
@@ -233,7 +264,8 @@ func (c *Companion) SetTelemetry(fn func() ([]sensor.ChannelEntry, []sensor.Stat
 
 // LatLon returns the companion's configured position (nil if unset).
 func (c *Companion) LatLon() (*float64, *float64) {
-	return c.cfg.Latitude, c.cfg.Longitude
+	cfg := c.conf()
+	return cfg.Latitude, cfg.Longitude
 }
 
 func (c *Companion) Node() *node.Node {
@@ -243,6 +275,3 @@ func (c *Companion) Node() *node.Node {
 func (c *Companion) Repeaters() *repeater.Client {
 	return c.repeaters
 }
-
-// Observer returns this companion's MQTT observer, or nil when it isn't the feeding node.
-func (c *Companion) Observer() *mqtt.Observer { return c.obs }

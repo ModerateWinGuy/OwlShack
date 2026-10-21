@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 type conversationJSON struct {
@@ -34,33 +34,34 @@ type conversationMsgJSON struct {
 func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	provider := s.companionProvider()
-
-	if provider == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+	cid, ok := s.companionID(r.Context(), w, name)
+	if !ok {
 		return
 	}
 
 	found := false
 	var channelNames []string
-	for _, c := range provider() {
-		if c.Name == name {
-			found = true
-			for _, ch := range c.Channels {
-				channelNames = append(channelNames, ch.Name)
+	if provider := s.companionProvider(); provider != nil {
+		for _, c := range provider() {
+			if c.Name == name {
+				found = true
+				for _, ch := range c.Channels {
+					channelNames = append(channelNames, ch.Name)
+				}
+				break
 			}
-			break
 		}
 	}
-
+	// Nothing runs while the radio is down, but the threads are stored under the configured channels.
 	if !found {
-		writeError(w, http.StatusNotFound, "companion not found")
-		return
-	}
-
-	cid, ok := s.companionID(r.Context(), w, name)
-	if !ok {
-		return
+		chans, err := s.store.Channels.ListByCompanion(r.Context(), cid)
+		if err != nil {
+			s.serverError(w, "failed to list channels", err)
+			return
+		}
+		for _, ch := range chans {
+			channelNames = append(channelNames, ch.Name)
+		}
 	}
 
 	contacts, err := s.store.Contacts.List(r.Context(), cid)

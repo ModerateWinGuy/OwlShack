@@ -1085,10 +1085,12 @@ func TestChannelRefKeyLength(t *testing.T) {
 		wantErr bool
 	}{
 		{"", false},
-		{"00112233445566778899aabbccddeeff", false},  // 16 bytes
-		{"00112233445566778899aabbccddee", true},     // 15 bytes
-		{"00112233445566778899aabbccddeeff00", true}, // 17 bytes
-		{"zz112233445566778899aabbccddeeff", true},   // not hex
+		{"00112233445566778899aabbccddeeff", false},                                  // 16 bytes
+		{"00112233445566778899aabbccddee", true},                                     // 15 bytes
+		{"00112233445566778899aabbccddeeff00", true},                                 // 17 bytes
+		{"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", true},   // 32 bytes: no firmware companion takes it
+		{"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00", true}, // 33 bytes
+		{"zz112233445566778899aabbccddeeff", true},                                   // not hex
 	} {
 		err := (&ChannelRef{Name: "ch", PrivateKey: c.key}).Validate()
 		if (err != nil) != c.wantErr {
@@ -1146,6 +1148,75 @@ func TestConfig_MapProviderOr(t *testing.T) {
 	} {
 		if got := (&Config{MapProvider: c.provider, MapTileKey: c.key}).MapProviderOr(); got != c.want {
 			t.Errorf("provider %v key %v: got %q, want %q", c.provider, c.key, got, c.want)
+		}
+	}
+}
+
+// A JSON import keeps each channel's slot, as YAML and TOML do.
+func TestChannelList_JSONKeepsSlot(t *testing.T) {
+	var cl ChannelList
+	if err := json.Unmarshal([]byte(`["Public", {"name": "#x", "privateKey": "", "floodScope": "everywhere", "slot": 5}]`), &cl); err != nil {
+		t.Fatal(err)
+	}
+	if len(cl) != 2 || cl[0].Name != "Public" || cl[0].Slot != nil {
+		t.Fatalf("got %+v", cl)
+	}
+	if got := cl[1]; got.Name != "#x" || got.FloodScope != ScopeEverywhere || got.Slot == nil || *got.Slot != 5 {
+		t.Errorf("object entry = %+v (slot %v), want #x everywhere in slot 5", got, got.Slot)
+	}
+}
+
+// An import that names no queue size holds what the firmware's offline queue holds; one out of range is refused.
+func TestAppQueueSize_ImportDefaultAndRange(t *testing.T) {
+	cfg, err := UnmarshalConfigJson([]byte(`{"companions": [{"name": "home", "app": {"enabled": true, "port": 5000}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Companions[0].App.QueueSize; got != 256 {
+		t.Fatalf("queue size %d, want 256", got)
+	}
+	for _, n := range []int{15, 10001} {
+		cfg.Companions[0].App.QueueSize = n
+		if err := cfg.Validate(); err == nil || err.Error() != `companion "home": the messages held for the app must be 16-10000` {
+			t.Errorf("%d: %v", n, err)
+		}
+	}
+}
+
+// The firmware's `set flood.max`/`flood.max.advert` take 0-64, 0 meaning never relay; refusing 0 left the CLI's OK unsaved.
+func TestValidate_FloodHopCapsTakeZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(r *RepeaterConfig, n int)
+	}{
+		{"floodMax", func(r *RepeaterConfig, n int) { r.FloodMax = &n }},
+		{"floodMaxAdvert", func(r *RepeaterConfig, n int) { r.FloodMaxAdvert = &n }},
+		{"floodMaxUnscoped", func(r *RepeaterConfig, n int) { r.FloodMaxUnscoped = &n }},
+	} {
+		for n, wantOK := range map[int]bool{0: true, 64: true, 65: false, -1: false} {
+			c := validConfig(t)
+			c.Repeater = &RepeaterConfig{Name: "rp", AdminPassword: "pw"}
+			tc.set(c.Repeater, n)
+			if err := c.Validate(); (err == nil) != wantOK {
+				t.Errorf("%s %d: err = %v, want ok %v", tc.name, n, err, wantOK)
+			}
+		}
+	}
+}
+
+// Firmware roles regenerate a key whose hash byte is the reserved 0x00 or 0xFF (simple_repeater main.cpp:91), and so must we.
+func TestGenerateSeedHex_NoReservedPrefix(t *testing.T) {
+	for range 2000 { // about 16 reserved draws expected if unchecked
+		seed, err := GenerateSeedHex()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := PubKeyHexFromSeed(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := pub[:2]; p == "00" || p == "ff" {
+			t.Fatalf("seed %s has reserved prefix %s", seed, p)
 		}
 	}
 }

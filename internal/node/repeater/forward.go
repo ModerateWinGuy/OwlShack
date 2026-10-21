@@ -1,6 +1,6 @@
 package repeater
 
-import meshcore "github.com/meshcore-go/meshcore-go"
+import meshcore "github.com/OwlShack/meshcore-go"
 
 // Firmware max_loop_* tables indexed by path hash size; value N means drop once our own hash appears >= N times.
 var (
@@ -16,11 +16,6 @@ func (r *Repeater) allowForward(pkt *meshcore.Packet) bool {
 	}
 
 	if pkt.IsRouteFlood() {
-		// Firmware filterRecvFloodPacket: a flood with no matching region is dropped, so scoped floods we hold no transport key for die here.
-		if r.node.Regions().FindFloodMatch(pkt) == nil {
-			return false
-		}
-
 		// Firmware order: general cap, then the unscoped-only cap, then the advert cap.
 		hops := int(pkt.PathHashCount())
 		if hops >= r.cfg.FloodMaxOr() {
@@ -30,6 +25,10 @@ func (r *Repeater) allowForward(pkt *meshcore.Packet) bool {
 			return false
 		}
 		if pkt.PayloadType() == meshcore.PayloadTypeAdvert && hops >= r.cfg.FloodMaxAdvertOr() {
+			return false
+		}
+		// Firmware recv_pkt_region: an unknown transport code, or a plain flood "*" denies, is not relayed.
+		if r.node.Regions().FindFloodMatch(pkt) == nil {
 			return false
 		}
 

@@ -8,10 +8,8 @@ import (
 	"strings"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
+	meshcore "github.com/OwlShack/meshcore-go"
 )
-
-const DefaultMaxPackets = 10000
 
 // PacketFieldsFromPkt is the single derivation of the hex packet hash and hop path, so stored, broadcast and displayed forms cannot drift.
 func PacketFieldsFromPkt(pkt *meshcore.Packet) (packetHash, path string) {
@@ -49,8 +47,7 @@ type PacketRecord struct {
 }
 
 type PacketRepo struct {
-	db      *sql.DB
-	maxRows int
+	db *sql.DB
 }
 
 func (r *PacketRepo) Insert(ctx context.Context, p *PacketRecord) error {
@@ -61,12 +58,12 @@ func (r *PacketRepo) Insert(ctx context.Context, p *PacketRecord) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO packets (received_at, direction, raw, route_type, payload_type, snr, rssi, packet_hash, path)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ReceivedAt, p.Direction, p.Raw, p.RouteType, p.PayloadType, p.SNR, p.RSSI, packetHash, path,
+		p.ReceivedAt.UnixMilli(), p.Direction, p.Raw, p.RouteType, p.PayloadType, p.SNR, p.RSSI, packetHash, path,
 	)
 	if err != nil {
 		return fmt.Errorf("inserting packet: %w", err)
 	}
-	return r.prune(ctx)
+	return nil
 }
 
 func (r *PacketRepo) List(ctx context.Context, limit, offset int, filter PacketFilter) ([]PacketRecord, error) {
@@ -102,7 +99,7 @@ func (r *PacketRepo) List(ctx context.Context, limit, offset int, filter PacketF
 	for rows.Next() {
 		var p PacketRecord
 		if err := rows.Scan(
-			&p.ID, &p.ReceivedAt, &p.Direction, &p.Raw,
+			&p.ID, unixMS(&p.ReceivedAt), &p.Direction, &p.Raw,
 			&p.RouteType, &p.PayloadType, &p.SNR, &p.RSSI,
 		); err != nil {
 			return nil, fmt.Errorf("scanning packet row: %w", err)
@@ -124,15 +121,56 @@ func (r *PacketRepo) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-func (r *PacketRepo) prune(ctx context.Context) error {
-	_, err := r.db.ExecContext(ctx, `
-		DELETE FROM packets WHERE id IN (
-			SELECT id FROM packets ORDER BY id ASC LIMIT MAX(0,
-				(SELECT COUNT(*) FROM packets) - ?
-			)
-		)`, r.maxRows)
+// PruneBatchBefore deletes up to batch of the packets received before cutoff and reports how many went.
+func (r *PacketRepo) PruneBatchBefore(ctx context.Context, cutoff time.Time, batch int) (int64, error) {
+	res, err := r.db.ExecContext(ctx,
+		"DELETE FROM packets WHERE id IN (SELECT id FROM packets WHERE received_at < ? LIMIT ?)",
+		cutoff.UnixMilli(), batch)
 	if err != nil {
-		return fmt.Errorf("pruning packets: %w", err)
+		return 0, fmt.Errorf("pruning packets: %w", err)
 	}
-	return nil
+	return res.RowsAffected()
+}
+
+// ScanFloodRxSince calls fn, newest first, for each non-trace RX flood packet (the ones with a relay path) since cutoff.
+func (r *PacketRepo) ScanFloodRxSince(ctx context.Context, cutoff time.Time, fn func(*PacketRecord)) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, received_at, raw, route_type, payload_type, snr, rssi, packet_hash
+		FROM packets
+		WHERE direction = 'rx' AND route_type IN (?, ?) AND payload_type != ? AND received_at >= ?
+		ORDER BY received_at DESC, id DESC`,
+		meshcore.RouteTypeFlood, meshcore.RouteTypeTransportFlood, meshcore.PayloadTypeTrace, cutoff.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("querying packets: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		p := PacketRecord{Direction: "rx"}
+		if err := rows.Scan(&p.ID, unixMS(&p.ReceivedAt), &p.Raw, &p.RouteType, &p.PayloadType, &p.SNR, &p.RSSI, &p.PacketHash); err != nil {
+			return fmt.Errorf("scanning packet row: %w", err)
+		}
+		fn(&p)
+	}
+	return rows.Err()
+}
+
+// SentSince maps each packet hash we transmitted since cutoff to whether we started it (an empty path) rather than only relayed it.
+func (r *PacketRepo) SentSince(ctx context.Context, cutoff time.Time) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT packet_hash, path = '' FROM packets
+		WHERE direction = 'tx' AND packet_hash != '' AND received_at >= ?`, cutoff.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("querying sent packets: %w", err)
+	}
+	defer rows.Close()
+	sent := map[string]bool{}
+	for rows.Next() {
+		var hash string
+		var started bool
+		if err := rows.Scan(&hash, &started); err != nil {
+			return nil, fmt.Errorf("scanning sent packet: %w", err)
+		}
+		sent[hash] = sent[hash] || started
+	}
+	return sent, rows.Err()
 }

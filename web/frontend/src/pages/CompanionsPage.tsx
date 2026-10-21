@@ -21,11 +21,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useApiList } from "@/hooks/useApiList";
-import { configApi, type ConfigCompanion } from "@/lib/configApi";
+import { configApi, type ConfigCompanion, type FloodScope } from "@/lib/configApi";
+import { RegionSelect, useRegionSettings } from "@/components/RegionSelect";
 import { LoadErrorAlert } from "@/components/LoadErrorAlert";
 import { PageHeader } from "@/components/PageHeader";
 import { InlineConfirm } from "@/components/InlineConfirm";
-import { PATH_HASH_SIZE_OPTIONS, SelectField, TextField } from "@/components/ConfigFields";
+import { PATH_HASH_SIZE_OPTIONS, SelectField, SwitchRow, TextField } from "@/components/ConfigFields";
 import { PositionPicker, round6 } from "@/components/PositionPicker";
 import { PeerListField, type PickablePeer } from "@/components/PeerPicker";
 import { truncateMid } from "@/lib/format";
@@ -262,6 +263,9 @@ function CompanionEditor({
   const [pathHashSize, setPathHashSize] = useState(
     companion?.pathHashSize != null ? String(companion.pathHashSize) : "",
   );
+  const [floodScope, setFloodScope] = useState<FloodScope>(companion?.floodScope ?? "inherit");
+  const [shareLocation, setShareLocation] = useState(companion?.shareLocation ?? true);
+  const regionSettings = useRegionSettings();
   const [advertInterval, setAdvertInterval] = useState(
     companion?.advertInterval != null ? String(companion.advertInterval) : "",
   );
@@ -290,6 +294,8 @@ function CompanionEditor({
           pathHashSize: pathHashSize === "" ? null : parseInt(pathHashSize, 10),
           dmPolicy,
           dmAllow: dmAllow.map((k) => k.trim()).filter(Boolean),
+          floodScope,
+          shareLocation,
         },
         companion?.id,
       );
@@ -370,6 +376,12 @@ function CompanionEditor({
               setLongitude(round6(lo));
             }}
           />
+          <SwitchRow
+            label="Share position in adverts"
+            hint="Off sends adverts without it; the position stays saved here. Telemetry has its own position setting."
+            checked={shareLocation}
+            onChange={setShareLocation}
+          />
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <TextField
               label="Advert interval (s)"
@@ -381,11 +393,18 @@ function CompanionEditor({
             <SelectField
               label="Path hash size"
               value={pathHashSize}
-              options={[{ value: "", label: "Inherit from Settings" }, ...PATH_HASH_SIZE_OPTIONS]}
+              options={[{ value: "", label: "Same as Settings" }, ...PATH_HASH_SIZE_OPTIONS]}
               onChange={setPathHashSize}
               hint="width of each hop hash in our flood packets"
             />
           </div>
+          <RegionSelect
+            value={floodScope}
+            onChange={setFloodScope}
+            regions={regionSettings.regions}
+            inherit={{ from: "Settings", resolved: regionSettings.scope }}
+            hint="for this companion's adverts, and its channels and contacts unless they pick their own"
+          />
 
           <SelectField
             label="Who can DM this companion"

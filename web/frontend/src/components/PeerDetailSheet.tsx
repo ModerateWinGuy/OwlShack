@@ -143,7 +143,7 @@ export function PeerDetailSheet({
         <SheetContent
           side="right"
           showCloseButton={false}
-          className="w-full max-w-[100vw] border-l border-border bg-card p-0 sm:max-w-md"
+          className="w-full max-w-screen border-l border-border bg-card p-0 sm:max-w-md"
         >
           <SheetTitle className="sr-only">Peer detail</SheetTitle>
           <SheetDescription className="sr-only">
@@ -484,6 +484,7 @@ interface MembershipHit {
   companion: string;
   ref: string;
   isRepeater: boolean;
+  peerType: string;
 }
 
 // One fetch shared by the "In companions" list and the delete gate.
@@ -514,6 +515,7 @@ function usePeerMembership(
                   isRepeater:
                     contact.metadata?.isRepeater === true ||
                     (contact.type || "").toUpperCase() === "REPEATER",
+                  peerType: contact.type || (contact.metadata?.isRepeater ? "REPEATER" : ""),
                 } as MembershipHit)
               : null,
           )
@@ -547,7 +549,7 @@ function CompanionMembership({
       <span className="label-overline">In companions</span>
       <div className="mt-2 space-y-1.5">
         {hits.map((h) => {
-          const to = contactDetailPath(h.ref, pubkeyHex, h.isRepeater);
+          const to = contactDetailPath(h.ref, pubkeyHex, h.peerType);
           return (
             <button
               key={h.companion}

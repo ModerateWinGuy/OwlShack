@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -9,23 +10,26 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 
+// htmlFor names the control the label and hint belong to; its hint is `${htmlFor}-hint`.
 export function Field({
   label,
   hint,
+  htmlFor,
   children,
 }: {
   label: string;
   hint?: React.ReactNode;
+  htmlFor?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="space-y-1">
-      <Label className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+      <Label htmlFor={htmlFor} className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
         {label}
       </Label>
       {children}
       {hint && (
-        <p className="font-mono text-[10px] text-muted-foreground/60">{hint}</p>
+        <p id={htmlFor && `${htmlFor}-hint`} className="font-mono text-[10px] text-muted-foreground/60">{hint}</p>
       )}
     </div>
   );
@@ -39,6 +43,7 @@ export function TextField({
   hint,
   type = "text",
   disabled,
+  invalid,
 }: {
   label: string;
   value: string;
@@ -47,10 +52,15 @@ export function TextField({
   hint?: React.ReactNode;
   type?: string;
   disabled?: boolean;
+  invalid?: boolean;
 }) {
+  const id = useId();
   return (
-    <Field label={label} hint={hint}>
+    <Field label={label} hint={hint} htmlFor={id}>
       <Input
+        id={id}
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        aria-invalid={invalid || undefined}
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -62,6 +72,10 @@ export function TextField({
   );
 }
 
+// Radix reads a "" value as "show the placeholder", so an option meaning "none" or "inherit" would render blank.
+const EMPTY = "\u0000empty";
+const toSelect = (v: string) => (v === "" ? EMPTY : v);
+
 export function SelectField({
   label,
   value,
@@ -72,32 +86,46 @@ export function SelectField({
 }: {
   label: string;
   value: string;
-  options: { value: string; label: string }[];
+  // depth indents an option under the one before it, for a list that is a tree.
+  options: { value: string; label: string; depth?: number }[];
   onChange: (v: string) => void;
   hint?: React.ReactNode;
   disabled?: boolean;
 }) {
+  const id = useId();
   // Tolerate a device/config value outside the curated set.
   const known = options.some((o) => o.value === value);
   return (
-    <Field label={label} hint={hint}>
-      <Select value={value} onValueChange={onChange} disabled={disabled}>
-        <SelectTrigger className="h-9 w-full font-mono text-sm rounded-none border-border bg-background">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent className="rounded-sm">
-          {!known && value !== "" && (
-            <SelectItem value={value} className="font-mono text-sm">
-              {value} (custom)
-            </SelectItem>
-          )}
-          {options.map((o) => (
-            <SelectItem key={o.value} value={o.value} className="font-mono text-sm">
-              {o.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+    <Field label={label} hint={hint} htmlFor={id}>
+      {/* Inside a form Radix adds a hidden native select; the div keeps it from being Field's last child, which takes the trigger's space-y margin. */}
+      <div>
+        <Select value={toSelect(value)} onValueChange={(v) => onChange(v === EMPTY ? "" : v)} disabled={disabled}>
+          <SelectTrigger
+            id={id}
+            aria-describedby={hint ? `${id}-hint` : undefined}
+            className="h-9 w-full font-mono text-sm rounded-none border-border bg-background"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="rounded-sm">
+            {!known && value !== "" && (
+              <SelectItem value={value} className="font-mono text-sm">
+                {value} (custom)
+              </SelectItem>
+            )}
+            {options.map((o) => (
+              <SelectItem
+                key={o.value}
+                value={toSelect(o.value)}
+                className="font-mono text-sm"
+                style={o.depth ? { paddingLeft: `${0.5 + o.depth * 1.25}rem` } : undefined}
+              >
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
     </Field>
   );
 }
@@ -115,6 +143,7 @@ export function SwitchRow({
   onChange: (v: boolean) => void;
   disabled?: boolean;
 }) {
+  const hintId = useId();
   return (
     <label className="flex items-center justify-between gap-3 px-3 py-2 bg-card border border-border cursor-pointer">
       <div className="min-w-0">
@@ -122,12 +151,18 @@ export function SwitchRow({
           {label}
         </div>
         {hint && (
-          <div className="font-mono text-[10px] leading-snug text-muted-foreground/60">
+          <div id={hintId} className="font-mono text-[10px] leading-snug text-muted-foreground/60">
             {hint}
           </div>
         )}
       </div>
-      <Switch checked={checked} onCheckedChange={onChange} disabled={disabled} />
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        aria-label={label}
+        aria-describedby={hint ? hintId : undefined}
+      />
     </label>
   );
 }

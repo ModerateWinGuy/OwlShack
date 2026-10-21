@@ -12,7 +12,8 @@ import { HeaderButton } from "@/components/HeaderButton";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useApiObject } from "@/hooks/useApiObject";
 import { setTiles, type MapDarkStyle, type MapProvider } from "@/lib/leaflet";
-import { configApi, type Settings, type SpiBoard } from "@/lib/configApi";
+import { configApi, type FloodRegion, type FloodScope, type Settings, type SpiBoard } from "@/lib/configApi";
+import { FloodRegionsSection } from "@/components/FloodRegionsSection";
 
 const BANDWIDTHS = [7.8, 10.4, 15.6, 20.8, 31.25, 41.7, 62.5, 125, 250, 500];
 const LOG_LEVELS = ["trace", "debug", "info", "warn", "error"];
@@ -52,6 +53,9 @@ export function RadioPage() {
   // Percentage, like the firmware's `set dutycycle`. Blank = the 50% default.
   const [dutyCycle, setDutyCycle] = useState("");
   const [logLevel, setLogLevel] = useState("info");
+  const [packetDays, setPacketDays] = useState("");
+  const [floodRegions, setFloodRegions] = useState<FloodRegion[]>([]);
+  const [floodScope, setFloodScope] = useState<FloodScope>("everywhere");
 
   useEffect(() => {
     if (!settings) return;
@@ -71,6 +75,9 @@ export function RadioPage() {
     setPathHashSize(String(settings.pathHashSize ?? 1));
     setDutyCycle(settings.dutyCycle != null ? String(settings.dutyCycle) : "");
     setLogLevel(settings.logLevel ?? "info");
+    setPacketDays(String(settings.packetRetentionDays));
+    setFloodRegions(settings.floodRegions);
+    setFloodScope(settings.floodScope);
   }, [settings]);
 
   // Fetched once on mount: the list is compiled into the binary, so it cannot
@@ -86,8 +93,17 @@ export function RadioPage() {
 
   const onSave = async () => {
     if (!settings) return;
+    const days = Number(packetDays);
+    if (packetDays.trim() === "" || !Number.isInteger(days) || days < 1 || days > 365) {
+      toast.error("Packet history must be a whole number of days, 1-365. Nothing was saved.");
+      return;
+    }
     setSaving(true);
     try {
+      // Regions first: they are the part the server is likelier to refuse, and a refusal then saves nothing.
+      await configApi.putFloodRegions(floodRegions, floodScope).catch((e) => {
+        throw new Error(`Nothing was saved: ${e instanceof Error ? e.message : e}`);
+      });
       await configApi.putSettings({
         // Round-trip the connection type so a radio save never resets it.
         connectionType,
@@ -110,9 +126,12 @@ export function RadioPage() {
         pathHashSize: parseInt(pathHashSize, 10) || 1,
         dutyCycle: dutyCycle.trim() === "" ? null : Number(dutyCycle),
         logLevel: logLevel || null,
+        packetRetentionDays: days,
         // setupComplete omitted on purpose: the server keeps the stored value.
+      }).catch((e) => {
+        throw new Error(`Regions saved, but the other settings were not: ${e instanceof Error ? e.message : e}`);
       });
-      toast.success("Radio settings saved");
+      toast.success("Settings saved");
       setTiles(mapProvider, mapTileKey.trim(), mapDarkStyle);
       reload();
     } catch (e) {
@@ -248,6 +267,13 @@ export function RadioPage() {
             </div>
           </section>
 
+          <FloodRegionsSection
+            regions={floodRegions}
+            onRegionsChange={setFloodRegions}
+            scope={floodScope}
+            onScopeChange={setFloodScope}
+          />
+
           <section className="panel">
             <SectionTitle eyebrow="process" title="Service" />
             <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -264,6 +290,13 @@ export function RadioPage() {
                 options={LOG_LEVELS.map((l) => ({ value: l, label: l }))}
                 onChange={setLogLevel}
                 hint="-v / -vv flags override this"
+              />
+              <TextField
+                label="Packet history (days)"
+                value={packetDays}
+                onChange={setPacketDays}
+                type="number"
+                hint="how long the packet log and the map's Connections mode keep data · 1-365 · lowering it deletes older packets within the hour, and they cannot be recovered"
               />
               <SelectField
                 label="Map tiles"

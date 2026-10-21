@@ -24,10 +24,10 @@ regenerates `web/frontend/src/data/radio-presets.json` from it; don't hand-edit)
 
 | Layer | Tech |
 |---|---|
-| Backend | Go 1.26+, **no CGO**, `modernc.org/sqlite`, `embed.FS` for the SPA |
+| Backend | Go 1.27+, **no CGO**, `modernc.org/sqlite`, `embed.FS` for the SPA |
 | Frontend | **React 19** (not Preact) + Vite 6 + TS 5.7, Tailwind v4, shadcn/ui (new-york), `react-router-dom@7`, `sonner`, Leaflet |
-| Mesh proto | `github.com/meshcore-go/meshcore-go` v1.6.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
-| Real-time | WS `/api/ws`, topics `peers` `packets` `messages` `traces` `repeaterNeighbors` `discovered` `sensors` |
+| Mesh proto | `github.com/OwlShack/meshcore-go` v1.10.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
+| Real-time | WS `/api/ws`, topics `peers` `packets` `messages` `traces` `repeaterNeighbors` `discovered` `sensors` `telemetry` |
 | Local sensors | `periph.io/x/conn` + `periph.io/x/host` for I2C; `github.com/expr-lang/expr` for derived sensors |
 | Config | SQLite relational tables; config files are one-time imports |
 
@@ -35,7 +35,7 @@ regenerates `web/frontend/src/data/radio-presets.json` from it; don't hand-edit)
 
 ```bash
 ./build.sh           # from the repo root; SPA then version-stamped Go binary, mirrors CI
-go test -race ./...  # what CI runs (23 packages)
+go test -race ./...  # what CI runs (26 packages)
 screen -S meshcore -X quit; sleep 12
 screen -dmS meshcore bash -c 'exec ./OwlShack -vvv 2>&1 | tee /tmp/OwlShack2.log'
 python3 -c "import sqlite3; c=sqlite3.connect('file:meshcore.db?mode=ro', uri=True); print(c.execute('PRAGMA user_version').fetchone())"
@@ -66,7 +66,7 @@ checksums were kept is trusted as it stands. At release, record the new files wi
 `go test ./internal/store -run TestMigrations -release-migrations <tag>` and
 commit the sum before tagging; the release workflow fails on an unlisted file.
 What SQL cannot do goes in a Go step called from `migration.apply`, run after
-its file in the same transaction (004's packet backfill is the only one), and
+its file in the same transaction (004's packet backfill and 024's time rewrite), and
 it is frozen like the files. Each file runs in one transaction with its version bump, so it must
 not `BEGIN`. The store copies the DB to `meshcore.db.pre-v<from>-to-v<to>`
 before upgrading, keeps an unfinished upgrade's copy rather than copying a
@@ -83,7 +83,7 @@ user-visible change adds its entry under `## Unreleased`. Each entry is a bold
 one-sentence result, then what it means for the user: no mechanism, no
 investigation, no internal or tooling changes (that story goes in the commit and
 the PR), and no untested lists. Use `### Added`, `### Changed` and `### Fixed`,
-plus `### Upgrading` when a user must act, and a schema line when `user_version`
+plus `### Upgrading` when a user must act. No schema line when `user_version`
 moves. Older entries predate this and stay as they are. At release, rename the
 section `## vX.Y.Z - YYYY-MM-DD` (plain hyphen) and open it with the baseline tag
 and a one-line summary. The release workflow's awk takes the section from the
@@ -102,13 +102,15 @@ MeshCore feed (a feed that is down or unusable only warns).
   merge commit, not a squash: the tag sits on a commit only `main` has, so
   without it `build.sh`'s `git describe` stamps dev builds with the previous tag.
 
-**Every timestamp on outgoing admin traffic comes from
-`Client.UniqueTimestamp()`** (the firmware's `getCurrentTimeUnique()`), never
-`time.Now().Unix()`. The companion's DMs and room posts share that counter; the
-repeater node has its own `Repeater.uniqueTimestamp()`. Remote firmware drops a
+**Every timestamp on outgoing admin traffic comes from the node's
+`UniqueTimestamp()`** (the firmware's `getCurrentTimeUnique()`), never
+`time.Now().Unix()`. A companion's DMs, room posts and repeater client share its
+node's counter; the repeater node has its own. Remote firmware drops a
 timestamp `<=` the last one it saw as a replay, and treats an equal CLI
 timestamp as a retry it never answers, so two sends in one second silently lose
-the second.
+the second. The stamp only orders stamps, not sends: a remote-admin send stamps
+and enqueues inside `node.SendStamped`, or two concurrent sends can reach the
+queue out of order and the lower one is dropped.
 
 **`internal/api` never imports the domain.** The seam is the `api.Backend`
 interface ([`internal/api/backend.go`](./internal/api/backend.go)), implemented
@@ -121,9 +123,22 @@ region endpoints read directly.
 `?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)`,
 plus `journal_size_limit` and `synchronous(NORMAL)` (see `store.Open`).
 The mattn-style `_journal_mode=WAL` form is silently ignored, which once left
-the DB in rollback-journal mode with no busy timeout. Under NORMAL a commit is
+the DB in rollback-journal mode with no busy timeout. Each runs on every new
+pooled connection, so a DSN pragma must never write: `auto_vacuum` there lost
+writes to "database is locked". Under NORMAL a commit is
 only synced at a checkpoint, so `WriteSync` checkpoints after its closure: an
 HTTP save is on disk when it returns, and the RX path's `WriteAsync` is not.
+
+**Never hand the SQLite driver a `time.Time`.** modernc stores it as host-zone
+`String()` text, which SQL compares wrongly across zones. New time columns are
+UTC unix milliseconds (`int64`): pass `t.UnixMilli()` and scan with
+`unixMS(&t)`, and add the column to `TestTimeColumnsHoldUnixMS`. The metrics,
+neighbour, node-state, signal-test and repeater-ACL times are older unix-second
+columns and stay so. The millisecond columns are still declared `DATETIME`
+(NUMERIC affinity, so an integer stays one) and their `DEFAULT
+CURRENT_TIMESTAMP` is dead, as every insert supplies the time. Never
+`int32`/`uint32` for a stored time; the `uint32` timestamps in `node` and
+`client` are the firmware's wire format.
 
 **SNR is real dB end-to-end** (`snr REAL` / `*float64` / JSON number); RSSI is
 raw `int8` dBm. The wire is quarter-dB (x4) and meshcore-go converts at ingest;
@@ -179,6 +194,7 @@ safe future cleanup.
 - `messages` — **flat, no `.message` wrapper**. Re-adding one silently drops every message (it was a real bug). Action variants: `{action:"repeatCount"...}`, `{action:"status"...}`.
 - `traces` — `{companion, tag, hops, path, hopSNRs, snr}`; `repeaterNeighbors` — `{pubkey, name, snr, secsAgo}`.
 - `discovered` — one discovery answer, `{pubkey, name, type, snr, reportedSnr, heard}`; `sensors` — every sensor's `api.SensorStatus`, pushed whole after each poll pass.
+- `telemetry` — a monitored remote sensor's push, `{companion, companionId, pubkey, readings, receivedAt}`.
 
 The hub pings every 50 s with a 75 s read deadline. Clients may send
 `{"action":"ping"}` and get `{"topic":"pong"}` — `useWebSocket` uses it to spot
@@ -223,9 +239,8 @@ is the place to look.
 - Status/Neighbors auto-fetch is once per page mount; after a long absence, hit Refresh.
 - Repeater and room sessions are in-memory — a restart drops every login.
 - Settings-section CLI `get`s run sequentially on purpose (half-duplex radio), though the client *could* correlate concurrent commands.
-- Go tests cover 23 packages; radio-facing paths are still manual. No frontend tests.
+- Go tests cover 26 packages; radio-facing paths are still manual. No frontend tests.
 - `MESHCORE_APP_FEATURES.md` is referenced by the docs but does not exist in the repo.
-- MQTT publishes RX packets only, never TX — see [docs/mqtt-and-radio.md](./docs/mqtt-and-radio.md).
 
 ## Feature ideas not yet started
 

@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/meshcore-go/hardware"
-	kissTransport "github.com/meshcore-go/meshcore-go/hardware/transport"
-	"github.com/meshcore-go/meshcore-go/node"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/meshcore-go/hardware"
+	kissTransport "github.com/OwlShack/meshcore-go/hardware/transport"
+	"github.com/OwlShack/meshcore-go/node"
 )
 
 // handlerWatchdog is deliberately not configurable: DATA dispatch is sub-millisecond, so an operator's value could only mask a stall.
@@ -25,7 +25,6 @@ type State struct {
 	// ParseErrors is intact bytes that did not decode as a MeshCore packet; the radio did its job.
 	ParseErrors *atomic.Uint64
 
-	radioConfig   *hardware.RadioConfig
 	airtimeFactor float64
 	closers       []io.Closer
 	watcherDone   chan struct{}
@@ -66,7 +65,7 @@ func (m *State) StartDeadWatcher(reconnectCh chan<- struct{}) {
 	m.watcherDone = make(chan struct{})
 	done := m.watcherDone
 
-	if d, ok := m.Modem.(interface{ Dead() <-chan struct{} }); ok {
+	if d, ok := m.Modem.(node.DeadNotifier); ok {
 		dead := d.Dead()
 		go func() {
 			select {
@@ -142,9 +141,6 @@ func MuxOptions(ms *State) []node.MuxOption {
 			ms.ParseErrors.Add(1)
 		}),
 	}
-	if ms.radioConfig != nil {
-		opts = append(opts, node.WithMuxAirtimeEstimator(hardware.LoRaAirtimeEstimator(ms.radioConfig)))
-	}
 	opts = append(opts, node.WithMuxAirtimeFactor(ms.airtimeFactor))
 	return opts
 }
@@ -167,7 +163,6 @@ func Setup(ctx context.Context, cfg *config.Config) (*State, error) {
 		SF:     *cfg.SF,
 		CR:     *cfg.CR,
 	}
-	ms.radioConfig = radioConfig
 	ms.airtimeFactor = cfg.AirtimeFactorOr()
 	// The library takes an inverted factor; log the percentage instead.
 	slog.Info("airtime budget",
@@ -209,7 +204,6 @@ func setupKiss(ctx context.Context, ms *State, cfg *config.Config, connScheme, c
 		hardware.WithSignalReport(true),
 		hardware.WithLogger(slog.Default()),
 		hardware.WithTxFlowControl(hardware.DefaultTxTimeout),
-		hardware.WithTxAirtimeEstimator(hardware.LoRaAirtimeEstimator(radioConfig)),
 		hardware.WithHandlerWatchdog(handlerWatchdog),
 	)
 	kissModem.SetErrorHandler(func(err error) {
@@ -224,13 +218,14 @@ func setupKiss(ctx context.Context, ms *State, cfg *config.Config, connScheme, c
 	}
 	ms.closers = append(ms.closers, kissModem)
 
-	if err := kissModem.SetRadio(radioConfig); err != nil {
+	// The firmware answers both with HW_RESP_OK whatever the values, so waiting proves the modem took them, not that they were valid.
+	if err := kissModem.SetRadioWait(connectCtx, radioConfig); err != nil {
 		ms.Close()
 		return fmt.Errorf("SET_RADIO: %w", err)
 	}
 	slog.Info("SET_RADIO", "freq", *cfg.Freq, "bw", *cfg.Bw, "sf", *cfg.SF, "cr", *cfg.CR)
 
-	if err := kissModem.SetTxPower(*cfg.TX); err != nil {
+	if err := kissModem.SetTxPowerWait(connectCtx, *cfg.TX); err != nil {
 		ms.Close()
 		return fmt.Errorf("SET_TX_POWER: %w", err)
 	}

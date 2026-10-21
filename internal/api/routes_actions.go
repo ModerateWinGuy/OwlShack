@@ -293,18 +293,7 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := renamer(name, channelName, body.Name); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-
-	if persist := s.ConfigPersist(); persist != nil {
-		if err := persist(r.Context()); err != nil {
-			s.log.Error("config persist failed after channel rename", "error", err)
-		}
-	}
-
-	w.WriteHeader(http.StatusNoContent)
+	s.finishChannelEdit(w, r, "rename", renamer(name, channelName, body.Name))
 }
 
 func (s *Server) handleGetChannelKey(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +303,7 @@ func (s *Server) handleGetChannelKey(w http.ResponseWriter, r *http.Request) {
 	provider := s.companionProvider()
 
 	if provider == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
@@ -334,7 +323,7 @@ func (s *Server) handleGetChannelKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeError(w, http.StatusNotFound, "companion not found")
+	s.companionNotRunning(w, r)
 }
 
 func (s *Server) handleGetContactPath(w http.ResponseWriter, r *http.Request) {
@@ -343,13 +332,13 @@ func (s *Server) handleGetContactPath(w http.ResponseWriter, r *http.Request) {
 
 	ops, ok := s.repeaterOps(name)
 	if !ok || ops == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
 	info, err := ops.PathGet(pubkey)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeOpError(w, "contact path get", err)
 		return
 	}
 
@@ -362,12 +351,12 @@ func (s *Server) handleResetContactPath(w http.ResponseWriter, r *http.Request) 
 
 	ops, ok := s.repeaterOps(name)
 	if !ok || ops == nil {
-		writeError(w, http.StatusNotFound, "companion not found")
+		s.companionNotRunning(w, r)
 		return
 	}
 
 	if err := ops.PathReset(pubkey); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeOpError(w, "contact path reset", err)
 		return
 	}
 

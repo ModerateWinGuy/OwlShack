@@ -51,7 +51,7 @@ func (r *PeerRepo) Upsert(ctx context.Context, p *Peer) error {
 			snr                = excluded.snr,
 			rssi               = excluded.rssi`,
 		p.PubKey, p.Name, p.Type, p.Lat, p.Lon, p.Feat1, p.Feat2,
-		p.OutPath, p.OutPathHashSize, p.LastAdvertTS, p.LastSeen, p.SNR, p.RSSI,
+		p.OutPath, p.OutPathHashSize, p.LastAdvertTS, p.LastSeen.UnixMilli(), p.SNR, p.RSSI,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting peer: %w", err)
@@ -112,7 +112,7 @@ func (r *PeerRepo) GetByPubKey(ctx context.Context, pubkey []byte) (*Peer, error
 		SELECT pubkey, name, type, lat, lon, feat1, feat2, out_path, out_path_hash_size, last_advert_ts, last_seen, snr, rssi
 		FROM discovered_peers WHERE pubkey = ?`, pubkey,
 	).Scan(&p.PubKey, &p.Name, &p.Type, &p.Lat, &p.Lon,
-		&feat1, &feat2, &outPath, &p.OutPathHashSize, &lastAdvertTS, &p.LastSeen, &snr, &rssi)
+		&feat1, &feat2, &outPath, &p.OutPathHashSize, &lastAdvertTS, unixMS(&p.LastSeen), &snr, &rssi)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -157,7 +157,7 @@ func scanPeers(rows *sql.Rows) ([]Peer, error) {
 		if err := rows.Scan(
 			&p.PubKey, &p.Name, &p.Type, &p.Lat, &p.Lon,
 			&feat1, &feat2, &outPath, &p.OutPathHashSize, &lastAdvertTS,
-			&p.LastSeen, &snr, &rssi,
+			unixMS(&p.LastSeen), &snr, &rssi,
 		); err != nil {
 			return nil, err
 		}
@@ -262,4 +262,43 @@ func (r *PeerRepo) namesByHash(ctx context.Context, hash []byte, filter string) 
 		return nil, fmt.Errorf("iterating peer names: %w", err)
 	}
 	return names, nil
+}
+
+// HopPinRepo maps a path hash (lowercase hex, 1-3 bytes) to the operator's chosen owner; nil pubkey = none.
+type HopPinRepo struct{ db *sql.DB }
+
+// List maps every pinned hash to its pubkey; a present key with a nil value is a "none" pin.
+func (r *HopPinRepo) List(ctx context.Context) (map[string][]byte, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT hash, pubkey FROM hop_pins")
+	if err != nil {
+		return nil, fmt.Errorf("querying hop pins: %w", err)
+	}
+	defer rows.Close()
+	pins := map[string][]byte{}
+	for rows.Next() {
+		var hash string
+		var pubkey []byte
+		if err := rows.Scan(&hash, &pubkey); err != nil {
+			return nil, fmt.Errorf("scanning hop pin: %w", err)
+		}
+		pins[hash] = pubkey
+	}
+	return pins, rows.Err()
+}
+
+func (r *HopPinRepo) Set(ctx context.Context, hash string, pubkey []byte) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO hop_pins (hash, pubkey) VALUES (?, ?)
+		ON CONFLICT(hash) DO UPDATE SET pubkey = excluded.pubkey`, hash, pubkey)
+	if err != nil {
+		return fmt.Errorf("pinning hop %s: %w", hash, err)
+	}
+	return nil
+}
+
+func (r *HopPinRepo) Delete(ctx context.Context, hash string) error {
+	if _, err := r.db.ExecContext(ctx, "DELETE FROM hop_pins WHERE hash = ?", hash); err != nil {
+		return fmt.Errorf("unpinning hop %s: %w", hash, err)
+	}
+	return nil
 }

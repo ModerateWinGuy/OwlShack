@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	meshcore "github.com/meshcore-go/meshcore-go"
-	"github.com/meshcore-go/meshcore-go/node"
+	meshcore "github.com/OwlShack/meshcore-go"
+	"github.com/OwlShack/meshcore-go/node"
 
-	"github.com/meshcore-go/OwlShack/internal/client/repeater"
-	"github.com/meshcore-go/OwlShack/internal/config"
-	"github.com/meshcore-go/OwlShack/internal/modem"
-	"github.com/meshcore-go/OwlShack/internal/sensor"
-	"github.com/meshcore-go/OwlShack/internal/store"
+	"github.com/OwlShack/OwlShack/internal/client/repeater"
+	"github.com/OwlShack/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/modem"
+	"github.com/OwlShack/OwlShack/internal/sensor"
+	"github.com/OwlShack/OwlShack/internal/store"
 )
 
 func mode(m string) *string { return &m }
@@ -110,7 +110,7 @@ func TestTelemetry_ClassModes(t *testing.T) {
 				TelemetryBase:        mode(config.TelemetryContacts),
 				TelemetryEnvironment: mode(config.TelemetrySelected),
 			},
-			granted: sensor.PermEnvironment,
+			granted: meshcore.TelemPermEnvironment,
 			want:    "01740190026700E1",
 		},
 		{
@@ -119,7 +119,7 @@ func TestTelemetry_ClassModes(t *testing.T) {
 				TelemetryBase:        mode(config.TelemetryContacts),
 				TelemetryEnvironment: mode(config.TelemetryContacts),
 			},
-			mask: sensor.PermEnvironment,
+			mask: meshcore.TelemPermEnvironment,
 			want: "01740190",
 		},
 		{
@@ -223,8 +223,9 @@ func TestTelemetry_AMapAtTheBudgetReachesTheRequester(t *testing.T) {
 
 // recordingRadio is a TxRadio, so node.New sends straight to it and a test reads what went out.
 type recordingRadio struct {
-	mu   sync.Mutex
-	sent [][]byte
+	mu     sync.Mutex
+	sent   [][]byte
+	refuse bool // a full transmit queue
 }
 
 func (r *recordingRadio) SendData(d []byte) error                             { r.record(d); return nil }
@@ -232,8 +233,14 @@ func (r *recordingRadio) SetDataHandler(func(*meshcore.Packet))               {}
 func (r *recordingRadio) SetRawDataHandler(func([]byte, float32, int8, bool)) {}
 func (r *recordingRadio) AddOutboundHandler(func([]byte))                     {}
 func (r *recordingRadio) Close() error                                        { return nil }
-func (r *recordingRadio) Enqueue(d []byte, _ uint8, _ time.Duration) bool     { r.record(d); return true }
-func (r *recordingRadio) TxQueueLen() int                                     { return 0 }
+func (r *recordingRadio) Enqueue(d []byte, _ uint8, _ time.Duration) bool {
+	if r.refuse {
+		return false
+	}
+	r.record(d)
+	return true
+}
+func (r *recordingRadio) TxQueueLen() int { return 0 }
 
 func (r *recordingRadio) record(d []byte) {
 	r.mu.Lock()
@@ -431,7 +438,7 @@ func TestContactHashSize_FramesACKsAndDMs(t *testing.T) {
 	if hs := floodHashSize(t, radio); hs != 3 {
 		t.Errorf("the ACK flooded with %d-byte hashes, want the contact's 3", hs)
 	}
-	c.repeaters = repeater.NewClient(c.node, c.store, c.cfg.ID, c.log, nil, c.pathHashSize) // owns the timestamp counter DMs share
+	c.repeaters = repeater.NewClient(c.node, c.store, c.cfg.ID, c.log, nil, c.pathHashSize, func([]byte) *meshcore.Region { return nil }) // owns the send-order lock DMs take
 	if err := c.SendContactMessage(hex.EncodeToString(friend.PublicKeyBytes()), "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +495,7 @@ func TestTelemetry_AGrantCannotOpenADeniedClass(t *testing.T) {
 		Latitude:             &lat, Longitude: &lon,
 	}, oneRow(2, meshcore.LPPTemperature, sensor.Temperature, 22.5))
 
-	got, _ := replyHex(t, c, sensor.PermLocation|sensor.PermEnvironment, 0)
+	got, _ := replyHex(t, c, meshcore.TelemPermLocation|meshcore.TelemPermEnvironment, 0)
 	if strings.Contains(got, "0188") {
 		t.Errorf("reply %s carries a position the operator denied", got)
 	}

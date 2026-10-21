@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meshcore-go/meshcore-go/hardware/sx12xx"
+	"github.com/OwlShack/meshcore-go/hardware/sx12xx"
 
-	"github.com/meshcore-go/OwlShack/internal/config"
+	"github.com/OwlShack/OwlShack/internal/config"
 )
 
 const source = "https://api.meshcore.nz/api/v1/config"

@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type ChangeEvent,
-  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -27,10 +26,10 @@ import {
   MapPin,
   MoreVertical,
   Network,
+  Layers,
   Plus,
   RefreshCw,
   Route,
-  Send,
   Settings as SettingsIcon,
   Shield,
   Signal,
@@ -87,7 +86,7 @@ import {
   MonitoringSettings,
   type MonitorMetadata,
 } from "@/components/MonitoringSettings";
-import { cliCommandsFor, cliConfigKeysFor, type CliRole } from "@/lib/cliCatalog";
+import { CliTerminal } from "@/components/CliTerminal";
 import {
   AddAccessDialog,
   AlertBitToggle,
@@ -104,6 +103,9 @@ import {
   rolePillClass,
 } from "@/components/RepeaterUI";
 import { apiErrorMessage } from "@/lib/apiError";
+import { RemoteRegionsTab } from "@/pages/RemoteRegionsTab";
+import { RemoteFetchContext, useRemoteFetch } from "@/lib/remoteFetch";
+import { useCompanionRef } from "@/hooks/useCompanions";
 
 interface Contact {
   peerPubkey: string;
@@ -166,13 +168,8 @@ type TabKey =
   | "owner"
   | "telemetry"
   | "access"
+  | "regions"
   | "settings";
-
-interface CliEntry {
-  kind: "input" | "output" | "error";
-  text: string;
-  ts: number;
-}
 
 interface NeighborEntry {
   pubkeyPrefix: string;
@@ -188,6 +185,7 @@ export type AdminNodeKind = "repeater" | "sensor" | "room";
 export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind }) {
   const { ref, pubkey } = useParams<{ ref: string; pubkey: string }>();
   const decodedName = ref ?? "";
+  const { id: companionId } = useCompanionRef(ref);
   const decodedPubkey = pubkey ? decodeURIComponent(pubkey) : "";
   const navigate = useNavigate();
   const isSensor = kind === "sensor";
@@ -200,7 +198,7 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
     ...(isSensor ? [] : [{ to: companionPath, label: "messages" }]),
   ];
 
-  // The /repeaters/ path is type-agnostic; rooms have their own login, status and keep-alive under /rooms/.
+  // The /repeaters/ path is type-agnostic; rooms have their own login and status under /rooms/.
   const apiBase = `/api/companions/${encodeURIComponent(decodedName)}/repeaters/${encodeURIComponent(decodedPubkey)}`;
   const roomApiBase = `/api/companions/${encodeURIComponent(decodedName)}/rooms/${encodeURIComponent(decodedPubkey)}`;
   // Shares the key chat's RoomJoinBar uses, so a password saved here joins the room in chat too.
@@ -218,29 +216,68 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
   const [bootstrapping, setBootstrapping] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<TabKey>(isSensor ? "telemetry" : "status");
+  const [chosenTab, setTab] = useState<TabKey>(isSensor ? "telemetry" : "status");
   const [password, setPassword] = useState("");
   const [saveLogin, setSaveLogin] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
   const [pathDialogOpen, setPathDialogOpen] = useState(false);
 
-  const peerName = contact?.name || (isSensor ? "Sensor" : isRoom ? "Room" : "Repeater");
-  const peerType = contact?.type || (isSensor ? "SENSOR" : isRoom ? "ROOM" : "REPEATER");
+  const peer = useMemo(
+    () => peers.find((p) => p.pubkey.toLowerCase() === decodedPubkey.toLowerCase()),
+    [peers, decodedPubkey],
+  );
+  const knownName = contact?.name || peer?.name;
+  const peerName = knownName || (isSensor ? "Sensor" : isRoom ? "Room" : "Repeater");
+  const peerType = contact?.type || peer?.type || (isSensor ? "SENSOR" : isRoom ? "ROOM" : "REPEATER");
   const isAdmin = !!session?.isAdmin;
+  // A tab this login can't see (after logging back in with a lesser role) falls back to the first one.
+  const tabShown: Record<TabKey, boolean> = {
+    status: !isSensor,
+    monitoring: true,
+    terminal: isAdmin,
+    neighbors: kind === "repeater",
+    owner: !isAdmin && kind === "repeater",
+    telemetry: true,
+    access: isAdmin,
+    regions: isAdmin,
+    settings: isAdmin,
+  };
+  const tab: TabKey = tabShown[chosenTab] ? chosenTab : isSensor ? "telemetry" : "status";
   const loggedIn =
     session?.loggedIn === true ||
     (session?.loggedIn !== false && !!session?.pubkeyHex);
 
+  // refreshSession resolves to whether OwlShack still holds a login for this node.
   const refreshSession = useCallback(async () => {
     try {
       const r = await fetch(`${apiBase}/session`);
       if (!r.ok) throw new Error("session");
       const data: Session = await r.json();
       setSession(data);
+      return data.loggedIn === true || (data.loggedIn !== false && !!data.pubkeyHex);
     } catch {
       setSession({ loggedIn: false });
+      return false;
     }
   }, [apiBase]);
+
+  // A 401 means OwlShack holds no login for this node any more, so the page goes back to its login form.
+  const remoteFetch = useCallback<typeof fetch>(
+    async (input, init) => {
+      const before = new Set(toast.getToasts().map((t) => t.id));
+      const r = await fetch(input, init);
+      if (r.status === 401) {
+        // The tabs' own errors for this request are moot once the page is back at its login form, so one notice replaces them.
+        void refreshSession().then((still) => {
+          if (still) return;
+          for (const t of toast.getToasts()) if ("type" in t && t.type === "error" && !before.has(t.id)) toast.dismiss(t.id);
+          toast.info("OwlShack is no longer logged in to this node. Log in again.", { id: "remote-login-lost" });
+        });
+      }
+      return r;
+    },
+    [refreshSession],
+  );
 
   const refreshPath = useCallback(async () => {
     try {
@@ -296,11 +333,6 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
   useEffect(() => {
     bootstrap();
   }, [bootstrap]);
-
-  const keepAlive = useCallback(async () => {
-    const r = await fetch(`${roomApiBase}/keepalive`, { method: "POST" });
-    if (!r.ok) throw new Error(await apiErrorMessage(r, "Keep-alive failed"));
-  }, [roomApiBase]);
 
   const handleLogin = useCallback(async () => {
     setLoggingIn(true);
@@ -411,17 +443,17 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
 
   const sendCli = useCallback(
     async (command: string): Promise<string> => {
-      const r = await fetch(`${apiBase}/cli`, {
+      const r = await remoteFetch(`${apiBase}/cli`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ command }),
       });
-      if (!r.ok) throw new Error(await apiErrorMessage(r, "CLI error"));
+      if (!r.ok) throw Object.assign(new Error(await apiErrorMessage(r, "CLI error")), { status: r.status });
       const data: { response: string } = await r.json();
       refreshPath();
       return data.response;
     },
-    [apiBase, refreshPath],
+    [apiBase, refreshPath, remoteFetch],
   );
 
   if (bootstrapping) {
@@ -446,276 +478,290 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
   }
 
   return (
-    <div className="space-y-4">
-      <PageHeader
-        title={peerName.toUpperCase()}
-        meta={
-          <span className="font-mono text-xs text-muted-foreground tabular-nums">
-            <code>{truncateMid(decodedPubkey, 6, 6)}</code>
-          </span>
-        }
-        actions={
-          <>
-            {headerNav.map((n) => (
-              <HeaderButton key={n.to} icon={ArrowLeft} to={n.to} className="hidden sm:inline-flex">
-                {n.label}
-              </HeaderButton>
-            ))}
-            <PathBadge info={pathInfo} />
-            {loggedIn && (
-              <span
-                className={cn(
-                  "inline-flex h-7 items-center gap-1.5 px-2.5 border font-mono text-[11px] uppercase tracking-[0.12em]",
-                  isAdmin
-                    ? "border-warning/40 text-warning bg-warning/5"
-                    : "border-success/40 text-success bg-success/5",
-                )}
-              >
-                <Shield className="size-3.5" />
-                {session?.role ?? (session?.permissions != null ? roleLabel(session.permissions).toLowerCase() : isAdmin ? "admin" : "guest")}
-              </span>
-            )}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <HeaderButton icon={MoreVertical} iconOnly>
-                  {kind === "room" ? "Room actions" : kind === "sensor" ? "Sensor actions" : "Repeater actions"}
+    <RemoteFetchContext.Provider value={remoteFetch}>
+      <div className="space-y-4">
+        <PageHeader
+          title={peerName.toUpperCase()}
+          meta={
+            <span className="font-mono text-xs text-muted-foreground tabular-nums">
+              <code>{truncateMid(decodedPubkey, 6, 6)}</code>
+            </span>
+          }
+          actions={
+            <>
+              {headerNav.map((n) => (
+                <HeaderButton key={n.to} icon={ArrowLeft} to={n.to} className="hidden sm:inline-flex">
+                  {n.label}
                 </HeaderButton>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="rounded-sm">
-                {headerNav.map((n) => (
-                  <DropdownMenuItem key={n.to} asChild className="font-mono text-xs uppercase tracking-[0.08em] sm:hidden">
-                    <Link to={n.to}>
-                      <ArrowLeft className="size-3.5" /> {n.label}
-                    </Link>
-                  </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator className="sm:hidden" />
-                <DropdownMenuItem
-                  onClick={() => setPathDialogOpen(true)}
-                  className="font-mono text-xs uppercase tracking-[0.08em]"
+              ))}
+              <PathBadge info={pathInfo} />
+              {loggedIn && (
+                <span
+                  className={cn(
+                    "inline-flex h-7 items-center gap-1.5 px-2.5 border font-mono text-[11px] uppercase tracking-[0.12em]",
+                    isAdmin
+                      ? "border-warning/40 text-warning bg-warning/5"
+                      : "border-success/40 text-success bg-success/5",
+                  )}
                 >
-                  <Route className="size-3.5" /> Edit path
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={handleResetPath}
-                  disabled={!pathInfo?.hasPath}
-                  className="font-mono text-xs uppercase tracking-[0.08em]"
-                >
-                  <RefreshCw className="size-3.5" /> Reset path
-                </DropdownMenuItem>
-                {loggedIn && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      variant="destructive"
-                      onClick={handleLogout}
-                      className="font-mono text-xs uppercase tracking-[0.08em]"
-                    >
-                      <LogOut className="size-3.5" /> Logout
+                  <Shield className="size-3.5" />
+                  {session?.role ?? (session?.permissions != null ? roleLabel(session.permissions).toLowerCase() : isAdmin ? "admin" : "guest")}
+                </span>
+              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <HeaderButton icon={MoreVertical} iconOnly>
+                    {kind === "room" ? "Room actions" : kind === "sensor" ? "Sensor actions" : "Repeater actions"}
+                  </HeaderButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="rounded-sm">
+                  {headerNav.map((n) => (
+                    <DropdownMenuItem key={n.to} asChild className="font-mono text-xs uppercase tracking-[0.08em] sm:hidden">
+                      <Link to={n.to}>
+                        <ArrowLeft className="size-3.5" /> {n.label}
+                      </Link>
                     </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </>
-        }
-      />
-
-      {/* Identity panel */}
-      <section className="panel p-4 flex items-center gap-4">
-        <PeerAvatar name={peerName} size="lg" />
-        <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span
-              className="min-w-0 max-w-full truncate font-mono text-base font-semibold uppercase tracking-[0.06em]"
-              title={peerName}
-            >
-              {peerName}
-            </span>
-            <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest px-1.5 py-0.5 border border-border text-muted-foreground">
-              {peerType}
-            </span>
-          </div>
-          <code className="block font-mono text-xs text-muted-foreground truncate" title={decodedPubkey}>
-            {truncateMid(decodedPubkey, 10, 8)}
-          </code>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            navigator.clipboard.writeText(decodedPubkey);
-            toast.success("Pubkey copied");
-          }}
-          className="rounded-none font-mono text-[10px] uppercase tracking-[0.12em]"
-        >
-          <Copy className="size-3" /> copy
-        </Button>
-      </section>
-
-      {!loggedIn ? (
-        <LoginCard
-          password={password}
-          onPasswordChange={setPassword}
-          loggingIn={loggingIn}
-          onLogin={handleLogin}
-          saveLogin={saveLogin}
-          onSaveLoginChange={setSaveLogin}
-          hasSavedPassword={!!savedPassword(contact?.metadata)}
-          kind={kind}
+                  ))}
+                  <DropdownMenuSeparator className="sm:hidden" />
+                  <DropdownMenuItem
+                    onClick={() => setPathDialogOpen(true)}
+                    className="font-mono text-xs uppercase tracking-[0.08em]"
+                  >
+                    <Route className="size-3.5" /> Edit path
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={handleResetPath}
+                    disabled={!pathInfo?.hasPath}
+                    className="font-mono text-xs uppercase tracking-[0.08em]"
+                  >
+                    <RefreshCw className="size-3.5" /> Reset path
+                  </DropdownMenuItem>
+                  {loggedIn && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onClick={handleLogout}
+                        className="font-mono text-xs uppercase tracking-[0.08em]"
+                      >
+                        <LogOut className="size-3.5" /> Logout
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </>
+          }
         />
-      ) : (
-        <Tabs
-          value={tab}
-          onValueChange={(v) => setTab(v as TabKey)}
-          className="space-y-4"
-        >
-          <RepeaterTabsList>
-            {!isSensor && (
-              <RepeaterTab value="status" icon={<Signal className="size-3" />}>
-                Status
-              </RepeaterTab>
-            )}
-            <RepeaterTab value="monitoring" icon={<Gauge className="size-3" />}>
-              Monitoring
-            </RepeaterTab>
-            {isAdmin && (
-              <RepeaterTab value="terminal" icon={<Terminal className="size-3" />}>
-                Terminal
-              </RepeaterTab>
-            )}
-            {kind === "repeater" && (
-              <RepeaterTab value="neighbors" icon={<Users className="size-3" />}>
-                Neighbors
-              </RepeaterTab>
-            )}
-            {!isAdmin && kind === "repeater" && (
-              <RepeaterTab value="owner" icon={<Info className="size-3" />}>
-                Owner
-              </RepeaterTab>
-            )}
-            <RepeaterTab value="telemetry" icon={<Activity className="size-3" />}>
-              Telemetry
-            </RepeaterTab>
-            {isAdmin && (
-              <RepeaterTab value="access" icon={<Shield className="size-3" />}>
-                Access
-              </RepeaterTab>
-            )}
-            {isAdmin && (
-              <RepeaterTab
-                value="settings"
-                icon={<SettingsIcon className="size-3" />}
-              >
-                Settings
-              </RepeaterTab>
-            )}
-          </RepeaterTabsList>
 
-          <TabsContent
-            value="status"
-            className="mt-0 data-[state=inactive]:hidden"
-            forceMount
+        {/* Identity panel */}
+        <section className="panel p-4 flex items-center gap-4">
+          <PeerAvatar name={peerName} size="lg" />
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span
+                className="min-w-0 max-w-full truncate font-mono text-base font-semibold uppercase tracking-[0.06em]"
+                title={peerName}
+              >
+                {peerName}
+              </span>
+              <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest px-1.5 py-0.5 border border-border text-muted-foreground">
+                {peerType}
+              </span>
+            </div>
+            <code className="block font-mono text-xs text-muted-foreground truncate" title={decodedPubkey}>
+              {truncateMid(decodedPubkey, 10, 8)}
+            </code>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              navigator.clipboard.writeText(decodedPubkey);
+              toast.success("Pubkey copied");
+            }}
+            className="rounded-none font-mono text-[10px] uppercase tracking-[0.12em]"
           >
-            {!isSensor && (
-              <StatusTab
+            <Copy className="size-3" /> copy
+          </Button>
+        </section>
+
+        {!loggedIn ? (
+          <LoginCard
+            password={password}
+            onPasswordChange={setPassword}
+            loggingIn={loggingIn}
+            onLogin={handleLogin}
+            saveLogin={saveLogin}
+            onSaveLoginChange={setSaveLogin}
+            hasSavedPassword={!!savedPassword(contact?.metadata)}
+            kind={kind}
+          />
+        ) : (
+          <Tabs
+            value={tab}
+            onValueChange={(v) => setTab(v as TabKey)}
+            className="space-y-4"
+          >
+            <RepeaterTabsList>
+              {!isSensor && (
+                <RepeaterTab value="status" icon={<Signal className="size-3" />}>
+                  Status
+                </RepeaterTab>
+              )}
+              <RepeaterTab value="monitoring" icon={<Gauge className="size-3" />}>
+                Monitoring
+              </RepeaterTab>
+              {isAdmin && (
+                <RepeaterTab value="terminal" icon={<Terminal className="size-3" />}>
+                  Terminal
+                </RepeaterTab>
+              )}
+              {kind === "repeater" && (
+                <RepeaterTab value="neighbors" icon={<Users className="size-3" />}>
+                  Neighbors
+                </RepeaterTab>
+              )}
+              {!isAdmin && kind === "repeater" && (
+                <RepeaterTab value="owner" icon={<Info className="size-3" />}>
+                  Owner
+                </RepeaterTab>
+              )}
+              <RepeaterTab value="telemetry" icon={<Activity className="size-3" />}>
+                Telemetry
+              </RepeaterTab>
+              {isAdmin && (
+                <RepeaterTab value="access" icon={<Shield className="size-3" />}>
+                  Access
+                </RepeaterTab>
+              )}
+              {isAdmin && (
+                <RepeaterTab value="regions" icon={<Layers className="size-3" />}>
+                  Regions
+                </RepeaterTab>
+              )}
+              {isAdmin && (
+                <RepeaterTab
+                  value="settings"
+                  icon={<SettingsIcon className="size-3" />}
+                >
+                  Settings
+                </RepeaterTab>
+              )}
+            </RepeaterTabsList>
+
+            <TabsContent
+              value="status"
+              className="mt-0 data-[state=inactive]:hidden"
+              forceMount
+            >
+              {!isSensor && (
+                <StatusTab
+                  apiBase={apiBase}
+                  statusUrl={isRoom ? `${roomApiBase}/status` : `${apiBase}/status`}
+                  kind={kind}
+                  active={tab === "status"}
+                  onPathMayChange={refreshPath}
+                />
+              )}
+            </TabsContent>
+            <TabsContent value="monitoring" className="mt-0">
+              <MonitoringSettings
+                companionRef={decodedName}
+                pubkey={decodedPubkey}
+                kind={isSensor ? "sensor" : "repeater"}
+                metadata={contact?.metadata}
+                onSaved={handleMonitorSaved}
+              />
+            </TabsContent>
+            {isAdmin && (
+              <TabsContent value="terminal" className="mt-0">
+                <CliTerminal sendCli={sendCli} role={kind} />
+              </TabsContent>
+            )}
+            <TabsContent
+              value="neighbors"
+              className="mt-0 data-[state=inactive]:hidden"
+              forceMount
+            >
+              <NeighborsTab
                 apiBase={apiBase}
-                statusUrl={isRoom ? `${roomApiBase}/status` : `${apiBase}/status`}
-                kind={kind}
-                onKeepAlive={isRoom ? keepAlive : undefined}
-                active={tab === "status"}
+                sendCli={sendCli}
+                isAdmin={isAdmin}
+                peers={peers}
+                active={tab === "neighbors"}
                 onPathMayChange={refreshPath}
               />
+            </TabsContent>
+            {!isAdmin && (
+              <TabsContent
+                value="owner"
+                className="mt-0 data-[state=inactive]:hidden"
+                forceMount
+              >
+                <OwnerTab apiBase={apiBase} active={tab === "owner"} />
+              </TabsContent>
             )}
-          </TabsContent>
-          <TabsContent value="monitoring" className="mt-0">
-            <MonitoringSettings
-              companionRef={decodedName}
-              pubkey={decodedPubkey}
-              kind={isSensor ? "companion" : "repeater"}
-              metadata={contact?.metadata}
-              onSaved={handleMonitorSaved}
-            />
-          </TabsContent>
-          {isAdmin && (
-            <TabsContent value="terminal" className="mt-0">
-              <TerminalTab sendCli={sendCli} kind={kind} />
-            </TabsContent>
-          )}
-          <TabsContent
-            value="neighbors"
-            className="mt-0 data-[state=inactive]:hidden"
-            forceMount
-          >
-            <NeighborsTab
-              apiBase={apiBase}
-              sendCli={sendCli}
-              isAdmin={isAdmin}
-              peers={peers}
-              active={tab === "neighbors"}
-              onPathMayChange={refreshPath}
-            />
-          </TabsContent>
-          {!isAdmin && (
             <TabsContent
-              value="owner"
+              value="telemetry"
               className="mt-0 data-[state=inactive]:hidden"
               forceMount
             >
-              <OwnerTab apiBase={apiBase} active={tab === "owner"} />
+              <div className="space-y-8">
+                <TelemetryPanel apiBase={apiBase} autoFetch={tab === "telemetry"} live={isSensor && companionId != null ? { pubkey: decodedPubkey, companionId } : undefined} />
+                {isSensor && <SeriesPanel apiBase={apiBase} />}
+              </div>
             </TabsContent>
-          )}
-          <TabsContent
-            value="telemetry"
-            className="mt-0 data-[state=inactive]:hidden"
-            forceMount
-          >
-            <div className="space-y-8">
-              <TelemetryPanel apiBase={apiBase} autoFetch={tab === "telemetry"} />
-              {isSensor && <SeriesPanel apiBase={apiBase} />}
-            </div>
-          </TabsContent>
-          {isAdmin && (
-            <TabsContent
-              value="access"
-              className="mt-0 data-[state=inactive]:hidden"
-              forceMount
-            >
-              <AccessTab
-                apiBase={apiBase}
-                peers={peers}
-                companions={companions}
-                active={tab === "access"}
+            {isAdmin && (
+              <TabsContent
+                value="access"
+                className="mt-0 data-[state=inactive]:hidden"
+                forceMount
+              >
+                <AccessTab
+                  apiBase={apiBase}
+                  peers={peers}
+                  companions={companions}
+                  active={tab === "access"}
+                  kind={kind}
+                />
+              </TabsContent>
+            )}
+            {isAdmin && (
+              <TabsContent value="regions" className="mt-0 data-[state=inactive]:hidden" forceMount>
+                <RemoteRegionsTab apiBase={apiBase} sendCli={sendCli} active={tab === "regions"} role={isSensor ? "sensor" : isRoom ? "room" : "repeater"} />
+              </TabsContent>
+            )}
+            {isAdmin && (
+              <TabsContent value="settings" className="mt-0">
+                <SettingsTab
                 kind={kind}
-              />
-            </TabsContent>
-          )}
-          {isAdmin && (
-            <TabsContent value="settings" className="mt-0">
-              <SettingsTab
-              kind={kind}
-                pubkey={decodedPubkey}
-                peerName={peerName}
-                sendCli={sendCli}
-                onReboot={() => navigate(0)}
-                onLocalNameUpdate={(n) =>
-                  setContact((c) => (c ? { ...c, name: n } : c))
-                }
-              />
-            </TabsContent>
-          )}
-        </Tabs>
-      )}
+                  pubkey={decodedPubkey}
+                  peerName={peerName}
+                  sendCli={sendCli}
+                  onReboot={() => navigate(0)}
+                  onLocalNameUpdate={(n) => {
+                    setContact((c) => (c ? { ...c, name: n } : c));
+                    setPeers((ps) =>
+                      ps.map((p) => (p.pubkey.toLowerCase() === decodedPubkey.toLowerCase() ? { ...p, name: n } : p)),
+                    );
+                  }}
+                />
+              </TabsContent>
+            )}
+          </Tabs>
+        )}
 
-      <PathDialog
-        open={pathDialogOpen}
-        onOpenChange={setPathDialogOpen}
-        companion={decodedName}
-        pubkey={decodedPubkey}
-        name={contact?.name || "this node"}
-        onChanged={refreshPath}
-      />
-    </div>
+        <PathDialog
+          open={pathDialogOpen}
+          onOpenChange={setPathDialogOpen}
+          companion={decodedName}
+          pubkey={decodedPubkey}
+          name={knownName || "this node"}
+          onChanged={refreshPath}
+        />
+      </div>
+    </RemoteFetchContext.Provider>
   );
 }
 
@@ -831,19 +877,17 @@ function StatusTab({
   apiBase,
   statusUrl,
   kind,
-  onKeepAlive,
   active,
   onPathMayChange,
 }: {
   apiBase: string;
   statusUrl?: string;
   kind: AdminNodeKind;
-  onKeepAlive?: () => Promise<void>;
   active: boolean;
   onPathMayChange?: () => void;
 }) {
+  const remoteFetch = useRemoteFetch();
   const isRoom = kind === "room";
-  const [resyncing, setResyncing] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -853,7 +897,7 @@ function StatusTab({
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch(statusUrl ?? `${apiBase}/status`);
+      const r = await remoteFetch(statusUrl ?? `${apiBase}/status`);
       if (!r.ok) throw new Error("status");
       const data: Status = await r.json();
       setStatus(data);
@@ -864,7 +908,7 @@ function StatusTab({
     } finally {
       setLoading(false);
     }
-  }, [apiBase, statusUrl, onPathMayChange]);
+  }, [apiBase, statusUrl, onPathMayChange, remoteFetch]);
 
   useEffect(() => {
     if (active && !fetchedRef.current) {
@@ -886,29 +930,6 @@ function StatusTab({
           <RefreshCw className={cn("size-3", loading && "animate-spin")} />
           refresh
         </Button>
-        {onKeepAlive && (
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={resyncing}
-            onClick={async () => {
-              setResyncing(true);
-              try {
-                await onKeepAlive();
-                toast.success("Keep-alive sent — posts will resume in chat");
-              } catch (e) {
-                toast.error(e instanceof Error ? e.message : "Keep-alive failed");
-              } finally {
-                setResyncing(false);
-              }
-            }}
-            className="rounded-none font-mono text-[10px] uppercase tracking-[0.12em]"
-            title="Send a keep-alive so the room resumes pushing posts"
-          >
-            <RefreshCw className={cn("size-3", resyncing && "animate-spin")} />
-            resync posts
-          </Button>
-        )}
       </div>
       {err && (
         <Alert variant="destructive">
@@ -1030,294 +1051,6 @@ function ErrEventsTile({ mask }: { mask: number }) {
   );
 }
 
-// Curated CLI catalogue, mirrored from MeshCore/src/helpers/CommonCLI.cpp.
-interface Suggestion {
-  text: string;
-  hint?: string;
-}
-
-function buildSuggestions(input: string, role: CliRole): Suggestion[] {
-  const CLI_CONFIG_KEYS = cliConfigKeysFor(role);
-  const CLI_TOPLEVEL_COMMANDS = cliCommandsFor(role);
-  const lower = input.toLowerCase();
-  // get / set sub-completion: rank prefix matches first, then substring matches.
-  if (lower.startsWith("get ") || lower.startsWith("set ")) {
-    const prefix = lower.slice(0, 4);
-    const tail = lower.slice(4).trim();
-    if (tail === "") {
-      return CLI_CONFIG_KEYS.map((k) => ({
-        text: `${prefix}${k.key}`,
-        hint: k.hint,
-      }));
-    }
-    const starts = CLI_CONFIG_KEYS.filter((k) => k.key.startsWith(tail));
-    const others = CLI_CONFIG_KEYS.filter(
-      (k) => !k.key.startsWith(tail) && k.key.includes(tail),
-    );
-    return [...starts, ...others].map((k) => ({
-      text: `${prefix}${k.key}`,
-      hint: k.hint,
-    }));
-  }
-  if (lower === "") {
-    return CLI_TOPLEVEL_COMMANDS.map((c) => ({
-      text: c.command,
-      hint: c.hint,
-    }));
-  }
-  const starts = CLI_TOPLEVEL_COMMANDS.filter((c) =>
-    c.command.toLowerCase().startsWith(lower),
-  );
-  const others = CLI_TOPLEVEL_COMMANDS.filter(
-    (c) =>
-      !c.command.toLowerCase().startsWith(lower) &&
-      c.command.toLowerCase().includes(lower),
-  );
-  return [...starts, ...others].map((c) => ({
-    text: c.command,
-    hint: c.hint,
-  }));
-}
-
-function TerminalTab({
-  sendCli,
-  kind,
-}: {
-  sendCli: (cmd: string) => Promise<string>;
-  kind: AdminNodeKind;
-}) {
-  const [history, setHistory] = useState<CliEntry[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [hIdx, setHIdx] = useState(-1);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-  const [sIdx, setSIdx] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-
-  const inputs = useMemo(
-    () => history.filter((h) => h.kind === "input").map((h) => h.text),
-    [history],
-  );
-
-  const suggestions = useMemo(
-    () =>
-      suggestionsOpen && input.trim() !== "" ? buildSuggestions(input, kind) : [],
-    [input, suggestionsOpen, kind],
-  );
-
-  useEffect(() => {
-    setSIdx(0);
-  }, [input]);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history]);
-
-  const applySuggestion = useCallback((s: Suggestion) => {
-    setInput(s.text);
-    setSuggestionsOpen(false);
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, []);
-
-  const submit = useCallback(async () => {
-    const cmd = input.trim();
-    if (!cmd || busy) return;
-    setBusy(true);
-    setHistory((prev) => [...prev, { kind: "input", text: cmd, ts: Date.now() }]);
-    setInput("");
-    setHIdx(-1);
-    try {
-      const out = await sendCli(cmd);
-      setHistory((prev) => [
-        ...prev,
-        { kind: "output", text: out || "(empty)", ts: Date.now() },
-      ]);
-    } catch (e) {
-      setHistory((prev) => [
-        ...prev,
-        {
-          kind: "error",
-          text: e instanceof Error ? e.message : "error",
-          ts: Date.now(),
-        },
-      ]);
-    } finally {
-      setBusy(false);
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
-  }, [input, busy, sendCli]);
-
-  const onKey = useCallback(
-    (e: KeyboardEvent<HTMLInputElement>) => {
-      const sugOpen = suggestionsOpen && suggestions.length > 0;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        setSuggestionsOpen(false);
-        submit();
-        return;
-      }
-      if (e.key === "Tab") {
-        e.preventDefault();
-        if (suggestions.length === 0) {
-          setSuggestionsOpen(true);
-          return;
-        }
-        if (sugOpen) {
-          applySuggestion(suggestions[sIdx] || suggestions[0]);
-        } else {
-          // first Tab opens the menu and pre-selects index 0
-          setSuggestionsOpen(true);
-          setSIdx(0);
-        }
-        return;
-      }
-      if (e.key === "Escape") {
-        if (sugOpen) {
-          e.preventDefault();
-          setSuggestionsOpen(false);
-        }
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (sugOpen) {
-          setSIdx((i) => (i <= 0 ? suggestions.length - 1 : i - 1));
-          return;
-        }
-        if (inputs.length === 0) return;
-        const next = hIdx === -1 ? inputs.length - 1 : Math.max(0, hIdx - 1);
-        setHIdx(next);
-        setInput(inputs[next] ?? "");
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (sugOpen) {
-          setSIdx((i) => (i >= suggestions.length - 1 ? 0 : i + 1));
-          return;
-        }
-        if (inputs.length === 0) return;
-        if (hIdx === -1) return;
-        const next = hIdx + 1;
-        if (next >= inputs.length) {
-          setHIdx(-1);
-          setInput("");
-        } else {
-          setHIdx(next);
-          setInput(inputs[next] ?? "");
-        }
-      }
-    },
-    [submit, hIdx, inputs, suggestions, sIdx, suggestionsOpen, applySuggestion],
-  );
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="label-overline">cli session</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setHistory([])}
-          className="rounded-none font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground"
-        >
-          clear
-        </Button>
-      </div>
-      <pre
-        className="bg-background border border-border text-xs font-mono p-3 min-h-72 max-h-112 overflow-y-auto whitespace-pre-wrap wrap-break-word"
-      >
-        {history.length === 0 ? (
-          <span className="text-muted-foreground/50">
-            // type a command. try `ver`, `{kind === "repeater" ? "neighbors" : "clock"}`, `get name`. tab = autocomplete.
-          </span>
-        ) : (
-          history.map((h, i) => (
-            <div
-              key={i}
-              className={cn(
-                "py-0.5",
-                h.kind === "input" && "text-primary",
-                h.kind === "error" && "text-destructive",
-                h.kind === "output" && "text-foreground",
-              )}
-            >
-              {h.kind === "input" ? `> ${h.text}` : h.text}
-            </div>
-          ))
-        )}
-        <div ref={endRef} />
-      </pre>
-      <div className="relative">
-        {suggestionsOpen && suggestions.length > 0 && (
-          <div className="absolute bottom-full left-0 right-0 mb-1 bg-popover border border-border shadow-md z-20 max-h-60 overflow-y-auto">
-            {suggestions.map((s, i) => (
-              <button
-                key={s.text}
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  applySuggestion(s);
-                }}
-                onMouseEnter={() => setSIdx(i)}
-                className={cn(
-                  "w-full text-left px-3 py-1.5 flex items-baseline gap-3 font-mono text-xs",
-                  i === sIdx
-                    ? "bg-primary/15 text-primary"
-                    : "text-foreground hover:bg-muted/40",
-                )}
-              >
-                <span className="flex-1 truncate">{s.text}</span>
-                {s.hint && (
-                  <span className="text-[10px] text-muted-foreground/70 truncate">
-                    {s.hint}
-                  </span>
-                )}
-              </button>
-            ))}
-            <div className="px-3 py-1 border-t border-border font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground/60 flex items-center gap-3">
-              <span>↑↓ select</span>
-              <span>tab apply</span>
-              <span>esc close</span>
-            </div>
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-xs text-primary select-none">
-            {">"}
-          </span>
-          <Input
-            ref={inputRef}
-            value={input}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => {
-              setInput(e.target.value);
-              setSuggestionsOpen(true);
-            }}
-            onKeyDown={onKey}
-            onFocus={() => setSuggestionsOpen(true)}
-            onBlur={() => {
-              // give the click on a suggestion a chance to fire
-              setTimeout(() => setSuggestionsOpen(false), 120);
-            }}
-            disabled={busy}
-            placeholder={busy ? "executing…" : "command (tab to autocomplete)"}
-            className="rounded-none font-mono text-base md:text-xs border-border bg-background flex-1"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <Button
-            size="sm"
-            onClick={submit}
-            disabled={busy || !input.trim()}
-            className="rounded-none font-mono text-[11px] uppercase tracking-[0.12em]"
-          >
-            <Send className="size-3" /> run
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 const NEIGHBORS_PAGE_SIZE = 10;
 
 function NeighborsTab({
@@ -1335,6 +1068,7 @@ function NeighborsTab({
   active: boolean;
   onPathMayChange?: () => void;
 }) {
+  const remoteFetch = useRemoteFetch();
   const [neighbors, setNeighbors] = useState<NeighborEntry[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [busy, setBusy] = useState<"refresh" | "more" | "discover" | null>(
@@ -1356,7 +1090,7 @@ function NeighborsTab({
 
   const fetchPage = useCallback(
     async (offset: number) => {
-      const r = await fetch(
+      const r = await remoteFetch(
         `${apiBase}/neighbors?count=${NEIGHBORS_PAGE_SIZE}&offset=${offset}`,
       );
       if (!r.ok) throw new Error(await apiErrorMessage(r));
@@ -1377,7 +1111,7 @@ function NeighborsTab({
       });
       return { entries: parsed, totalCount: data.totalCount };
     },
-    [apiBase, peerByPrefix],
+    [apiBase, peerByPrefix, remoteFetch],
   );
 
   const refresh = useCallback(async () => {
@@ -1560,6 +1294,7 @@ function OwnerTab({
   apiBase: string;
   active: boolean;
 }) {
+  const remoteFetch = useRemoteFetch();
   const [info, setInfo] = useState<OwnerInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1569,7 +1304,7 @@ function OwnerTab({
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch(`${apiBase}/owner`);
+      const r = await remoteFetch(`${apiBase}/owner`);
       if (!r.ok) throw new Error(await apiErrorMessage(r));
       const data: OwnerInfo = await r.json();
       setInfo(data);
@@ -1579,7 +1314,7 @@ function OwnerTab({
     } finally {
       setLoading(false);
     }
-  }, [apiBase]);
+  }, [apiBase, remoteFetch]);
 
   useEffect(() => {
     if (active && !fetchedRef.current) {
@@ -1683,6 +1418,7 @@ function AccessTab({
   active: boolean;
   kind: AdminNodeKind;
 }) {
+  const remoteFetch = useRemoteFetch();
   const [entries, setEntries] = useState<AccessEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -1709,7 +1445,7 @@ function AccessTab({
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetch(`${apiBase}/access`);
+      const r = await remoteFetch(`${apiBase}/access`);
       if (!r.ok) throw new Error(await apiErrorMessage(r));
       const data: { entries?: AccessEntry[] } = await r.json();
       setEntries(data.entries || []);
@@ -1719,7 +1455,7 @@ function AccessTab({
     } finally {
       setLoading(false);
     }
-  }, [apiBase]);
+  }, [apiBase, remoteFetch]);
 
   useEffect(() => {
     if (active && !fetchedRef.current) refresh();
@@ -1729,7 +1465,7 @@ function AccessTab({
     async (targetPubkey: string, perms: number) => {
       setBusyKey(targetPubkey);
       try {
-        const r = await fetch(
+        const r = await remoteFetch(
           `${apiBase}/access/${encodeURIComponent(targetPubkey)}`,
           {
             method: "PUT",
@@ -1746,14 +1482,14 @@ function AccessTab({
         setBusyKey(null);
       }
     },
-    [apiBase, refresh],
+    [apiBase, refresh, remoteFetch],
   );
 
   const remove = useCallback(
     async (targetPubkey: string) => {
       setBusyKey(targetPubkey);
       try {
-        const r = await fetch(
+        const r = await remoteFetch(
           `${apiBase}/access/${encodeURIComponent(targetPubkey)}`,
           { method: "DELETE" },
         );
@@ -1767,7 +1503,7 @@ function AccessTab({
         setBusyKey(null);
       }
     },
-    [apiBase, refresh],
+    [apiBase, refresh, remoteFetch],
   );
 
   const knownPrefixes = useMemo(
@@ -2121,6 +1857,12 @@ const CR_OPTIONS: SelectOption[] = Array.from({ length: 4 }, (_, i) => {
   return { value: v, label: `4/${v}` };
 });
 
+// Firmware 1.18 prints the int8 TX power through a uint8 getter, so -4 dBm reads back as 252.
+function signedTxPower(tx: string): string {
+  const n = Number(tx);
+  return Number.isInteger(n) && n > 127 && n < 256 ? String(n - 256) : tx;
+}
+
 function RadioSection({ sendCli }: { sendCli: (cmd: string) => Promise<string> }) {
   const [vals, setVals] = useState({ freq: "", bw: "", sf: "", cr: "", tx: "" });
   const [busy, setBusy] = useState<SectionBusy>(null);
@@ -2130,7 +1872,7 @@ function RadioSection({ sendCli }: { sendCli: (cmd: string) => Promise<string> }
     setBusy("load");
     try {
       const radio = stripPromptPrefix(await sendCli("get radio"));
-      const tx = stripPromptPrefix(await sendCli("get tx"));
+      const tx = signedTxPower(stripPromptPrefix(await sendCli("get tx")));
       const [freq = "", bw = "", sf = "", cr = ""] = radio.split(",").map((s) => s.trim());
       setVals({ freq, bw, sf, cr, tx });
     } catch (e) {
@@ -2340,6 +2082,8 @@ function NetworkSection({
     floodMaxUnscoped: "",
     floodMaxAdvert: "",
   });
+  // Save sends only what changed: a 1.18 room refuses `set repeat on`, even when it is unchanged.
+  const loadedRef = useRef(vals);
   const [busy, setBusy] = useState<SectionBusy>(null);
 
   const load = useCallback(async () => {
@@ -2355,14 +2099,9 @@ function NetworkSection({
       const floodMaxAdvert = stripPromptPrefix(
         await sendCli("get flood.max.advert"),
       );
-      setVals({
-        repeat,
-        pathHashMode,
-        loopDetect,
-        floodMax,
-        floodMaxUnscoped,
-        floodMaxAdvert,
-      });
+      const next = { repeat, pathHashMode, loopDetect, floodMax, floodMaxUnscoped, floodMaxAdvert };
+      loadedRef.current = next;
+      setVals(next);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Load failed");
     } finally {
@@ -2373,15 +2112,14 @@ function NetworkSection({
   const save = useCallback(async () => {
     setBusy("save");
     try {
-      if (vals.repeat) await sendCli(`set repeat ${vals.repeat}`);
-      if (vals.pathHashMode)
-        await sendCli(`set path.hash.mode ${vals.pathHashMode}`);
-      if (kind === "repeater" && vals.loopDetect) await sendCli(`set loop.detect ${vals.loopDetect}`);
-      if (vals.floodMax) await sendCli(`set flood.max ${vals.floodMax}`);
-      if (vals.floodMaxUnscoped)
-        await sendCli(`set flood.max.unscoped ${vals.floodMaxUnscoped}`);
-      if (vals.floodMaxAdvert)
-        await sendCli(`set flood.max.advert ${vals.floodMaxAdvert}`);
+      const changed = (k: keyof typeof vals) => vals[k] !== "" && vals[k] !== loadedRef.current[k];
+      if (changed("repeat")) await sendCli(`set repeat ${vals.repeat}`);
+      if (changed("pathHashMode")) await sendCli(`set path.hash.mode ${vals.pathHashMode}`);
+      if (kind === "repeater" && changed("loopDetect")) await sendCli(`set loop.detect ${vals.loopDetect}`);
+      if (changed("floodMax")) await sendCli(`set flood.max ${vals.floodMax}`);
+      if (changed("floodMaxUnscoped")) await sendCli(`set flood.max.unscoped ${vals.floodMaxUnscoped}`);
+      if (changed("floodMaxAdvert")) await sendCli(`set flood.max.advert ${vals.floodMaxAdvert}`);
+      loadedRef.current = vals;
       toast.success("Network saved");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");

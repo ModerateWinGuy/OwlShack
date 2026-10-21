@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,12 +92,30 @@ func AdoptPendingRestore(dbPath string) (bool, error) {
 		return false, nil // nothing staged
 	}
 	// Keep the outgoing DB next to the new one rather than deleting it.
+	prev := dbPath + ".replaced"
 	if _, err := os.Stat(dbPath); err == nil {
-		prev := dbPath + ".replaced"
-		_ = os.Remove(prev)
+		old, err := upgradeCopies(prev)
+		if err != nil {
+			return false, fmt.Errorf("listing the set-aside database's copies: %w", err)
+		}
+		for _, p := range []string{prev, prev + "-wal", prev + "-shm"} {
+			_ = os.Remove(p)
+		}
+		for _, c := range old {
+			_ = os.Remove(c.path)
+		}
+		// A crash leaves the last writes in the WAL: folded in, the set-aside file holds them on its own.
+		folded := foldWAL(dbPath)
 		if err := os.Rename(dbPath, prev); err != nil {
 			return false, fmt.Errorf("setting aside current database: %w", err)
 		}
+		if folded != nil {
+			slog.Warn("could not fold the outgoing database's WAL in, so it is kept beside it", "error", folded, "wal", prev+"-wal")
+			_ = os.Rename(dbPath+"-wal", prev+"-wal")
+		}
+	}
+	if err := moveUpgradeCopies(dbPath, prev); err != nil {
+		return false, err
 	}
 	// WAL and shm belong to the old DB; leaving them would corrupt the new one.
 	for _, suffix := range []string{"-wal", "-shm"} {
@@ -105,6 +125,44 @@ func AdoptPendingRestore(dbPath string) (bool, error) {
 		return false, fmt.Errorf("adopting restored database: %w", err)
 	}
 	return true, nil
+}
+
+// foldWAL checkpoints path's WAL into it; closing the last connection then deletes the WAL.
+func foldWAL(path string) error {
+	db, err := openWritableDB(path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var busy, frames, done int
+	if err := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &frames, &done); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return errors.New("the database is in use")
+	}
+	return nil
+}
+
+// moveUpgradeCopies hands dbPath's pre-upgrade copies to the database set aside as prev, refusing before any move rather than overwrite one.
+func moveUpgradeCopies(dbPath, prev string) error {
+	copies, err := upgradeCopies(dbPath)
+	if err != nil {
+		return fmt.Errorf("listing pre-upgrade copies: %w", err)
+	}
+	dst := make([]string, len(copies))
+	for i, c := range copies {
+		dst[i] = fmt.Sprintf("%s.pre-v%d-to-v%d", prev, c.from, c.to)
+		if _, err := os.Stat(dst[i]); err == nil {
+			return fmt.Errorf("cannot move %s aside: %s already exists; move one of them out of the way", c.path, dst[i])
+		}
+	}
+	for i, c := range copies {
+		if err := os.Rename(c.path, dst[i]); err != nil {
+			return fmt.Errorf("moving %s with the set-aside database: %w", c.path, err)
+		}
+	}
+	return nil
 }
 
 // StageRestore writes backup bytes beside the live DB for the next startup to adopt.
@@ -192,7 +250,9 @@ func PruneBackup(ctx context.Context, path string, opts PruneOptions) error {
 		{"DELETE FROM mqtt_brokers", opts.Mqtt},
 		{"DELETE FROM repeater", opts.Repeater},
 		{"DELETE FROM repeater_acl", opts.Repeater},
+		{"UPDATE mqtt_settings SET node_kind = 'companion' WHERE node_kind = 'repeater'", opts.Repeater},
 		{"DELETE FROM discovered_peers", opts.Peers},
+		{"DELETE FROM hop_pins", opts.Peers}, // a pin names a peer, so it goes with them
 	}
 	for _, s := range steps {
 		if s.skip {
@@ -210,34 +270,27 @@ func PruneBackup(ctx context.Context, path string, opts PruneOptions) error {
 		return fmt.Errorf("pruning telemetry_map: %w", err)
 	}
 
-	// DATETIME columns compare against a SQL timestamp; the metrics/neighbour tables store unix seconds.
 	windows := []struct {
 		table, col string
 		days       int
-		unix       bool
+		cutoff     string
 	}{
-		{"packets", "received_at", opts.PacketDays, false},
-		{"messages", "timestamp", opts.MessageDays, false},
-		{"message_echoes", "", opts.MessageDays, false}, // no timestamp; tied to messages
-		{"node_metrics", "ts", opts.MetricDays, true},
-		{"node_neighbors", "ts", opts.MetricDays, true},
+		{"packets", "received_at", opts.PacketDays, sinceMS},
+		{"messages", "received_at", opts.MessageDays, sinceMS},
+		{"node_metrics", "ts", opts.MetricDays, sinceSecs},
+		{"node_neighbors", "ts", opts.MetricDays, sinceSecs},
 	}
 	for _, w := range windows {
 		if w.days == DaysAll {
 			continue
 		}
-		if w.days == DaysNone || w.col == "" {
+		if w.days == DaysNone {
 			if _, err := db.ExecContext(ctx, "DELETE FROM "+w.table); err != nil {
 				return fmt.Errorf("clearing %s: %w", w.table, err)
 			}
 			continue
 		}
-		var q string
-		if w.unix {
-			q = fmt.Sprintf("DELETE FROM %s WHERE %s < unixepoch('now', ?)", w.table, w.col)
-		} else {
-			q = fmt.Sprintf("DELETE FROM %s WHERE %s < datetime('now', ?)", w.table, w.col)
-		}
+		q := fmt.Sprintf("DELETE FROM %s WHERE %s < %s", w.table, w.col, w.cutoff)
 		if _, err := db.ExecContext(ctx, q, fmt.Sprintf("-%d days", w.days)); err != nil {
 			return fmt.Errorf("trimming %s: %w", w.table, err)
 		}
@@ -318,7 +371,7 @@ func (s *Store) CountForBackup(ctx context.Context, opts PruneOptions) (*BackupC
 		q := "SELECT count(*) FROM messages WHERE companion_id IN (" + keptIDs + ")"
 		args := append([]any(nil), compArgs...)
 		if opts.MessageDays != DaysAll {
-			q += " AND timestamp >= datetime('now', ?)"
+			q += " AND received_at >= " + sinceMS
 			args = append(args, fmt.Sprintf("-%d days", opts.MessageDays))
 		}
 		if err := s.db.QueryRowContext(ctx, q, args...).Scan(&out.Messages); err != nil {
@@ -326,10 +379,10 @@ func (s *Store) CountForBackup(ctx context.Context, opts PruneOptions) (*BackupC
 		}
 	}
 
-	if err := s.countWindow(ctx, "packets", "received_at", false, opts.PacketDays, &out.Packets); err != nil {
+	if err := s.countWindow(ctx, "packets", "received_at", sinceMS, opts.PacketDays, &out.Packets); err != nil {
 		return nil, err
 	}
-	if err := s.countWindow(ctx, "node_metrics", "ts", true, opts.MetricDays, &out.Metrics); err != nil {
+	if err := s.countWindow(ctx, "node_metrics", "ts", sinceSecs, opts.MetricDays, &out.Metrics); err != nil {
 		return nil, err
 	}
 	if opts.Peers {
@@ -348,18 +401,20 @@ func (s *Store) CountForBackup(ctx context.Context, opts PruneOptions) (*BackupC
 	return out, nil
 }
 
-func (s *Store) countWindow(ctx context.Context, table, col string, unix bool, days int, dst *int64) error {
+// The cutoffs a backup window compares against: the packet and message times are unix ms, the metrics and neighbours unix seconds.
+const (
+	sinceMS   = "unixepoch('now', ?) * 1000"
+	sinceSecs = "unixepoch('now', ?)"
+)
+
+func (s *Store) countWindow(ctx context.Context, table, col, cutoff string, days int, dst *int64) error {
 	if days == DaysNone {
 		return nil
 	}
 	q := "SELECT count(*) FROM " + table
 	var args []any
 	if days != DaysAll {
-		if unix {
-			q += " WHERE " + col + " >= unixepoch('now', ?)"
-		} else {
-			q += " WHERE " + col + " >= datetime('now', ?)"
-		}
+		q += " WHERE " + col + " >= " + cutoff
 		args = append(args, fmt.Sprintf("-%d days", days))
 	}
 	if err := s.db.QueryRowContext(ctx, q, args...).Scan(dst); err != nil {
