@@ -183,6 +183,8 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 	mon := monitor.New(db, srv.Hub(), newMergedLister(newContactLister(compReg, db), newLinkLister(compReg, db)), slog.Default())
 	mon.RegisterCollector("repeater", newRepeaterCollector(compReg, db, slog.Default()))
 	mon.RegisterCollector("companion", newCompanionCollector(compReg, slog.Default()))
+	mon.RegisterCollector("sensor", &sensorCollector{plain: newCompanionCollector(compReg, slog.Default()), admin: newRepeaterCollector(compReg, db, slog.Default())})
+	compReg.onPush = pushRecorder(mon, db)
 	mon.RegisterCollector("link", newLinkCollector(compReg, db, slog.Default()))
 	mon.Start(ctx)
 	srv.SetPoller(mon)
@@ -241,6 +243,7 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 		feed = reloadMqtt(ctx, c, companions, rep, mux, ms, nil)
 		mqttObs.Store(feed.observer())
 		compReg.set(companions)
+		pollSensorsSoon(mon, db, companions)
 		apps.sync(c, companions, ms, mux)
 		disc = newDiscovery()
 		return nil
@@ -360,6 +363,9 @@ func Run(ctx context.Context, importPath string, verbosity int) error {
 			}
 			cfg = newCfg
 			compReg.set(companions)
+			if stats.started > 0 {
+				pollSensorsSoon(mon, db, companions)
+			}
 			disc = newDiscovery()
 			installBackend()
 			slog.Info("config reloaded", "started", stats.started, "stopped", stats.stopped, "kept", stats.kept, "reloaded", stats.reloaded)

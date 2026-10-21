@@ -11,12 +11,12 @@ import (
 )
 
 // Ports MyMesh::getRetransmitDelay / getDirectRetransmitDelay: rand[0, 5t] with t = airtime × factor.
-func (r *Repeater) floodRelayDelay(_ int, airtimeMs uint32) time.Duration {
+func (r *Repeater) floodRelayDelay(_ *meshcore.Packet, airtimeMs uint32) time.Duration {
 	cfg := r.cfgSnapshot()
 	return relayDelay(airtimeMs, cfg.TxDelayFactorOr())
 }
 
-func (r *Repeater) directRelayDelay(_ int, airtimeMs uint32) time.Duration {
+func (r *Repeater) directRelayDelay(_ *meshcore.Packet, airtimeMs uint32) time.Duration {
 	cfg := r.cfgSnapshot()
 	return relayDelay(airtimeMs, cfg.DirectTxDelayFactorOr())
 }

@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type ChangeEvent,
-  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -31,7 +30,6 @@ import {
   Plus,
   RefreshCw,
   Route,
-  Send,
   Settings as SettingsIcon,
   Shield,
   Signal,
@@ -88,7 +86,7 @@ import {
   MonitoringSettings,
   type MonitorMetadata,
 } from "@/components/MonitoringSettings";
-import { cliCommandsFor, cliConfigKeysFor, type CliRole } from "@/lib/cliCatalog";
+import { CliTerminal } from "@/components/CliTerminal";
 import {
   AddAccessDialog,
   AlertBitToggle,
@@ -107,6 +105,7 @@ import {
 import { apiErrorMessage } from "@/lib/apiError";
 import { RemoteRegionsTab } from "@/pages/RemoteRegionsTab";
 import { RemoteFetchContext, useRemoteFetch } from "@/lib/remoteFetch";
+import { useCompanionRef } from "@/hooks/useCompanions";
 
 interface Contact {
   peerPubkey: string;
@@ -172,12 +171,6 @@ type TabKey =
   | "regions"
   | "settings";
 
-interface CliEntry {
-  kind: "input" | "output" | "error";
-  text: string;
-  ts: number;
-}
-
 interface NeighborEntry {
   pubkeyPrefix: string;
   secsAgo: number;
@@ -192,6 +185,7 @@ export type AdminNodeKind = "repeater" | "sensor" | "room";
 export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind }) {
   const { ref, pubkey } = useParams<{ ref: string; pubkey: string }>();
   const decodedName = ref ?? "";
+  const { id: companionId } = useCompanionRef(ref);
   const decodedPubkey = pubkey ? decodeURIComponent(pubkey) : "";
   const navigate = useNavigate();
   const isSensor = kind === "sensor";
@@ -245,7 +239,7 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
     owner: !isAdmin && kind === "repeater",
     telemetry: true,
     access: isAdmin,
-    regions: isAdmin && !isSensor,
+    regions: isAdmin,
     settings: isAdmin,
   };
   const tab: TabKey = tabShown[chosenTab] ? chosenTab : isSensor ? "telemetry" : "status";
@@ -641,7 +635,7 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
                   Access
                 </RepeaterTab>
               )}
-              {isAdmin && !isSensor && (
+              {isAdmin && (
                 <RepeaterTab value="regions" icon={<Layers className="size-3" />}>
                   Regions
                 </RepeaterTab>
@@ -675,14 +669,14 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
               <MonitoringSettings
                 companionRef={decodedName}
                 pubkey={decodedPubkey}
-                kind={isSensor ? "companion" : "repeater"}
+                kind={isSensor ? "sensor" : "repeater"}
                 metadata={contact?.metadata}
                 onSaved={handleMonitorSaved}
               />
             </TabsContent>
             {isAdmin && (
               <TabsContent value="terminal" className="mt-0">
-                <TerminalTab sendCli={sendCli} kind={kind} />
+                <CliTerminal sendCli={sendCli} role={kind} />
               </TabsContent>
             )}
             <TabsContent
@@ -714,7 +708,7 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
               forceMount
             >
               <div className="space-y-8">
-                <TelemetryPanel apiBase={apiBase} autoFetch={tab === "telemetry"} />
+                <TelemetryPanel apiBase={apiBase} autoFetch={tab === "telemetry"} live={isSensor && companionId != null ? { pubkey: decodedPubkey, companionId } : undefined} />
                 {isSensor && <SeriesPanel apiBase={apiBase} />}
               </div>
             </TabsContent>
@@ -733,9 +727,9 @@ export function RepeaterDetailPage({ kind = "repeater" }: { kind?: AdminNodeKind
                 />
               </TabsContent>
             )}
-            {isAdmin && !isSensor && (
+            {isAdmin && (
               <TabsContent value="regions" className="mt-0 data-[state=inactive]:hidden" forceMount>
-                <RemoteRegionsTab apiBase={apiBase} sendCli={sendCli} active={tab === "regions"} />
+                <RemoteRegionsTab apiBase={apiBase} sendCli={sendCli} active={tab === "regions"} role={isSensor ? "sensor" : isRoom ? "room" : "repeater"} />
               </TabsContent>
             )}
             {isAdmin && (
@@ -1053,294 +1047,6 @@ function ErrEventsTile({ mask }: { mask: number }) {
       ) : (
         <span className="font-mono text-lg font-semibold leading-none text-success">none</span>
       )}
-    </div>
-  );
-}
-
-// Curated CLI catalogue, mirrored from MeshCore/src/helpers/CommonCLI.cpp.
-interface Suggestion {
-  text: string;
-  hint?: string;
-}
-
-function buildSuggestions(input: string, role: CliRole): Suggestion[] {
-  const CLI_CONFIG_KEYS = cliConfigKeysFor(role);
-  const CLI_TOPLEVEL_COMMANDS = cliCommandsFor(role);
-  const lower = input.toLowerCase();
-  // get / set sub-completion: rank prefix matches first, then substring matches.
-  if (lower.startsWith("get ") || lower.startsWith("set ")) {
-    const prefix = lower.slice(0, 4);
-    const tail = lower.slice(4).trim();
-    if (tail === "") {
-      return CLI_CONFIG_KEYS.map((k) => ({
-        text: `${prefix}${k.key}`,
-        hint: k.hint,
-      }));
-    }
-    const starts = CLI_CONFIG_KEYS.filter((k) => k.key.startsWith(tail));
-    const others = CLI_CONFIG_KEYS.filter(
-      (k) => !k.key.startsWith(tail) && k.key.includes(tail),
-    );
-    return [...starts, ...others].map((k) => ({
-      text: `${prefix}${k.key}`,
-      hint: k.hint,
-    }));
-  }
-  if (lower === "") {
-    return CLI_TOPLEVEL_COMMANDS.map((c) => ({
-      text: c.command,
-      hint: c.hint,
-    }));
-  }
-  const starts = CLI_TOPLEVEL_COMMANDS.filter((c) =>
-    c.command.toLowerCase().startsWith(lower),
-  );
-  const others = CLI_TOPLEVEL_COMMANDS.filter(
-    (c) =>
-      !c.command.toLowerCase().startsWith(lower) &&
-      c.command.toLowerCase().includes(lower),
-  );
-  return [...starts, ...others].map((c) => ({
-    text: c.command,
-    hint: c.hint,
-  }));
-}
-
-function TerminalTab({
-  sendCli,
-  kind,
-}: {
-  sendCli: (cmd: string) => Promise<string>;
-  kind: AdminNodeKind;
-}) {
-  const [history, setHistory] = useState<CliEntry[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [hIdx, setHIdx] = useState(-1);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-  const [sIdx, setSIdx] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-
-  const inputs = useMemo(
-    () => history.filter((h) => h.kind === "input").map((h) => h.text),
-    [history],
-  );
-
-  const suggestions = useMemo(
-    () =>
-      suggestionsOpen && input.trim() !== "" ? buildSuggestions(input, kind) : [],
-    [input, suggestionsOpen, kind],
-  );
-
-  useEffect(() => {
-    setSIdx(0);
-  }, [input]);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history]);
-
-  const applySuggestion = useCallback((s: Suggestion) => {
-    setInput(s.text);
-    setSuggestionsOpen(false);
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, []);
-
-  const submit = useCallback(async () => {
-    const cmd = input.trim();
-    if (!cmd || busy) return;
-    setBusy(true);
-    setHistory((prev) => [...prev, { kind: "input", text: cmd, ts: Date.now() }]);
-    setInput("");
-    setHIdx(-1);
-    try {
-      const out = await sendCli(cmd);
-      setHistory((prev) => [
-        ...prev,
-        { kind: "output", text: out || "(empty)", ts: Date.now() },
-      ]);
-    } catch (e) {
-      setHistory((prev) => [
-        ...prev,
-        {
-          kind: "error",
-          text: e instanceof Error ? e.message : "error",
-          ts: Date.now(),
-        },
-      ]);
-    } finally {
-      setBusy(false);
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
-  }, [input, busy, sendCli]);
-
-  const onKey = useCallback(
-    (e: KeyboardEvent<HTMLInputElement>) => {
-      const sugOpen = suggestionsOpen && suggestions.length > 0;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        setSuggestionsOpen(false);
-        submit();
-        return;
-      }
-      if (e.key === "Tab") {
-        e.preventDefault();
-        if (suggestions.length === 0) {
-          setSuggestionsOpen(true);
-          return;
-        }
-        if (sugOpen) {
-          applySuggestion(suggestions[sIdx] || suggestions[0]);
-        } else {
-          // first Tab opens the menu and pre-selects index 0
-          setSuggestionsOpen(true);
-          setSIdx(0);
-        }
-        return;
-      }
-      if (e.key === "Escape") {
-        if (sugOpen) {
-          e.preventDefault();
-          setSuggestionsOpen(false);
-        }
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (sugOpen) {
-          setSIdx((i) => (i <= 0 ? suggestions.length - 1 : i - 1));
-          return;
-        }
-        if (inputs.length === 0) return;
-        const next = hIdx === -1 ? inputs.length - 1 : Math.max(0, hIdx - 1);
-        setHIdx(next);
-        setInput(inputs[next] ?? "");
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (sugOpen) {
-          setSIdx((i) => (i >= suggestions.length - 1 ? 0 : i + 1));
-          return;
-        }
-        if (inputs.length === 0) return;
-        if (hIdx === -1) return;
-        const next = hIdx + 1;
-        if (next >= inputs.length) {
-          setHIdx(-1);
-          setInput("");
-        } else {
-          setHIdx(next);
-          setInput(inputs[next] ?? "");
-        }
-      }
-    },
-    [submit, hIdx, inputs, suggestions, sIdx, suggestionsOpen, applySuggestion],
-  );
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="label-overline">cli session</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setHistory([])}
-          className="rounded-none font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground"
-        >
-          clear
-        </Button>
-      </div>
-      <pre
-        className="bg-background border border-border text-xs font-mono p-3 min-h-72 max-h-112 overflow-y-auto whitespace-pre-wrap wrap-break-word"
-      >
-        {history.length === 0 ? (
-          <span className="text-muted-foreground/50">
-            // type a command. try `ver`, `{kind === "repeater" ? "neighbors" : "clock"}`, `get name`. tab = autocomplete.
-          </span>
-        ) : (
-          history.map((h, i) => (
-            <div
-              key={i}
-              className={cn(
-                "py-0.5",
-                h.kind === "input" && "text-primary",
-                h.kind === "error" && "text-destructive",
-                h.kind === "output" && "text-foreground",
-              )}
-            >
-              {h.kind === "input" ? `> ${h.text}` : h.text}
-            </div>
-          ))
-        )}
-        <div ref={endRef} />
-      </pre>
-      <div className="relative">
-        {suggestionsOpen && suggestions.length > 0 && (
-          <div className="absolute bottom-full left-0 right-0 mb-1 bg-popover border border-border shadow-md z-20 max-h-60 overflow-y-auto">
-            {suggestions.map((s, i) => (
-              <button
-                key={s.text}
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  applySuggestion(s);
-                }}
-                onMouseEnter={() => setSIdx(i)}
-                className={cn(
-                  "w-full text-left px-3 py-1.5 flex items-baseline gap-3 font-mono text-xs",
-                  i === sIdx
-                    ? "bg-primary/15 text-primary"
-                    : "text-foreground hover:bg-muted/40",
-                )}
-              >
-                <span className="flex-1 truncate">{s.text}</span>
-                {s.hint && (
-                  <span className="text-[10px] text-muted-foreground/70 truncate">
-                    {s.hint}
-                  </span>
-                )}
-              </button>
-            ))}
-            <div className="px-3 py-1 border-t border-border font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground/60 flex items-center gap-3">
-              <span>↑↓ select</span>
-              <span>tab apply</span>
-              <span>esc close</span>
-            </div>
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-xs text-primary select-none">
-            {">"}
-          </span>
-          <Input
-            ref={inputRef}
-            value={input}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => {
-              setInput(e.target.value);
-              setSuggestionsOpen(true);
-            }}
-            onKeyDown={onKey}
-            onFocus={() => setSuggestionsOpen(true)}
-            onBlur={() => {
-              // give the click on a suggestion a chance to fire
-              setTimeout(() => setSuggestionsOpen(false), 120);
-            }}
-            disabled={busy}
-            placeholder={busy ? "executing…" : "command (tab to autocomplete)"}
-            className="rounded-none font-mono text-base md:text-xs border-border bg-background flex-1"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <Button
-            size="sm"
-            onClick={submit}
-            disabled={busy || !input.trim()}
-            className="rounded-none font-mono text-[11px] uppercase tracking-[0.12em]"
-          >
-            <Send className="size-3" /> run
-          </Button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -2151,6 +1857,12 @@ const CR_OPTIONS: SelectOption[] = Array.from({ length: 4 }, (_, i) => {
   return { value: v, label: `4/${v}` };
 });
 
+// Firmware 1.18 prints the int8 TX power through a uint8 getter, so -4 dBm reads back as 252.
+function signedTxPower(tx: string): string {
+  const n = Number(tx);
+  return Number.isInteger(n) && n > 127 && n < 256 ? String(n - 256) : tx;
+}
+
 function RadioSection({ sendCli }: { sendCli: (cmd: string) => Promise<string> }) {
   const [vals, setVals] = useState({ freq: "", bw: "", sf: "", cr: "", tx: "" });
   const [busy, setBusy] = useState<SectionBusy>(null);
@@ -2160,7 +1872,7 @@ function RadioSection({ sendCli }: { sendCli: (cmd: string) => Promise<string> }
     setBusy("load");
     try {
       const radio = stripPromptPrefix(await sendCli("get radio"));
-      const tx = stripPromptPrefix(await sendCli("get tx"));
+      const tx = signedTxPower(stripPromptPrefix(await sendCli("get tx")));
       const [freq = "", bw = "", sf = "", cr = ""] = radio.split(",").map((s) => s.trim());
       setVals({ freq, bw, sf, cr, tx });
     } catch (e) {
@@ -2370,6 +2082,8 @@ function NetworkSection({
     floodMaxUnscoped: "",
     floodMaxAdvert: "",
   });
+  // Save sends only what changed: a 1.18 room refuses `set repeat on`, even when it is unchanged.
+  const loadedRef = useRef(vals);
   const [busy, setBusy] = useState<SectionBusy>(null);
 
   const load = useCallback(async () => {
@@ -2385,14 +2099,9 @@ function NetworkSection({
       const floodMaxAdvert = stripPromptPrefix(
         await sendCli("get flood.max.advert"),
       );
-      setVals({
-        repeat,
-        pathHashMode,
-        loopDetect,
-        floodMax,
-        floodMaxUnscoped,
-        floodMaxAdvert,
-      });
+      const next = { repeat, pathHashMode, loopDetect, floodMax, floodMaxUnscoped, floodMaxAdvert };
+      loadedRef.current = next;
+      setVals(next);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Load failed");
     } finally {
@@ -2403,15 +2112,14 @@ function NetworkSection({
   const save = useCallback(async () => {
     setBusy("save");
     try {
-      if (vals.repeat) await sendCli(`set repeat ${vals.repeat}`);
-      if (vals.pathHashMode)
-        await sendCli(`set path.hash.mode ${vals.pathHashMode}`);
-      if (kind === "repeater" && vals.loopDetect) await sendCli(`set loop.detect ${vals.loopDetect}`);
-      if (vals.floodMax) await sendCli(`set flood.max ${vals.floodMax}`);
-      if (vals.floodMaxUnscoped)
-        await sendCli(`set flood.max.unscoped ${vals.floodMaxUnscoped}`);
-      if (vals.floodMaxAdvert)
-        await sendCli(`set flood.max.advert ${vals.floodMaxAdvert}`);
+      const changed = (k: keyof typeof vals) => vals[k] !== "" && vals[k] !== loadedRef.current[k];
+      if (changed("repeat")) await sendCli(`set repeat ${vals.repeat}`);
+      if (changed("pathHashMode")) await sendCli(`set path.hash.mode ${vals.pathHashMode}`);
+      if (kind === "repeater" && changed("loopDetect")) await sendCli(`set loop.detect ${vals.loopDetect}`);
+      if (changed("floodMax")) await sendCli(`set flood.max ${vals.floodMax}`);
+      if (changed("floodMaxUnscoped")) await sendCli(`set flood.max.unscoped ${vals.floodMaxUnscoped}`);
+      if (changed("floodMaxAdvert")) await sendCli(`set flood.max.advert ${vals.floodMaxAdvert}`);
+      loadedRef.current = vals;
       toast.success("Network saved");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Save failed");

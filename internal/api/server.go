@@ -47,10 +47,16 @@ type RepeaterOps struct {
 	RoomLogin func(pubkeyHex, password string, syncSince uint32) (any, error)
 	StatusReq func(pubkeyHex string) (any, error)
 	CLI       func(pubkeyHex, command string) (string, error)
-	Session   func(pubkeyHex string) any
-	Logout    func(pubkeyHex string)
-	PathGet   func(pubkeyHex string) (any, error)
-	PathReset func(pubkeyHex string) error
+	// CompanionCLI runs a command on a remote companion that allows us remote CLI; there is no login.
+	CompanionCLI func(pubkeyHex, command string) (string, error)
+	// Unsubscribe ends the watch this companion holds on a sensor.
+	Unsubscribe func(pubkeyHex string) error
+	// Subscription is Monitoring's watch on the sensor: {active, expires, scope, refused}.
+	Subscription func(pubkeyHex string) any
+	Session      func(pubkeyHex string) any
+	Logout       func(pubkeyHex string)
+	PathGet      func(pubkeyHex string) (any, error)
+	PathReset    func(pubkeyHex string) error
 	// PathSet takes a nil path to flood and an empty one for a direct neighbour.
 	PathSet      func(pubkeyHex string, path []byte, pathHashSize uint8) error
 	NeighborsReq func(pubkeyHex string, count uint8, offset uint16) (any, error)
@@ -115,6 +121,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/companions/{name}/contacts/{pubkey}/location", s.handleSetContactLocation)
 	s.mux.HandleFunc("PUT /api/companions/{name}/contacts/{pubkey}/region", s.handleSetContactFloodScope)
 	s.mux.HandleFunc("GET /api/companions/{name}/contacts/{pubkey}/telemetry", s.handleContactTelemetry)
+	s.mux.HandleFunc("POST /api/companions/{name}/contacts/{pubkey}/cli", s.handleCompanionCLI)
 	// Per-resource config REST (reads; scoped + secret-redacted).
 	s.mux.HandleFunc("GET /api/config/settings", s.handleGetSettings)
 	s.mux.HandleFunc("GET /api/config/mqtt", s.handleGetMqtt)
@@ -217,6 +224,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/neighbors", s.handleRepeaterNeighbors)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/owner", s.handleRepeaterOwnerInfo)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/telemetry", s.handleRepeaterTelemetry)
+	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/subscription", s.handleSensorSubscription)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/history", s.handleRepeaterSeries)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/access", s.handleRepeaterAccessList)
 	s.mux.HandleFunc("GET /api/companions/{name}/repeaters/{pubkey}/regions", s.handleRepeaterRegions)

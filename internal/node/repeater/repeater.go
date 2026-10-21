@@ -149,8 +149,8 @@ func NewRepeater(cfg config.RepeaterConfig, mux *node.RadioMux, st *store.Store,
 	opts := []node.Option{
 		node.WithMaxPeers(100_000),
 		node.WithErrorHandler(func(err error) { log.Error("node error", "error", err) }),
-		node.WithFloodRetransmitDelay(r.floodRelayDelay),
-		node.WithDirectRetransmitDelay(r.directRelayDelay),
+		node.WithFloodRelayDelay(r.floodRelayDelay),
+		node.WithDirectRelayDelay(r.directRelayDelay),
 		node.WithRxDelay(r.rxDelay),
 		node.WithExtraAckTransmitCount(r.extraAcks),
 		// A node with no allowForward handler never relays — this is what makes it a repeater.
@@ -158,7 +158,7 @@ func NewRepeater(cfg config.RepeaterConfig, mux *node.RadioMux, st *store.Store,
 		// Firmware repeaters never answer a client's flood PATH with their own; handlePath learns the route.
 		node.WithoutReciprocalPath(),
 	}
-	// Registering named scopes is what lets FindFloodMatch relay their transport-flood packets.
+	// Registering named scopes is what lets allowForward's FindFloodMatch relay their transport-flood packets.
 	named, wildcardFlags := regionsFromConfig(cfg.Regions)
 	if len(named) > 0 {
 		opts = append(opts, node.WithRegions(named...))

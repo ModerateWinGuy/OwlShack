@@ -76,7 +76,7 @@ export function RegionListEditor({
             label: region.name === "*" ? "none" : region.name,
             depth,
           }))}
-          hint="the region this repeater is in; other nodes can see it, and nothing routes on it · firmware region home"
+          hint="the region this node is in; other nodes can see it, and nothing routes on it · firmware region home"
         />
       </div>
       <div className="divide-y divide-border border border-border">

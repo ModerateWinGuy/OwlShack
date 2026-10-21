@@ -27,6 +27,8 @@ import { PathDialog } from "@/components/PathDialog";
 import { PositionPicker, round6 } from "@/components/PositionPicker";
 import { PeerTypePill } from "@/components/StatusIndicator";
 import { TelemetryPanel } from "@/components/TelemetryPanel";
+import { CliTerminal } from "@/components/CliTerminal";
+import { apiErrorMessage } from "@/lib/apiError";
 import { advertPathInfo } from "@/components/PeerDetailSheet";
 import {
   MonitoringSettings,
@@ -354,13 +356,40 @@ export function ContactDetailPage() {
             <MonitoringSettings
               companionRef={companion}
               pubkey={contactPubkey}
-              kind="companion"
+              kind={isSensor ? "sensor" : "companion"}
               metadata={contact.metadata}
             />
           )}
+
+          {contact.type?.toUpperCase() === "CHAT" && <CompanionCliPanel apiBase={apiBase} />}
         </>
       )}
     </div>
+  );
+}
+
+// A firmware 1.18+ companion runs commands from a contact its owner has allowed remote CLI; there is no login.
+function CompanionCliPanel({ apiBase }: { apiBase: string }) {
+  const sendCli = useCallback(
+    async (command: string) => {
+      const r = await fetch(`${apiBase}/cli`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
+      if (!r.ok) throw new Error(await apiErrorMessage(r, "CLI error"));
+      const data: { response: string } = await r.json();
+      return data.response;
+    },
+    [apiBase],
+  );
+  return (
+    <section className="panel overflow-hidden">
+      <PanelHeader eyebrow="Remote admin" title="CLI" />
+      <div className="p-4 space-y-3">
+        <CliTerminal sendCli={sendCli} role="companion" />
+      </div>
+    </section>
   );
 }
 

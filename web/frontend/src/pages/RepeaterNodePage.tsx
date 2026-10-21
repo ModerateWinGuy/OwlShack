@@ -990,7 +990,7 @@ function SettingsTab({ rep, reload }: { rep: ConfigRepeater; reload: () => void 
               value={floodMax}
               onChange={setFloodMax}
               placeholder="64"
-              hint="default 64 · relay flood up to N hops"
+              hint="default 64 · relay flood up to N hops (0 = never)"
             />
             <TextField
               label="Plain flood max hops"
@@ -1004,7 +1004,7 @@ function SettingsTab({ rep, reload }: { rep: ConfigRepeater; reload: () => void 
               value={floodMaxAdvert}
               onChange={setFloodMaxAdvert}
               placeholder="8"
-              hint="default 8 · lower cap for adverts"
+              hint="default 8 · lower cap for adverts (0 = never)"
             />
             <SelectField
               label="Loop detect"

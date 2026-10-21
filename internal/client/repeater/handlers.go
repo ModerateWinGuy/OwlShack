@@ -244,6 +244,8 @@ func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
 			case pr.ch <- data:
 			default:
 			}
+		} else {
+			rm.handlePush(sess.PubKeyHex, tag, data)
 		}
 		// The branch every in-session status, telemetry and CLI reply takes, so it is where a
 		// remote still flooding at us despite our route is most likely to show up.
@@ -254,6 +256,7 @@ func (rm *Client) HandleResponsePacket(pkt *meshcore.Packet) {
 		}
 		return
 	}
+	rm.pushWithoutSession(resp)
 }
 
 // HandleCLIResponse delivers a reply to the CLI command of ours it answers, reporting whether there was one.

@@ -27,10 +27,13 @@ export function RemoteRegionsTab({
   apiBase,
   sendCli,
   active,
+  role,
 }: {
   apiBase: string;
   sendCli: (cmd: string) => Promise<string>;
   active: boolean;
+  // Only a repeater relays by region; a room's or sensor's regions choose where its replies (and a sensor's pushes) go.
+  role: "repeater" | "room" | "sensor";
 }) {
   const [map, setMap] = useState<RemoteRegionMap | null>(null);
   const [loading, setLoading] = useState(false);
@@ -232,11 +235,21 @@ export function RemoteRegionsTab({
       )}
       {map ? (
         <div className="panel space-y-4 p-4">
-          <p className="font-mono text-[11px] leading-relaxed text-muted-foreground">
-            The regions this node relays: it re-floods scoped packets whose region matches one of these. The{" "}
-            <span className="text-foreground">*</span> row is traffic sent with no region; deny flood on it to stop
-            relaying that. Each change is sent straight away; Save keeps them over a reboot. {NESTING_HINT}
-          </p>
+          {role !== "repeater" ? (
+            <p className="font-mono text-[11px] leading-relaxed text-muted-foreground">
+              The regions this {role} knows: it answers a request in the request's region
+              {role === "sensor" ? ", and sends its pushes in one" : ""}. The{" "}
+              <span className="text-foreground">*</span> row is traffic sent with no region; deny flood on it and the{" "}
+              {role} answers those requests in its default region instead. Each change is sent straight away; Save
+              keeps them over a reboot.
+            </p>
+          ) : (
+            <p className="font-mono text-[11px] leading-relaxed text-muted-foreground">
+              The regions this node relays: it re-floods scoped packets whose region matches one of these. The{" "}
+              <span className="text-foreground">*</span> row is traffic sent with no region; deny flood on it to stop
+              relaying that. Each change is sent straight away; Save keeps them over a reboot. {NESTING_HINT}
+            </p>
+          )}
           {map.partial && (
             <p role="status" className="font-mono text-[11px] text-warning">
               This node holds more regions than its console can list, so some may be missing here.

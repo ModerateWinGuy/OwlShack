@@ -34,9 +34,6 @@ func sentFrame(flood bool, tag, timeoutMs uint32) []byte {
 	return mc.SentResponse{HasExtended: true, IsFlood: flood, Tag: tag, EstTimeout: timeoutMs}.ToBytes()
 }
 
-// capped cuts a message frame's text to fit, as the firmware does.
-func capped(b []byte) []byte { return b[:min(len(b), mc.MaxFrameSize)] }
-
 // pathLenByte is the firmware's path_len for a received packet: 0xFF when it came direct.
 func pathLenByte(pkt *meshcore.Packet) byte {
 	if pkt.IsRouteFlood() {

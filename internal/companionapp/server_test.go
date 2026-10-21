@@ -821,14 +821,20 @@ func TestSetChannelRefusedKeepsSlot(t *testing.T) {
 	}
 }
 
-// Contact flags keep the three telemetry classes and the star; the firmware's remote CLI bit is not a telemetry class.
+// Contact flags keep the three telemetry classes and the star, drop undefined bits, and refuse the remote CLI grant rather than claim it saved.
 func TestContactFlagsMasked(t *testing.T) {
 	r := newRig(t)
 	peer, _ := meshcore.GenerateLocalIdentity(nil)
 	pk := peer.PublicKeyBytes()
 	r.st.WriteSync(func() { r.st.Contacts.Add(context.Background(), r.id, pk, "Bob", "CHAT") })
-	add := mc.AddUpdateContactCommand{PublicKey: [32]byte(pk), Type: meshcore.AdvertTypeChat, Flags: 0x10 | 0x02, OutPathLen: mc.OutPathUnknown, Name: "Bob"}
-	r.dial(t).ask([]byte{mc.RespOk}, add.ToBytes()[:136]...)
+	a := r.dial(t)
+	add := mc.AddUpdateContactCommand{PublicKey: [32]byte(pk), Type: meshcore.AdvertTypeChat, Flags: mc.ContactFlagRemoteCLI | 0x02, OutPathLen: mc.OutPathUnknown, Name: "Bob"}
+	a.ask([]byte{mc.RespErr, mc.ErrCodeUnsupportedCmd}, add.ToBytes()[:136]...)
+	if k, _ := r.srv.contact(pk); k.Metadata.TelemPerms != 0 {
+		t.Errorf("telemPerms = %#x after a refused update, want unchanged", k.Metadata.TelemPerms)
+	}
+	add.Flags = 0x20 | 0x02
+	a.ask([]byte{mc.RespOk}, add.ToBytes()[:136]...)
 	if k, _ := r.srv.contact(pk); k.Metadata.TelemPerms != 0x01 {
 		t.Errorf("telemPerms = %#x, want only the base class", k.Metadata.TelemPerms)
 	}

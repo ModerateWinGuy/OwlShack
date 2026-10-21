@@ -167,6 +167,8 @@ func (r *Repeater) dispatchCLI(cmd string) string {
 	// matched separately or the app's "Remove all Neighbours" reads as an unknown command.
 	case cmd == "neighbor.remove", strings.HasPrefix(cmd, "neighbor.remove "):
 		return r.cliNeighborRemove(strings.TrimSpace(strings.TrimPrefix(cmd, "neighbor.remove")))
+	case cmd == "power":
+		return r.cliPower()
 	case cmd == "clear stats":
 		r.clearStats()
 		return "(OK - stats reset)"
@@ -195,6 +197,15 @@ func (r *Repeater) dispatchCLI(cmd string) string {
 	default:
 		return "Unknown command"
 	}
+}
+
+// cliPower answers in CommonCLI's shape, with the base board's answers for what a host can't sense.
+func (r *Repeater) cliPower() string {
+	var mv uint16
+	if ds := r.deviceStats(); ds.HaveBattery {
+		mv = ds.BatteryMV
+	}
+	return fmt.Sprintf("batt:%d mV usb:n/a solar_chg:n/a ext:no charger:no", mv)
 }
 
 // isUnsupportedCmd reports firmware commands a Linux-hosted relay can't do, answered with a clear error not "Unknown command".

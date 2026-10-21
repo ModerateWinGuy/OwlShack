@@ -17,6 +17,7 @@ import (
 // NodePoller is the monitor-service seam, implemented by *monitor.Service and installed via Server.SetPoller.
 type NodePoller interface {
 	PollNow(ctx context.Context, pubkey []byte) error
+	PollSoon(pubkey []byte)
 	Targets(ctx context.Context) ([]monitor.Target, error)
 }
 

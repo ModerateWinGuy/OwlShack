@@ -170,6 +170,7 @@ func NewCompanion(cfg config.CompanionConfig, mux *node.RadioMux, st *store.Stor
 	companion.live.Store(&cfg)
 	companion.repeaters = repeater.NewClient(n, st, cfg.ID, log, stats, companion.pathHashSize,
 		func(pubkey []byte) *meshcore.Region { return companion.contactScope(pubkey).MeshRegion() })
+	companion.repeaters.SetTelemetryPushHandler(companion.broadcastTelemetryPush)
 
 	// The companion's channels are the only ones this node listens on; triggers reference them by name and register none of their own.
 	if cfg.Channels != nil {

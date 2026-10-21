@@ -45,13 +45,17 @@ func LocalIdentityFromHex(privHex string) (meshcore.LocalIdentity, error) {
 	}
 }
 
-// GenerateSeedHex returns a fresh random hex ed25519 seed (a new identity).
+// GenerateSeedHex returns a fresh random hex ed25519 seed (a new identity), never one with a reserved 0x00/0xFF hash as every firmware role refuses.
 func GenerateSeedHex() (string, error) {
-	seed := make([]byte, seedLen)
-	if _, err := rand.Read(seed); err != nil {
-		return "", fmt.Errorf("generating identity seed: %w", err)
+	var seed [seedLen]byte
+	for {
+		if _, err := rand.Read(seed[:]); err != nil {
+			return "", fmt.Errorf("generating identity seed: %w", err)
+		}
+		if li := meshcore.NewLocalIdentityFromSeed(seed); !meshcore.IsReservedPrefix(li.PublicKeyBytes()[0]) {
+			return hex.EncodeToString(seed[:]), nil
+		}
 	}
-	return hex.EncodeToString(seed), nil
 }
 
 // EnsureNodeKeys generates a private key for every companion and repeater that has none.

@@ -50,6 +50,8 @@ interface WsMetrics {
   name: string;
   ts: number;
   metrics: Record<string, number>;
+  // A node's own push: alive, but the last poll and its error stand.
+  pushed?: boolean;
 }
 
 interface RangePreset {
@@ -211,9 +213,9 @@ export function MonitoringDetailPage() {
         companionId: m.companionId || prev?.companionId || "",
         kind: m.kind,
         name: m.name || prev?.name || "",
-        lastPollTs: m.ts,
+        lastPollTs: m.pushed && prev ? prev.lastPollTs : m.ts,
         lastOkTs: m.ts,
-        lastError: "",
+        lastError: m.pushed && prev ? prev.lastError : "",
         metrics: { ...(prev?.metrics || {}), ...m.metrics },
       }));
       // A first poll's metrics have no chart yet; a new name brings one, and its history with it.
@@ -288,7 +290,7 @@ export function MonitoringDetailPage() {
               </HeaderButton>
               {node?.companionId && node.kind !== "link" && (
                 <HeaderButton icon={ExternalLink} to={contactDetailPath(node.companionId, pubkey, node.kind)}>
-                  {node.kind === "repeater" ? "repeater" : "contact"}
+                  {node.kind === "repeater" || node.kind === "sensor" ? node.kind : "contact"}
                 </HeaderButton>
               )}
               {node?.companionId && (
@@ -310,7 +312,7 @@ export function MonitoringDetailPage() {
                 {node?.companionId && node.kind !== "link" && (
                   <DropdownMenuItem asChild className="font-mono text-xs uppercase tracking-[0.08em]">
                     <Link to={contactDetailPath(node.companionId, pubkey, node.kind)}>
-                      <ExternalLink className="size-3.5" /> {node.kind === "repeater" ? "repeater" : "contact"}
+                      <ExternalLink className="size-3.5" /> {node.kind === "repeater" || node.kind === "sensor" ? node.kind : "contact"}
                     </Link>
                   </DropdownMenuItem>
                 )}
@@ -340,7 +342,7 @@ export function MonitoringDetailPage() {
         <MonitoringSettings
           companionRef={node.companionId}
           pubkey={pubkey}
-          kind={node.kind === "companion" ? "companion" : "repeater"}
+          kind={node.kind === "companion" || node.kind === "sensor" ? node.kind : "repeater"}
           onSaved={() => loadMeta()}
         />
       )}

@@ -51,13 +51,13 @@ func (r *Repeater) handleControl(pkt *meshcore.Packet) {
 	}
 }
 
-// answerDiscover replies with our key, gated on relaying being enabled and rate-limited 4/2min.
+// answerDiscover replies with our key unless relaying is off or both advert intervals are 0 (hidden), rate-limited 4/2min.
 func (r *Repeater) answerDiscover(pkt *meshcore.Packet, ctl *meshcore.Control) {
 	req, err := ctl.DiscoverRequest()
 	if err != nil || req.TypeFilter&(1<<meshcore.AdvertTypeRepeater) == 0 {
 		return // not asking about repeaters
 	}
-	if r.cfg.IsFwdDisabled() || !r.discoverLimiter.allow() {
+	if r.cfg.IsFwdDisabled() || r.isHidden() || !r.discoverLimiter.allow() {
 		return
 	}
 	// ponytail: firmware's discovery_mod_timestamp freshness gate isn't modelled — we always answer.
@@ -84,6 +84,11 @@ func (r *Repeater) answerDiscover(pkt *meshcore.Packet, ctl *meshcore.Control) {
 	}, nil, delay); err != nil {
 		r.log.Error("discover response failed", "error", err)
 	}
+}
+
+// isHidden is firmware isHiddenNode (simple_repeater MyMesh.h:190).
+func (r *Repeater) isHidden() bool {
+	return r.cfg.AdvertIntervalOr() == 0 && r.cfg.FloodAdvertIntervalOr() == 0
 }
 
 // recordDiscoverResp stores the neighbour at the SNR *we* heard it at, not the byte it reports (firmware putNeighbour).

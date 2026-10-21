@@ -235,18 +235,11 @@ func (rm *Client) sendText(peer *node.Peer, scope *meshcore.Region, text []byte,
 var ErrNoPath = errors.New("the node answered without a path return, so no route was learned")
 
 func (rm *Client) contactRequest(pubkeyHex string, body []byte, timeout time.Duration, label string, pr *pendingRequest) ([]byte, error) {
-	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	peer, err := rm.peerByHex(pubkeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
+		return nil, err
 	}
-	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrBadPubkey, err)
-	}
-	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
-	if peer == nil {
-		return nil, ErrUnknownPeer
-	}
+	peerIdentity := peer.Identity
 	sharedSecret, err := rm.node.SharedSecret(peerIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
@@ -262,19 +255,9 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 	if f := strings.Fields(command); len(f) >= 2 && f[0] == "region" && f[1] == "load" {
 		return "", ErrRegionLoad
 	}
-	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	peer, err := rm.peerByHex(pubkeyHex)
 	if err != nil {
-		return "", fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
-	}
-
-	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", ErrBadPubkey, err)
-	}
-
-	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
-	if peer == nil {
-		return "", ErrUnknownPeer
+		return "", err
 	}
 
 	rm.mu.Lock()
@@ -286,7 +269,43 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 	if !sess.IsAdmin {
 		return "", ErrNotAdmin
 	}
+	return rm.cliRoundtrip(peer, pubkeyHex, command, meshcore.TxtTypeCLIData, timeout)
+}
 
+// ErrCompanionCLINoReply: a companion that hasn't allowed us remote CLI passes the command to its owner and sends nothing back.
+var ErrCompanionCLINoReply = errors.New("it may be out of reach, or its owner hasn't allowed you remote CLI")
+
+// SendCompanionCLI runs a command on a firmware 1.18+ companion that allows us remote CLI (contact flag 0x10); there is no login.
+func (rm *Client) SendCompanionCLI(pubkeyHex, command string, timeout time.Duration) (string, error) {
+	peer, err := rm.peerByHex(pubkeyHex)
+	if err != nil {
+		return "", err
+	}
+	reply, err := rm.cliRoundtrip(peer, pubkeyHex, command, meshcore.TxtTypeCLICommand, timeout)
+	if errors.Is(err, ErrNoReply) {
+		return "", fmt.Errorf("%w: %w", ErrNoReply, ErrCompanionCLINoReply)
+	}
+	return reply, err
+}
+
+func (rm *Client) peerByHex(pubkeyHex string) (*node.Peer, error) {
+	pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("%w: hex: %w", ErrBadPubkey, err)
+	}
+	peerIdentity, err := meshcore.NewIdentityFromBytes(pubkeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrBadPubkey, err)
+	}
+	peer := rm.node.Peers().Lookup(peerIdentity.PublicKey())
+	if peer == nil {
+		return nil, ErrUnknownPeer
+	}
+	return peer, nil
+}
+
+// cliRoundtrip tags the command with a free "XX|" prefix, which the firmware echoes, and waits for the reply carrying it.
+func (rm *Client) cliRoundtrip(peer *node.Peer, pubkeyHex, command string, txtType byte, timeout time.Duration) (string, error) {
 	resultCh := make(chan string, 1)
 	var prefix string
 	rm.cliMu.Lock()
@@ -314,7 +333,7 @@ func (rm *Client) SendCLI(pubkeyHex, command string, timeout time.Duration) (str
 	}()
 
 	pub := peer.Identity.PublicKey()
-	if _, err := rm.sendText(peer, rm.scopeFor(pub[:]), []byte(framedCommand), meshcore.TxtTypeCLIData, 0); err != nil {
+	if _, err := rm.sendText(peer, rm.scopeFor(pub[:]), []byte(framedCommand), txtType, 0); err != nil {
 		return "", err
 	}
 
