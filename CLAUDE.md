@@ -26,8 +26,8 @@ regenerates `web/frontend/src/data/radio-presets.json` from it; don't hand-edit)
 |---|---|
 | Backend | Go 1.27+, **no CGO**, `modernc.org/sqlite`, `embed.FS` for the SPA |
 | Frontend | **React 19** (not Preact) + Vite 6 + TS 5.7, Tailwind v4, shadcn/ui (new-york), `react-router-dom@7`, `sonner`, Leaflet |
-| Mesh proto | `github.com/OwlShack/meshcore-go` v1.9.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
-| Real-time | WS `/api/ws`, topics `peers` `packets` `messages` `traces` `repeaterNeighbors` `discovered` `sensors` |
+| Mesh proto | `github.com/OwlShack/meshcore-go` v1.10.0 (plus `hardware/transport`, `hardware/sx12xx` and `hardware/openhop` at the same tag), pinned in `go.mod`. **No `go.work`** — add one only for lockstep library work and delete it before pushing; `GOWORK=off go build ./...` is the check |
+| Real-time | WS `/api/ws`, topics `peers` `packets` `messages` `traces` `repeaterNeighbors` `discovered` `sensors` `telemetry` |
 | Local sensors | `periph.io/x/conn` + `periph.io/x/host` for I2C; `github.com/expr-lang/expr` for derived sensors |
 | Config | SQLite relational tables; config files are one-time imports |
 
@@ -194,6 +194,7 @@ safe future cleanup.
 - `messages` — **flat, no `.message` wrapper**. Re-adding one silently drops every message (it was a real bug). Action variants: `{action:"repeatCount"...}`, `{action:"status"...}`.
 - `traces` — `{companion, tag, hops, path, hopSNRs, snr}`; `repeaterNeighbors` — `{pubkey, name, snr, secsAgo}`.
 - `discovered` — one discovery answer, `{pubkey, name, type, snr, reportedSnr, heard}`; `sensors` — every sensor's `api.SensorStatus`, pushed whole after each poll pass.
+- `telemetry` — a monitored remote sensor's push, `{companion, companionId, pubkey, readings, receivedAt}`.
 
 The hub pings every 50 s with a 75 s read deadline. Clients may send
 `{"action":"ping"}` and get `{"topic":"pong"}` — `useWebSocket` uses it to spot

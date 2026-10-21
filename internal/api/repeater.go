@@ -150,7 +150,19 @@ func (s *Server) handleRepeaterCLI(w http.ResponseWriter, r *http.Request) {
 		s.companionNotRunning(w, r)
 		return
 	}
+	s.runCLI(w, r, ops.CLI, "repeater cli command")
+}
 
+func (s *Server) handleCompanionCLI(w http.ResponseWriter, r *http.Request) {
+	ops, ok := s.repeaterOps(r.PathValue("name"))
+	if !ok {
+		s.companionNotRunning(w, r)
+		return
+	}
+	s.runCLI(w, r, ops.CompanionCLI, "companion cli command")
+}
+
+func (s *Server) runCLI(w http.ResponseWriter, r *http.Request, run func(pubkeyHex, command string) (string, error), label string) {
 	var body struct {
 		Command string `json:"command"`
 	}
@@ -163,9 +175,9 @@ func (s *Server) handleRepeaterCLI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := ops.CLI(r.PathValue("pubkey"), body.Command)
+	response, err := run(r.PathValue("pubkey"), body.Command)
 	if err != nil {
-		s.writeOpError(w, "repeater cli command", err)
+		s.writeOpError(w, label, err)
 		return
 	}
 

@@ -27,6 +27,10 @@ func (r *Repeater) allowForward(pkt *meshcore.Packet) bool {
 		if pkt.PayloadType() == meshcore.PayloadTypeAdvert && hops >= r.cfg.FloodMaxAdvertOr() {
 			return false
 		}
+		// Firmware recv_pkt_region: an unknown transport code, or a plain flood "*" denies, is not relayed.
+		if r.node.Regions().FindFloodMatch(pkt) == nil {
+			return false
+		}
 
 		if r.isLooped(pkt) {
 			return false

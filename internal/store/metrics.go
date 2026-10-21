@@ -145,6 +145,15 @@ func (r *MetricsRepo) ListMetricNames(ctx context.Context, pubkey []byte) ([]str
 
 // UpsertNodeState merges the snapshot onto the stored one per metric, so a partial poll keeps last-known values. Call inside WriteAsync/WriteSync.
 func (r *MetricsRepo) UpsertNodeState(ctx context.Context, s *NodeState) error {
+	return r.upsertNodeState(ctx, s, false)
+}
+
+// UpsertPushedState records readings a node sent unasked: it is alive, but the last poll and its error stand. Call inside WriteAsync/WriteSync.
+func (r *MetricsRepo) UpsertPushedState(ctx context.Context, s *NodeState) error {
+	return r.upsertNodeState(ctx, s, true)
+}
+
+func (r *MetricsRepo) upsertNodeState(ctx context.Context, s *NodeState, pushed bool) error {
 	state := s.State
 	if strings.TrimSpace(state) == "" {
 		state = "{}"
@@ -162,11 +171,11 @@ func (r *MetricsRepo) UpsertNodeState(ctx context.Context, s *NodeState) error {
 			companion_id = excluded.companion_id,
 			kind         = excluded.kind,
 			name         = excluded.name,
-			last_poll_ts = excluded.last_poll_ts,
+			last_poll_ts = CASE WHEN ? THEN node_state.last_poll_ts ELSE excluded.last_poll_ts END,
 			last_ok_ts   = excluded.last_ok_ts,
-			last_error   = excluded.last_error,
+			last_error   = CASE WHEN ? THEN node_state.last_error ELSE excluded.last_error END,
 			state        = excluded.state`,
-		s.Pubkey, s.CompanionID, s.Kind, s.Name, s.LastPollTS, s.LastOkTS, s.LastError, state); err != nil {
+		s.Pubkey, s.CompanionID, s.Kind, s.Name, s.LastPollTS, s.LastOkTS, s.LastError, state, pushed, pushed); err != nil {
 		return fmt.Errorf("upserting node state: %w", err)
 	}
 	return nil

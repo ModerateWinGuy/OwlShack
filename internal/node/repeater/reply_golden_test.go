@@ -237,3 +237,30 @@ func TestDiscover_FirmwareLayout(t *testing.T) {
 		}
 	}
 }
+
+// A repeater with both advert intervals off is hidden and ignores discover requests (simple_repeater MyMesh.cpp:793).
+func TestDiscover_HiddenNodeStaysSilent(t *testing.T) {
+	zero, two := 0, 2*60*60
+	for _, tc := range []struct {
+		name         string
+		local, flood *int
+		wantAnswered bool
+	}{
+		{"defaults", nil, nil, true},
+		{"flood advert only", &zero, &two, true},
+		{"both off", &zero, &zero, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, radio, _ := anonRepeater(t)
+			r.discoverLimiter = newRateLimiter(100, time.Minute)
+			r.cfg.AdvertInterval, r.cfg.FloodAdvertInterval = tc.local, tc.flood
+			r.handleControl(&meshcore.Packet{
+				Header:  meshcore.MakeHeader(meshcore.RouteTypeDirect, meshcore.PayloadTypeControl, 0),
+				Payload: []byte{0x80, 1 << meshcore.AdvertTypeRepeater, 1, 2, 3, 4, 0, 0, 0, 0},
+			})
+			if got := len(radio.take()) == 1; got != tc.wantAnswered {
+				t.Errorf("answered = %v, want %v", got, tc.wantAnswered)
+			}
+		})
+	}
+}

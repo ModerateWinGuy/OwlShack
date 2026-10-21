@@ -24,11 +24,24 @@ type ContactMetadata struct {
 	MonitorRetrySecs int64 `json:"monitorRetrySecs,omitempty"`
 	// MonitorMaxRetries bounds consecutive retries before the node falls back to its normal interval; 0 = the poller's built-in default.
 	MonitorMaxRetries int `json:"monitorMaxRetries,omitempty"`
+	// MonitorPush has a monitored 1.18+ sensor push its readings when one changes, between polls.
+	MonitorPush bool `json:"monitorPush,omitempty"`
+	// MonitorPushDeltas are the readings the sensor watches and the change on each that sends a push.
+	MonitorPushDeltas []PushDelta `json:"monitorPushDeltas,omitempty"`
 
 	// TelemPerms is which classes this contact may read (sensor.Perm* bits), read only where the mode is "selected".
 	TelemPerms uint8 `json:"telemPerms,omitempty"`
 	// Favourite is the MeshCore app's star, kept for it; the firmware's contact flags bit 0.
 	Favourite bool `json:"favourite,omitempty"`
+}
+
+// PushDelta is one watched sensor reading; Name and Unit are the sensor's own labels, kept for display.
+type PushDelta struct {
+	Channel int     `json:"channel"`
+	Type    int     `json:"type"`
+	Value   float64 `json:"value"`
+	Name    string  `json:"name"`
+	Unit    string  `json:"unit"`
 }
 
 type Contact struct {

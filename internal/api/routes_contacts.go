@@ -308,6 +308,11 @@ func checkContactPatch(patch json.RawMessage) error {
 			return fmt.Errorf("monitorProbes names %q twice", p)
 		}
 	}
+	if raw, ok := fields["monitorPushDeltas"]; ok {
+		if err := checkPushDeltas(raw); err != nil {
+			return err
+		}
+	}
 	// The three TELEM_PERM_* classes: base, location and environment.
 	if m.TelemPerms&^0x07 != 0 {
 		return fmt.Errorf("telemPerms %#x has bits beyond the three classes", m.TelemPerms)
@@ -341,28 +346,65 @@ func (s *Server) handleUpdateContactMetadata(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var updateErr error
+	var (
+		updateErr, ruleErr error
+		was, now           store.ContactMetadata
+	)
 	s.store.WriteSync(func() {
 		c, err := s.store.Contacts.Get(r.Context(), cid, pubkey)
 		if err != nil {
 			updateErr = err
 			return
 		}
-		meta := c.Metadata
-		if updateErr = json.Unmarshal(patch, &meta); updateErr == nil {
-			updateErr = s.store.Contacts.UpdateMetadata(r.Context(), cid, pubkey, meta)
+		was, now = c.Metadata, c.Metadata
+		// Decoded into a fresh list: decoding into the stored one would rewrite was's too, and merge into its elements.
+		now.MonitorPushDeltas = nil
+		if updateErr = json.Unmarshal(patch, &now); updateErr != nil {
+			return
+		}
+		if now.MonitorPushDeltas == nil {
+			now.MonitorPushDeltas = was.MonitorPushDeltas
+		}
+		if ruleErr = checkPushSettings(now, c.Type); ruleErr == nil {
+			updateErr = s.store.Contacts.UpdateMetadata(r.Context(), cid, pubkey, now)
 		}
 	})
 	if errors.Is(updateErr, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "contact not found")
 		return
 	}
+	if ruleErr != nil {
+		writeError(w, http.StatusBadRequest, ruleErr.Error())
+		return
+	}
 	if updateErr != nil {
 		s.serverError(w, "failed to update contact metadata", updateErr)
 		return
 	}
+	s.applySensorPush(name, pubkey, was, now)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// applySensorPush puts a push change on air soon rather than at the next poll: a poll within a tick renews the watch, and turning push off stops it.
+func (s *Server) applySensorPush(name string, pubkey []byte, was, now store.ContactMetadata) {
+	pushing := func(m store.ContactMetadata) bool { return m.Monitor && m.MonitorPush }
+	switch {
+	case pushing(now) && (!pushing(was) || !slices.Equal(was.MonitorPushDeltas, now.MonitorPushDeltas) || was.MonitorIntervalSecs != now.MonitorIntervalSecs || was.RepeaterPassword != now.RepeaterPassword):
+		if p := s.pollerRef(); p != nil {
+			p.PollSoon(pubkey)
+		}
+	case pushing(was) && !pushing(now):
+		ops, ok := s.repeaterOps(name)
+		if !ok {
+			return
+		}
+		go func() {
+			if err := ops.Unsubscribe(hex.EncodeToString(pubkey)); err != nil {
+				s.log.Warn("sensor push not stopped; its pushes are ignored, and the sensor stops when the watch lapses", "pubkey", hex.EncodeToString(pubkey), "error", err)
+			}
+		}()
+	}
 }
 
 // handleSetContactLocation takes lat/lon in microdegrees; a later advert with a position overwrites it.

@@ -1182,3 +1182,41 @@ func TestAppQueueSize_ImportDefaultAndRange(t *testing.T) {
 		}
 	}
 }
+
+// The firmware's `set flood.max`/`flood.max.advert` take 0-64, 0 meaning never relay; refusing 0 left the CLI's OK unsaved.
+func TestValidate_FloodHopCapsTakeZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(r *RepeaterConfig, n int)
+	}{
+		{"floodMax", func(r *RepeaterConfig, n int) { r.FloodMax = &n }},
+		{"floodMaxAdvert", func(r *RepeaterConfig, n int) { r.FloodMaxAdvert = &n }},
+		{"floodMaxUnscoped", func(r *RepeaterConfig, n int) { r.FloodMaxUnscoped = &n }},
+	} {
+		for n, wantOK := range map[int]bool{0: true, 64: true, 65: false, -1: false} {
+			c := validConfig(t)
+			c.Repeater = &RepeaterConfig{Name: "rp", AdminPassword: "pw"}
+			tc.set(c.Repeater, n)
+			if err := c.Validate(); (err == nil) != wantOK {
+				t.Errorf("%s %d: err = %v, want ok %v", tc.name, n, err, wantOK)
+			}
+		}
+	}
+}
+
+// Firmware roles regenerate a key whose hash byte is the reserved 0x00 or 0xFF (simple_repeater main.cpp:91), and so must we.
+func TestGenerateSeedHex_NoReservedPrefix(t *testing.T) {
+	for range 2000 { // about 16 reserved draws expected if unchecked
+		seed, err := GenerateSeedHex()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, err := PubKeyHexFromSeed(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := pub[:2]; p == "00" || p == "ff" {
+			t.Fatalf("seed %s has reserved prefix %s", seed, p)
+		}
+	}
+}

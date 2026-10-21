@@ -14,6 +14,7 @@ import (
 
 	"github.com/OwlShack/OwlShack/internal/api"
 	"github.com/OwlShack/OwlShack/internal/modem"
+	"github.com/OwlShack/OwlShack/internal/telemetry"
 )
 
 func TestRecentDM_CollapsesRetriesOfOneMessage(t *testing.T) {
@@ -133,5 +134,52 @@ func TestRoomPost_LivePostCarriesItsRegion(t *testing.T) {
 	}
 	if got.Data["text"] != "hello room" || got.Data["floodScope"] != "region:nz" {
 		t.Errorf("live room post = %v, want its region region:nz", got.Data)
+	}
+}
+
+// A sensor's push reaches the page as {pubkey, readings} on "telemetry", the shape SensorWatch reads.
+func TestTelemetryPush_Broadcast(t *testing.T) {
+	c, _, _, _ := scopeCompanion(t)
+	srv := api.NewServer(c.store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ws.Close() })
+	for _, action := range []string{"subscribe", "ping"} {
+		if err := ws.WriteJSON(map[string]string{"action": action, "topic": "telemetry"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var pong struct{ Topic string }
+	if err := ws.ReadJSON(&pong); err != nil || pong.Topic != "pong" {
+		t.Fatalf("subscribing: %+v, %v", pong, err)
+	}
+	c.hub = srv.Hub()
+
+	tl, err := telemetry.Parse([]byte{2, meshcore.LPPTemperature, 0x00, 0xD7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.broadcastTelemetryPush("ab12", tl)
+	var got struct {
+		Topic string
+		Data  struct {
+			Pubkey   string
+			Readings []struct {
+				Channel int
+				Type    int
+				Value   float64
+			}
+		}
+	}
+	if err := ws.ReadJSON(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Topic != "telemetry" || got.Data.Pubkey != "ab12" || len(got.Data.Readings) != 1 || got.Data.Readings[0].Value != 21.5 || got.Data.Readings[0].Channel != 2 {
+		t.Errorf("push broadcast = %+v", got)
 	}
 }

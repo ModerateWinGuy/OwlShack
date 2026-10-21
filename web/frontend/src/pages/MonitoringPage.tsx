@@ -36,6 +36,8 @@ interface WsMetrics {
   name: string;
   ts: number;
   metrics: Record<string, number>;
+  // A node's own push: alive, but the last poll and its error stand.
+  pushed?: boolean;
 }
 
 const nowSecs = () => Math.floor(Date.now() / 1000);
@@ -143,9 +145,9 @@ export function MonitoringPage() {
         pubkey: m.pubkey,
         kind: m.kind,
         name: m.name || (idx >= 0 ? prev[idx].name : ""),
-        lastPollTs: m.ts,
+        lastPollTs: m.pushed && idx >= 0 ? prev[idx].lastPollTs : m.ts,
         lastOkTs: m.ts,
-        lastError: "",
+        lastError: m.pushed && idx >= 0 ? prev[idx].lastError : "",
         // The WS payload carries no interval; keep the value from the last fetch.
         intervalSecs: idx >= 0 ? prev[idx].intervalSecs : 0,
         metrics: { ...(idx >= 0 ? prev[idx].metrics : {}), ...m.metrics },

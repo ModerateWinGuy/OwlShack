@@ -204,6 +204,20 @@ func (b *backend) Repeater(name string) (*api.RepeaterOps, bool) {
 		CLI: func(pubkeyHex, command string) (string, error) {
 			return remote(rm.SendCLI(pubkeyHex, command, repeaterReqTimeout))
 		},
+		CompanionCLI: func(pubkeyHex, command string) (string, error) {
+			return remote(rm.SendCompanionCLI(pubkeyHex, command, repeaterReqTimeout))
+		},
+		Unsubscribe: func(pubkeyHex string) error {
+			return remoteErr(rm.SendUnsubscribe(pubkeyHex, repeaterReqTimeout))
+		},
+		Subscription: func(pubkeyHex string) any {
+			sub, ok := rm.ActiveSubscription(pubkeyHex)
+			if !ok {
+				return map[string]any{"active": false, "refused": rm.SubscribeRefused(pubkeyHex)}
+			}
+			// A refused renewal leaves the last watch running until it lapses, so both can be true.
+			return map[string]any{"active": true, "expires": sub.Expires, "scope": sub.Scope, "refused": rm.SubscribeRefused(pubkeyHex)}
+		},
 		Regions: func(ctx context.Context, pubkeyHex string) (any, error) {
 			return remote(rm.ReadRegions(ctx, pubkeyHex, repeaterReqTimeout))
 		},

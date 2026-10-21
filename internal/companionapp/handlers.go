@@ -672,6 +672,9 @@ func (c *conn) addUpdateContact(comp *companion.Companion, cmd mc.AddUpdateConta
 	if err != nil {
 		return errFrame(mc.ErrCodeIllegalArg)
 	}
+	if flags&mc.ContactFlagRemoteCLI != 0 {
+		return errFrame(mc.ErrCodeUnsupportedCmd) // no remote CLI on OwlShack yet
+	}
 	typeName := advNames[advType]
 
 	existing, isContact := s.contact(pub)
@@ -720,7 +723,7 @@ func (c *conn) addUpdateContact(comp *companion.Companion, cmd mc.AddUpdateConta
 			werr = err
 			return
 		}
-		// Bits above the three telemetry classes, such as the firmware's remote CLI flag, are not kept.
+		// Undefined bits above the remote CLI flag are not kept.
 		if perms, fav := flags>>1&0x07, flags&1 == 1; k.Metadata.TelemPerms != perms || k.Metadata.Favourite != fav {
 			k.Metadata.TelemPerms, k.Metadata.Favourite = perms, fav
 			werr = s.st.Contacts.UpdateMetadata(ctx, s.id, pub, k.Metadata)

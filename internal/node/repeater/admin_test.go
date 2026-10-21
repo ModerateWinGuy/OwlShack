@@ -955,3 +955,19 @@ func TestTelemetryReportsZeroVoltsWhenTheHostHasNoBattery(t *testing.T) {
 		t.Errorf("got %+v, want the battery plus the temperature", readings)
 	}
 }
+
+// `power` answers in CommonCLI's layout (CommonCLI.cpp:287), with 0 mV when the board has no cell.
+func TestCLIPower_FirmwareLayout(t *testing.T) {
+	ds := DeviceStats{BatteryMV: 4168, HaveBattery: true}
+	r := &Repeater{boardStats: func() DeviceStats { return ds }}
+	if got, want := r.dispatchCLI("power"), "batt:4168 mV usb:n/a solar_chg:n/a ext:no charger:no"; got != want {
+		t.Errorf("power = %q, want %q", got, want)
+	}
+	ds = DeviceStats{}
+	if got, want := r.dispatchCLI("power"), "batt:0 mV usb:n/a solar_chg:n/a ext:no charger:no"; got != want {
+		t.Errorf("power without a cell = %q, want %q", got, want)
+	}
+	if got := r.dispatchCLI("powersaving"); got != notSupportedOnNode {
+		t.Errorf("powersaving = %q, want %q", got, notSupportedOnNode)
+	}
+}

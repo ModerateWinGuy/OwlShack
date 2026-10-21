@@ -647,6 +647,7 @@ func (b *backend) CreateRepeater(ctx context.Context, in api.RepeaterCreateInput
 				AdminPassword: in.AdminPassword,
 				Regions:       []store.RepeaterRegion{{Name: config.WildcardRegion}},
 				FloodScope:    string(config.ScopeEverywhere),
+				LoopDetect:    new("minimal"), // firmware 1.18's default for a new install; existing repeaters keep theirs
 			}
 			if in.PrivateKey != nil && *in.PrivateKey != "" {
 				row.PrivateKey = *in.PrivateKey

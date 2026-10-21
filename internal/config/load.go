@@ -281,11 +281,11 @@ func (c *Config) Validate() error {
 		if r.LoopDetect != nil && *r.LoopDetect != "" && !loopDetectLevels[*r.LoopDetect] {
 			return fmt.Errorf("repeater %q: invalid loopDetect %q (want off|minimal|moderate|strict)", r.Name, *r.LoopDetect)
 		}
-		if r.FloodMax != nil && (*r.FloodMax < 1 || *r.FloodMax > 64) {
-			return fmt.Errorf("repeater %q: floodMax must be between 1 and 64", r.Name)
+		if r.FloodMax != nil && (*r.FloodMax < 0 || *r.FloodMax > 64) {
+			return fmt.Errorf("repeater %q: floodMax must be between 0 and 64", r.Name)
 		}
-		if r.FloodMaxAdvert != nil && (*r.FloodMaxAdvert < 1 || *r.FloodMaxAdvert > 64) {
-			return fmt.Errorf("repeater %q: floodMaxAdvert must be between 1 and 64", r.Name)
+		if r.FloodMaxAdvert != nil && (*r.FloodMaxAdvert < 0 || *r.FloodMaxAdvert > 64) {
+			return fmt.Errorf("repeater %q: floodMaxAdvert must be between 0 and 64", r.Name)
 		}
 		if r.FloodMaxUnscoped != nil && (*r.FloodMaxUnscoped < 0 || *r.FloodMaxUnscoped > 64) {
 			return fmt.Errorf("repeater %q: floodMaxUnscoped must be between 0 and 64", r.Name)

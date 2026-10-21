@@ -79,6 +79,25 @@ top until tagged.
   says some may be missing.
 - **Set your repeater's home region.** The Regions list on the Repeater page now has a home
   region picker, as `region home` sets.
+- **Read a repeater's power state.** Your repeater answers `power` with its battery voltage when
+  the radio board reports one; it can't tell USB, solar or charging, so those read n/a or no. The
+  console also suggests `power` and `gps diag` for MeshCore 1.18 repeaters.
+- **Monitoring can have a sensor push its readings when they change.** For a monitored MeshCore
+  1.18 sensor, turn on Push changes in its Monitoring settings, tick up to three readings and set how
+  much each must change. The sensor then sends its readings within a minute of one moving that far,
+  and they go into its Monitoring history and onto its Telemetry tab as they arrive. Monitoring still
+  polls it, every hour unless you set another interval, and each poll renews the push, so it comes
+  back by itself after OwlShack or the sensor restarts. The sensor needs a default region, set on
+  its Regions tab: without one it refuses to push, the settings say so, and it is polled as usual
+  until you set one. Monitoring logs in to set up the push, so it saves the sensor's password.
+  Humidity, and the readings that come after it, can't be watched, as MeshCore 1.18 sensors
+  misread them.
+- **Run commands on a companion.** A chat contact's page has a CLI panel for companions on
+  MeshCore 1.18 or later, for commands such as `get radio` or `ver`, and Tab completes the commands
+  a companion knows. The companion's owner has to allow you remote CLI in their app first; until
+  they do, it doesn't answer.
+- **Manage a sensor's regions.** A MeshCore 1.18 sensor keeps a region list as repeaters do, so its
+  page now has the Regions tab.
 
 ### Changed
 
@@ -120,9 +139,26 @@ top until tagged.
 - **Renaming or moving a companion keeps its logins and doesn't send an advert by itself.** The
   next advert carries the new name and position; press flood advert on the companion's page to
   announce them at once, as in the MeshCore app.
+- **A hidden repeater stays out of discovery.** With both advert intervals off, your repeater no
+  longer answers Discover nearby or another repeater's discover, as MeshCore 1.18 repeaters do.
+  Turn either advert back on to be found again.
+- **New repeaters start with loop detection on minimal**, as new MeshCore 1.18 repeaters do. A
+  repeater you already have keeps its setting.
+- **The MeshCore app can't turn on remote CLI for a contact.** OwlShack doesn't take commands
+  from contacts yet, so the app shows an error rather than a switch that looks on and does nothing.
+- **A radio wired to the Pi resets its receiver every 30 seconds**, as a KISS modem does, so a
+  receiver that has gone deaf recovers without a restart. The noise floor reading starts again
+  after each reset.
+- **Your repeater relays direct messages and ACKs with MeshCore 1.18's timing.** A relayed direct
+  message or ACK now waits a short random delay, and extra ACK copies go out 300 ms apart before the
+  ACK itself.
+- **Your repeater passes on a flood sent in region 0 even when "*" denies floods**, as MeshCore 1.18
+  repeaters do.
 
 ### Fixed
 
+- **CLI suggestions show each command in full on a phone.** The command no longer gets cut off to
+  make room for its description.
 - **Channel posts sent at the same moment each show their own repeats.** When two posts went out
   together, for example from two open pages or a bot replying as you post, one could show the
   other's repeats while the other showed none.
@@ -250,6 +286,16 @@ top until tagged.
 - **First-run setup fits a phone screen.** Its buttons scrolled off the side.
 - **Screen readers name map markers and settings fields.** Markers were read without a name, text
   fields by their placeholder instead of their label, and dropdowns only by their current value.
+- **Saving Routing on a MeshCore 1.18 room server works.** A 1.18 room refuses to turn repeat on,
+  and the save stopped there with an error, leaving path hash mode and the flood limits unsaved.
+  Save now sends only what you changed, so it fails only if you choose repeat on.
+- **A negative TX power on a MeshCore 1.18 repeater shows as negative.** 1.18 reports -4 dBm as
+  252; the Radio settings now show -4.
+- **`set flood.max 0` and `set flood.max.advert 0` now take effect.** Your repeater answered OK
+  and kept the old limit; 0 now means it relays no floods, or no adverts, as in MeshCore.
+- **New companions and repeaters never get a key MeshCore treats as reserved.** About one key in
+  128 started with a byte MeshCore firmware won't use, so a device would refuse it if you moved the
+  identity onto one.
 
 ### Upgrading
 

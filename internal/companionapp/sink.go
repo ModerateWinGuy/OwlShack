@@ -16,12 +16,12 @@ import (
 
 func (s *Server) AppMessage(m companion.AppMessage) {
 	if m.Channel >= 0 {
-		s.queue(true, capped(mc.ChannelMsgRecvV3Response{SNR: m.Packet.SNR, ChannelIdx: byte(m.Channel), PathLen: pathLenByte(m.Packet),
-			TxtType: meshcore.TxtTypePlain, SenderTimestamp: m.Timestamp, Text: m.Text}.ToBytes()))
+		s.queue(true, mc.ChannelMsgRecvV3Response{SNR: m.Packet.SNR, ChannelIdx: byte(m.Channel), PathLen: pathLenByte(m.Packet),
+			TxtType: meshcore.TxtTypePlain, SenderTimestamp: m.Timestamp, Text: m.Text}.ToBytes())
 		return
 	}
-	s.queue(false, capped(mc.ContactMsgRecvV3Response{SNR: m.Packet.SNR, PubKeyPrefix: prefix(m.From), PathLen: pathLenByte(m.Packet),
-		TxtType: m.TxtType, SenderPrefix: m.Signer, SenderTimestamp: m.Timestamp, Text: m.Text}.ToBytes()))
+	s.queue(false, mc.ContactMsgRecvV3Response{SNR: m.Packet.SNR, PubKeyPrefix: prefix(m.From), PathLen: pathLenByte(m.Packet),
+		TxtType: m.TxtType, SenderPrefix: m.Signer, SenderTimestamp: m.Timestamp, Text: m.Text}.ToBytes())
 }
 
 // queue holds a message frame for the app's next sync and tickles a connected app once it is stored.

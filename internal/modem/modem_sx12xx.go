@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/OwlShack/OwlShack/internal/config"
 	"github.com/OwlShack/meshcore-go/hardware"
@@ -108,6 +109,8 @@ func setupSPI(ms *State, cfg *config.Config, connAddr string, radioConfig *hardw
 		sx12xx.WithModemLogger(slog.Default()),
 		// The KISS threshold, so handler_slow means the same on both paths.
 		sx12xx.WithHandlerWatchdog(handlerWatchdog),
+		// The KISS modem firmware's AGC_RESET_INTERVAL_MS, so both radio paths recover from a stuck front end alike.
+		sx12xx.WithAGCResetInterval(30*time.Second),
 		// NoteError owns driver_errors, so a driver fault must not also land in ParseErrors.
 		sx12xx.WithModemErrorHandler(func(err error) {
 			stats.NoteError(err)

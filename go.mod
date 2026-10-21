@@ -3,10 +3,10 @@ module github.com/OwlShack/OwlShack
 go 1.27.2
 
 require (
-	github.com/OwlShack/meshcore-go v1.9.0
-	github.com/OwlShack/meshcore-go/hardware/openhop v1.9.0
-	github.com/OwlShack/meshcore-go/hardware/sx12xx v1.9.0
-	github.com/OwlShack/meshcore-go/hardware/transport v1.9.0
+	github.com/OwlShack/meshcore-go v1.10.0
+	github.com/OwlShack/meshcore-go/hardware/openhop v1.10.0
+	github.com/OwlShack/meshcore-go/hardware/sx12xx v1.10.0
+	github.com/OwlShack/meshcore-go/hardware/transport v1.10.0
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/expr-lang/expr v1.17.8
 	github.com/gorilla/websocket v1.5.3

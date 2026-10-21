@@ -122,6 +122,11 @@ type Client struct {
 
 	cliMu      sync.Mutex
 	cliPending map[string]chan string
+
+	subsMu  sync.Mutex
+	subs    map[uint32]Subscription // by the push tag the sensor sends
+	refused map[string]bool         // sensors whose last subscribe was refused, by pubkey hex
+	onPush  TelemetryPushHandler
 }
 
 func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logger, stats airtimeEstimator, ownHashSize func() uint8, scopeFor func(pubkey []byte) *meshcore.Region) *Client {
@@ -136,6 +141,8 @@ func NewClient(n *node.Node, st *store.Store, companionID int64, log *slog.Logge
 		sessions:    make(map[string]*Session),
 		pending:     make(map[uint32]*pendingRequest),
 		cliPending:  make(map[string]chan string),
+		subs:        make(map[uint32]Subscription),
+		refused:     make(map[string]bool),
 	}
 }
 

@@ -223,7 +223,7 @@ func TestSetRepeaterHome(t *testing.T) {
 	}
 }
 
-// A new repeater starts sending everywhere, its own default; it never inherits.
+// A new repeater starts sending everywhere with loop detection minimal, its own defaults; it never inherits.
 func TestCreateRepeater_Succeeds(t *testing.T) {
 	t.Parallel()
 	b := newHealthBackend(t)
@@ -241,6 +241,9 @@ func TestCreateRepeater_Succeeds(t *testing.T) {
 	}
 	if rep.FloodScope != "everywhere" {
 		t.Errorf("new repeater scope = %q, want everywhere", rep.FloodScope)
+	}
+	if rep.LoopDetect == nil || *rep.LoopDetect != "minimal" {
+		t.Errorf("new repeater loop.detect = %v, want minimal (firmware 1.18 new-install default)", rep.LoopDetect)
 	}
 }
 

@@ -554,8 +554,8 @@ The role facts behind the tags:
 
 - Repeater-only: `neighbors`, `neighbor.remove`, `discover.neighbors`, `loop.detect` (sensor and room `formatNeighborsReply` return "not supported", and only the repeater implements `isLooped`), plus `bridge.*`.
 - `io` sensor-only; `allow.read.only` room-only.
-- `guest.password` repeater + room (sensors have no guest login); `region save`/`load` repeater + room (the sensor lacks the callbacks).
-- Universal: `repeat` / `flood.max` — sensors and rooms **do** forward via `allowPacketForward` (the room also honours `flood.max.advert`/`.unscoped`).
+- `guest.password` repeater + room (sensors have no guest login); `region save`/`load` every role from 1.18 (a 1.17 sensor lacks the callbacks, so its save fails).
+- Universal: `repeat` / `flood.max` — sensors and rooms **do** forward via `allowPacketForward` (the room also honours `flood.max.advert`/`.unscoped`). A 1.18 room refuses `set repeat on` (`ERR - repeat now deprecated`) but takes `off`, so the Routing section sends only the fields changed since load.
 
 ## Radio presets
 
@@ -572,3 +572,30 @@ feed, and only warns when the feed is down or unusable, since regenerating
 cannot fix that; the release workflow runs it on every tag. A preset's `network_settings.path_hash_size` becomes
 `pathHashSize`, which the label shows but does **not** apply — set it on
 Settings (see [mqtt-and-radio.md](./mqtt-and-radio.md)).
+
+## MeshCore 1.18 additions
+
+- **Remote companion CLI** (`BaseChatMesh.cpp:262`, `companion_radio/MyMesh.cpp:538,2082`): a DM of
+  `TXT_TYPE_CLI_COMMAND` (3) to a 1.18 companion runs as CLI when its contact for us has flag 0x10,
+  and the reply is a `TXT_TYPE_CLI_DATA` (1) DM echoing our `XX|` tag. Without the flag the command
+  goes to its owner's app and nothing comes back, so silence is both "not allowed" and "out of
+  reach". OwlShack sends these (`SendCompanionCLI`); it does not yet run them, so the app server
+  refuses flag 0x10 rather than store a grant nothing honours.
+- **Sensor subscriptions** (`simple_sensor/SensorMesh.cpp:213-251,1042-1068`): REQ 0x08 carries a
+  push tag, a timeout (16-bit seconds) and 3-14 bytes of LPPData deltas; the reply's expiry is 0
+  when the request was unscoped and the sensor has no default region. Every 60 s the sensor
+  compares readings with the deltas and sends its whole telemetry as a RESPONSE tagged with the
+  push tag. The firmware stores the push tag before refusing, so a refused resubscribe re-tags the
+  running watch. It reads humidity as 2 bytes where the telemetry holds 1, so humidity and the reading
+  right after it (pressure on a BME280/680) are never matched; checked on a RAK4631 with a BME680, where
+  a fresh pressure watch never fired and a generic-sensor watch after it did. The API refuses
+  humidity; the UI also leaves out every reading after the first humidity, since where the walk lands past it depends on the values, which the server can't see. Pushes go
+  out as a flood scoped to the watch's region, so they only cross repeaters that relay that region.
+  OwlShack subscribes only from Monitoring (see config-and-storage.md), never sends the request in a
+  region, and so needs the sensor's default region.
+- **Hidden repeater** (`simple_repeater/MyMesh.cpp:793`): with both advert intervals 0 it ignores
+  DISCOVER, and so does ours.
+- **Flood relay by region is the repeater's call** (`simple_repeater/MyMesh.cpp:440,556`): our
+  repeater's `allowForward` refuses a flood `FindFloodMatch` gives nil; from meshcore-go v1.10 the
+  library no longer gates relays itself.
+

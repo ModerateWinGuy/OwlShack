@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Eye, EyeOff, Loader2, Save } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,14 @@ import {
 import { cn } from "@/lib/utils";
 import { RETRY_OPTS, MAX_RETRIES_OPTS } from "@/lib/monitorOptions";
 import { apiErrorMessage } from "@/lib/apiError";
+import {
+  SensorPushSettings,
+  pushDeltas,
+  pushProblem,
+  rowsFromSaved,
+  type PushDelta,
+  type PushRow,
+} from "@/components/SensorPushSettings";
 
 export interface MonitorMetadata {
   isRepeater?: boolean;
@@ -24,6 +32,8 @@ export interface MonitorMetadata {
   monitorProbes?: string[] | null;
   monitorRetrySecs?: number;
   monitorMaxRetries?: number;
+  monitorPush?: boolean;
+  monitorPushDeltas?: PushDelta[] | null;
   // telemPerms is which telemetry classes this contact may read; owned by the telemetry page.
   telemPerms?: number;
 }
@@ -38,6 +48,12 @@ const INTERVAL_OPTS: { value: string; label: string }[] = [
   { value: "43200", label: "12 hours" },
   { value: "86400", label: "24 hours" },
 ];
+
+// A pushing sensor's watch is renewed at each poll and lasts at most 18 h, so its polls are shorter. Mirrors the server.
+const MAX_PUSH_INTERVAL = 64800;
+const PUSH_INTERVAL_OPTS = INTERVAL_OPTS.filter((o) => Number(o.value) <= MAX_PUSH_INTERVAL).map((o) =>
+  o.value === "0" ? { ...o, label: "Default (1h, 6h if refused)" } : o,
+);
 
 const PROBES = [
   { key: "status", label: "Status", hint: "battery, signal, traffic, uptime" },
@@ -62,8 +78,8 @@ interface ContactLike {
   metadata?: MonitorMetadata;
 }
 
-// Companions have no firmware login handler: only a sessionless contact-telemetry request.
-export type NodeKind = "repeater" | "companion";
+// Companions have no firmware login handler: only a sessionless contact-telemetry request. A sensor is polled like one, and logs in only to push.
+export type NodeKind = "repeater" | "companion" | "sensor";
 
 // PATCHes the full contact metadata, preserving fields this form doesn't own.
 export function MonitoringSettings({
@@ -88,8 +104,9 @@ export function MonitoringSettings({
   const [retrySecs, setRetrySecs] = useState("0");
   const [maxRetries, setMaxRetries] = useState("0");
   const [password, setPassword] = useState("");
-  const [showPw, setShowPw] = useState(false);
   const [probes, setProbes] = useState<Record<ProbeKey, boolean>>(initialProbes());
+  const [push, setPush] = useState(false);
+  const [pushRows, setPushRows] = useState<PushRow[]>([]);
   const [saving, setSaving] = useState(false);
 
   const apply = useCallback((m: MonitorMetadata) => {
@@ -100,6 +117,8 @@ export function MonitoringSettings({
     setMaxRetries(String(m.monitorMaxRetries ?? 0));
     setPassword(m.repeaterPassword ?? "");
     setProbes(initialProbes(m.monitorProbes));
+    setPush(!!m.monitorPush);
+    setPushRows(rowsFromSaved(m.monitorPushDeltas));
     setLoaded(true);
   }, []);
 
@@ -128,7 +147,18 @@ export function MonitoringSettings({
     });
   };
 
+  const pushing = kind === "sensor" && push;
+  const turnPush = (on: boolean) => {
+    setPush(on);
+    if (on && Number(intervalSecs) > MAX_PUSH_INTERVAL) setIntervalSecs("0");
+  };
+
   const save = useCallback(async () => {
+    const problem = pushing ? pushProblem(pushRows) : null;
+    if (problem) {
+      toast.error(problem);
+      return;
+    }
     setSaving(true);
     // Only what this panel owns: the PATCH merges, so a grant saved elsewhere since this loaded survives.
     const patch: MonitorMetadata = {
@@ -145,6 +175,12 @@ export function MonitoringSettings({
       patch.repeaterPassword = password;
       // Empty when all are on, so it stays the implicit "all" rather than a list.
       patch.monitorProbes = enabledProbes.length === PROBES.length ? [] : enabledProbes;
+    }
+    // Push fields go only while push is on; left out, the stored choice stands for next time.
+    if (kind === "sensor") {
+      patch.monitorPush = push;
+      patch.repeaterPassword = password;
+      if (pushing) patch.monitorPushDeltas = pushDeltas(pushRows);
     }
     try {
       const r = await fetch(
@@ -165,7 +201,7 @@ export function MonitoringSettings({
     } finally {
       setSaving(false);
     }
-  }, [base, kind, password, enabled, intervalSecs, retrySecs, maxRetries, probes, companionRef, pubkey, onSaved]);
+  }, [base, kind, password, enabled, intervalSecs, retrySecs, maxRetries, probes, push, pushing, pushRows, companionRef, pubkey, onSaved]);
 
   return (
     <div className={cn("panel", className)}>
@@ -198,7 +234,7 @@ export function MonitoringSettings({
           <SelectField
             label="Fetch interval"
             value={intervalSecs}
-            options={INTERVAL_OPTS}
+            options={pushing ? PUSH_INTERVAL_OPTS : INTERVAL_OPTS}
             onChange={setIntervalSecs}
           />
           <SelectField
@@ -221,32 +257,10 @@ export function MonitoringSettings({
 
         {kind === "repeater" ? (
           <>
-            <div className="space-y-1">
-              <Label className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
-                Access password
-              </Label>
-              <div className="relative">
-                <Input
-                  type={showPw ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="(blank = guest / anonymous)"
-                  className="rounded-none font-mono text-base md:text-xs border-border bg-background pr-9"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPw((s) => !s)}
-                  className="absolute inset-y-0 right-0 px-2.5 text-muted-foreground hover:text-foreground"
-                  tabIndex={-1}
-                >
-                  {showPw ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                </button>
-              </div>
-              <p className="font-mono text-[10px] text-muted-foreground/60 leading-relaxed">
-                Admin password unlocks full status + telemetry (location, environment
-                sensors). Guest password or blank gets base telemetry only.
-              </p>
-            </div>
+            <PasswordField value={password} onChange={setPassword}>
+              Admin password unlocks full status + telemetry (location, environment
+              sensors). Guest password or blank gets base telemetry only.
+            </PasswordField>
 
             <div className="space-y-1.5">
               <Label className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -277,6 +291,24 @@ export function MonitoringSettings({
                 Fewer probes = less radio airtime per poll.
               </p>
             </div>
+          </>
+        ) : kind === "sensor" ? (
+          <>
+            <SensorPushSettings
+              companionRef={companionRef}
+              pubkey={pubkey}
+              push={push}
+              onPushChange={turnPush}
+              rows={pushRows}
+              onRowsChange={setPushRows}
+              savedPush={!!base.monitor && !!base.monitorPush}
+            />
+            {push && (
+              <PasswordField value={password} onChange={setPassword}>
+                Monitoring logs in with this to set up the push: the sensor's admin password, or blank if the
+                sensor has already given this companion access.
+              </PasswordField>
+            )}
           </>
         ) : (
           <div className="space-y-1">
@@ -345,6 +377,43 @@ function SelectField({
           ))}
         </SelectContent>
       </Select>
+    </div>
+  );
+}
+
+function PasswordField({
+  value,
+  onChange,
+  children,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  children: ReactNode;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="space-y-1">
+      <Label className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+        Access password
+      </Label>
+      <div className="relative">
+        <Input
+          type={show ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="(blank = guest / anonymous)"
+          className="rounded-none font-mono text-base md:text-xs border-border bg-background pr-9"
+        />
+        <button
+          type="button"
+          onClick={() => setShow((s) => !s)}
+          className="absolute inset-y-0 right-0 px-2.5 text-muted-foreground hover:text-foreground"
+          tabIndex={-1}
+        >
+          {show ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+        </button>
+      </div>
+      <p className="font-mono text-[10px] text-muted-foreground/60 leading-relaxed">{children}</p>
     </div>
   );
 }
