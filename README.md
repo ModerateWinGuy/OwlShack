@@ -234,7 +234,7 @@ container's idea of local time is UTC.
 
 ### From source
 
-Requires Go 1.27.2+ and Node. The SPA is embedded into the binary, so it has to
+Requires Go 1.27.3+ and Node. The SPA is embedded into the binary, so it has to
 be built first:
 
 ```bash
