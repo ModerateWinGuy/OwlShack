@@ -3,7 +3,12 @@
 Notable changes per release. Dates are the tag date; unreleased work sits at the
 top until tagged.
 
-## Unreleased
+## v1.6.0 - 2026-10-21
+
+Baseline `v1.5.0`. Use the official MeshCore app with any companion; regions that nest, that you
+can send in, and that you can manage on remote repeaters and sensors; MeshCore 1.18 support,
+including sensors that push their readings into Monitoring; Connections mode on the Map; and fixes
+across direct messages, repeaters, MQTT and backups.
 
 ### Added
 
