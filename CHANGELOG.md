@@ -304,6 +304,12 @@ across direct messages, repeaters, MQTT and backups.
 
 ### Upgrading
 
+- **The first start after upgrading can take a few minutes, so let it finish.** OwlShack updates
+  its database and rewrites the file once before the web page comes up: seconds on a PC, about two
+  minutes for a 56 MB database on a Pi Zero, and longer for a bigger one or a slow SD card. The log
+  says "rewriting the database once" while it works. Stopping it part way loses nothing, and it
+  carries on at the next start. If your Docker setup restarts a container that fails a health check,
+  give it longer than usual this once.
 - **Docker images are now at `ghcr.io/owlshack/owlshack`.** The project moved to the OwlShack
   organisation on GitHub, and pulls from `ghcr.io/meshcore-go/owlshack` already fail. Change the
   image name in your `docker run` command or compose file; the tags are the same. The Debian
