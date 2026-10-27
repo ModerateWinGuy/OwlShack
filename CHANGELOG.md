@@ -3,6 +3,16 @@
 Notable changes per release. Dates are the tag date; unreleased work sits at the
 top until tagged.
 
+## v1.6.1 - 2026-10-27
+
+Baseline `v1.6.0`. Fixes moving a bot to another companion.
+
+### Fixed
+
+- **Moving a bot to another companion now moves it.** Before, the save looked like it worked but
+  the bot kept running on its old companion. A bot you already tried to move is still on its old
+  companion: open it, pick the companion again and save.
+
 ## v1.6.0 - 2026-10-21
 
 Baseline `v1.5.0`. Use the official MeshCore app with any companion; regions that nest, that you
