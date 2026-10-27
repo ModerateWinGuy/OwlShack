@@ -55,6 +55,12 @@ func TestTriggerRepo_RoundTrip(t *testing.T) {
 	want.MatchPatterns = []string{"event:(?i)tsunami"}
 	want.Location = nil
 	want.Regions = &[]string{"NZL-3398", "NZL-3400"}
+	companionID = mkCompanion(t, st, "other")
+	ch2 := &CompanionChannel{CompanionID: companionID, Name: "Public"}
+	if err := st.Channels.Create(t.Context(), ch2); err != nil {
+		t.Fatalf("Channels.Create: %v", err)
+	}
+	want.CompanionID, want.ChannelIDs = companionID, []int64{ch2.ID}
 	if err := st.Triggers.Update(t.Context(), want); err != nil {
 		t.Fatalf("Triggers.Update: %v", err)
 	}

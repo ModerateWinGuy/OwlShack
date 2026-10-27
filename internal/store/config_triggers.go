@@ -219,11 +219,11 @@ func (r *TriggerRepo) Update(ctx context.Context, t *Trigger) error {
 
 	lat, lon, km := locationCols(t.Location)
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE triggers SET type=?, template=?, char_limit_behaviour=?, match_patterns=?, contacts=?,
+		UPDATE triggers SET companion_id=?, type=?, template=?, char_limit_behaviour=?, match_patterns=?, contacts=?,
 			retry_timeout=?, max_retries=?, path_hash_size=?, schedule=?, url=?, failover_pattern=?, failover_timeout=?,
 			location_lat=?, location_lon=?, location_radius_km=?, location_regions=?, flood_scope=?
 		WHERE id=?`,
-		t.Type, t.Template, t.CharLimitBehaviour, encodeList(t.MatchPatterns), encodeList(t.Contacts),
+		t.CompanionID, t.Type, t.Template, t.CharLimitBehaviour, encodeList(t.MatchPatterns), encodeList(t.Contacts),
 		t.RetryTimeout, t.MaxRetries, t.PathHashSize, t.Schedule, t.URL, t.FailoverPattern, t.FailoverTimeout,
 		lat, lon, km, regionsCol(t.Regions), scopeOrInherit(t.FloodScope), t.ID); err != nil {
 		return fmt.Errorf("updating trigger: %w", err)
